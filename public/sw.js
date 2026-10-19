@@ -24,9 +24,11 @@ self.addEventListener('activate', (e) => {
 });
 
 // Réseau d'abord (version la plus récente), cache si hors-ligne ou réseau trop lent.
+// L'API de synchro (/api/) n'est jamais mise en cache.
 self.addEventListener('fetch', (e) => {
   const req = e.request;
-  if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
+  const url = new URL(req.url);
+  if (req.method !== 'GET' || url.origin !== self.location.origin || url.pathname.startsWith('/api/')) return;
   e.respondWith(networkFirst(req));
 });
 

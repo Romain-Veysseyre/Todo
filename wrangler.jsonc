@@ -1,8 +1,15 @@
-// Déploiement Cloudflare Workers : site statique servi depuis ./public (aucun code serveur).
+// Déploiement Cloudflare Workers : site statique servi depuis ./public,
+// plus une petite API de synchronisation (worker.js) qui stocke des données chiffrées dans KV.
 {
   "name": "todo",
+  "main": "worker.js",
   "compatibility_date": "2026-10-01",
   "assets": {
     "directory": "./public"
-  }
+  },
+  // Espace KV créé dans le tableau de bord Cloudflare (Stockage et bases de données › KV).
+  // L'ID n'est pas un secret : il ne donne accès à rien sans les identifiants du compte Cloudflare.
+  "kv_namespaces": [
+    { "binding": "SYNC", "id": "b4484e353bd94dd7a5cdd8639d233cd4" }
+  ]
 }

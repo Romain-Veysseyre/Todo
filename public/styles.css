@@ -288,6 +288,14 @@ dialog::backdrop { background: rgba(10, 10, 20, .45); }
 .steps { margin: 6px 0 0; padding-left: 20px; font-size: 14.5px; }
 .steps li { margin: 4px 0; }
 
+.sync-state { margin: 0 0 8px; font-size: 14.5px; font-weight: 600; color: var(--muted); }
+.sync-state.ok { color: var(--run); }
+.sync-state.err { color: var(--danger); }
+.code-box { display: flex; align-items: center; justify-content: space-between; gap: 12px; background: var(--card-2); border-radius: 13px; padding: 12px 14px; margin: 0 0 4px; }
+.code-box code, .ask-form input.code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 600; letter-spacing: .04em; }
+.code-box code { font-size: 16px; overflow-wrap: anywhere; user-select: all; }
+.code-box .link { padding: 6px 0; flex: none; }
+
 dialog.ask { border: 0; border-radius: 20px; padding: 0; width: min(92vw, 380px); background: var(--card); }
 .ask-form { padding: 20px; }
 .ask-form h3 { margin: 0 0 6px; font-size: 18px; }
