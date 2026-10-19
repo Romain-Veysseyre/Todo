@@ -1,0 +1,9 @@
+# Fichier Excel personnel : ne pas publier (dépôt public)
+*.xlsx
+*.xls
+
+node_modules/
+.wrangler/
+.claude/
+.DS_Store
+Thumbs.db

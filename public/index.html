@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Chrono Todo</title>
+  <meta name="description" content="Ta todo avec chronomètre par tâche, projets et sous-projets.">
+  <meta name="theme-color" content="#f4f4f8" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0e0e13" media="(prefers-color-scheme: dark)">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Chrono Todo">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/png" href="icons/favicon.png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body data-tab="tasks">
+  <header class="top">
+    <div class="topbar">
+      <h1 id="title">Tâches</h1>
+      <button class="icon-btn" type="button" data-action="open-settings" aria-label="Réglages">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.9" class="fill"/><circle cx="12" cy="12" r="1.9" class="fill"/><circle cx="19" cy="12" r="1.9" class="fill"/></svg>
+      </button>
+    </div>
+    <div id="banner" hidden></div>
+  </header>
+
+  <main id="view" class="wrap"></main>
+
+  <button class="fab" type="button" data-action="new-task" aria-label="Nouvelle tâche">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+  </button>
+
+  <nav class="tabbar" aria-label="Navigation">
+    <button type="button" data-action="tab" data-value="tasks">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 6h10M10 12h10M10 18h10M3.5 6l1.5 1.5L7.5 5M3.5 12l1.5 1.5 2.5-2.5M3.5 18l1.5 1.5 2.5-2.5"/></svg>
+      <span>Tâches</span>
+    </button>
+    <button type="button" data-action="tab" data-value="projects">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.6l2 2h7.4A2.5 2.5 0 0 1 21 9.5v7a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5z"/></svg>
+      <span>Projets</span>
+    </button>
+    <button type="button" data-action="tab" data-value="stats">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 20v-8M12 20V5M19 20v-5"/></svg>
+      <span>Stats</span>
+    </button>
+  </nav>
+
+  <dialog id="sheet" class="sheet"></dialog>
+  <dialog id="ask" class="ask"></dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <script src="app.js" defer></script>
+</body>
+</html>

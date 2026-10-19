@@ -1,0 +1,8 @@
+// Déploiement Cloudflare Workers : site statique servi depuis ./public (aucun code serveur).
+{
+  "name": "todo",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./public"
+  }
+}
