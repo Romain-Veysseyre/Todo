@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '1.5.0';
+const VERSION = '1.6.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -405,7 +405,9 @@ function render() {
   $('#title').textContent = openP ? openP.name : { tasks: 'Tâches', plan: 'Planning', projects: 'Projets', stats: 'Statistiques' }[tab];
   $$('.tabbar button').forEach((b) => b.classList.toggle('on', b.dataset.value === tab));
   renderBanner();
+  const sideScroll = $('.side-list')?.scrollTop || 0;
   $('#view').innerHTML = openP ? viewProject(openP) : tab === 'projects' ? viewProjects() : tab === 'stats' ? viewStats() : tab === 'plan' ? viewPlan() : viewTasks();
+  if (sideScroll && $('.side-list')) $('.side-list').scrollTop = sideScroll;
   tick();
 }
 
@@ -1815,14 +1817,41 @@ function viewPlan() {
   const tray = trayTasks(weekStart, weekEnd);
   const placing = getTask(temp.placing);
   const sideOpen = ui.planSide !== false;
+
+  // Catégories de la barre : ★ Favoris d'abord, puis Tout, puis chaque projet qui a des tâches à faire.
+  const starredN = tray.filter((x) => x.t.starred).length;
+  const cats = [];
+  if (starredN) cats.push({ key: 'star', label: '★ Favoris', n: starredN });
+  cats.push({ key: 'all', label: 'Tout', n: tray.length });
+  for (const pr of state.projects) {
+    const n = tray.filter((x) => x.t.projectId === pr.id).length;
+    if (n) cats.push({ key: pr.id, label: pr.name, color: pr.color, n });
+  }
+  const noneN = tray.filter((x) => !getProject(x.t.projectId)).length;
+  if (noneN) cats.push({ key: 'none', label: 'Sans projet', n: noneN });
+  const cat = cats.some((c) => c.key === ui.sideCat) ? ui.sideCat : starredN ? 'star' : 'all';
+  const projCat = cat !== 'star' && cat !== 'all' ? cats.find((c) => c.key === cat) : null;
+  const inCat = ({ t }) => (cat === 'all' ? true : cat === 'star' ? t.starred : cat === 'none' ? !getProject(t.projectId) : t.projectId === cat);
+  const list = tray.filter(inCat);
+
+  const row = ({ t, planned }) => `<button type="button" class="side-row${planned ? ' planned' : ''}${temp.placing === t.id ? ' on' : ''}" data-action="pick-tray" data-drag-task="${t.id}" style="--c:${colorOf(t.projectId)}" title="${esc(t.title)} · ${esc(pathLabel(t.projectId, t.subprojectId))}">
+      <i class="side-dot"></i><span class="side-row-title">${esc(t.title)}</span>
+      ${t.starred && cat !== 'star' ? `<span class="side-star">${ICON.star}</span>` : ''}${planned ? '<em title="Déjà planifiée cette semaine">✓</em>' : ''}</button>`;
+
   const side = `<aside class="side${sideOpen ? ' open' : ''}" aria-label="Tâches à planifier">
       <div class="side-head"><b>À planifier</b><small>${tray.length}</small>
         <button type="button" class="icon-btn side-close" data-action="side-toggle" aria-label="Masquer la liste">${ICON.right}</button></div>
-      ${tray.length ? `<p class="side-hint">Glisse une tâche dans le planning, ou touche-la puis touche un créneau.</p>
-      <div class="side-list">${tray.map(({ t, planned }) => `<button type="button" class="side-task${planned ? ' planned' : ''}${temp.placing === t.id ? ' on' : ''}" data-action="pick-tray" data-drag-task="${t.id}" style="--c:${colorOf(t.projectId)}">
-        <span class="side-title">${t.starred ? ICON.star : ''}${esc(t.title)}</span>
-        <small>${planned ? '✓ déjà planifiée' : esc(getProject(t.projectId)?.name || 'Sans projet')}</small></button>`).join('')}</div>`
-        : '<p class="side-hint">Aucune tâche à faire. Ajoute-en dans l’onglet Tâches.</p>'}
+      ${tray.length ? `<div class="side-cats">
+        ${cats.filter((c) => c.key === 'star' || c.key === 'all').map((c) => `<button type="button" class="side-cat${c.key === cat ? ' on' : ''}" data-action="side-cat" data-value="${c.key}">${esc(c.label)}<small>${c.n}</small></button>`).join('')}
+        <label class="side-cat side-proj${projCat ? ' on' : ''}"${projCat?.color ? ` style="--c:${projCat.color}"` : ''}>${projCat?.color ? '<i></i>' : ''}
+          <select data-change="side-cat" aria-label="Choisir un projet">
+            <option value=""${projCat ? '' : ' selected'}>Projet…</option>
+            ${cats.filter((c) => c.key !== 'star' && c.key !== 'all').map((c) => `<option value="${c.key}"${c.key === cat ? ' selected' : ''}>${esc(c.label)} (${c.n})</option>`).join('')}
+          </select></label>
+      </div>
+      <div class="side-list">${list.map(row).join('')}</div>
+      <p class="side-hint">Glisse une tâche dans le planning, ou touche-la puis touche un créneau.</p>`
+        : '<p class="side-empty">Aucune tâche à faire. Ajoute-en dans l’onglet Tâches.</p>'}
     </aside>`;
   const floating = placing
     ? `<div class="place-bar"><span>Touche un créneau pour placer <b>« ${esc(placing.title)} »</b></span><button type="button" class="btn small" data-action="cancel-placing">Annuler</button></div>`
@@ -1833,14 +1862,13 @@ function viewPlan() {
         <button type="button" class="${isDay ? '' : 'on'}" data-action="plan-view" data-value="week">Semaine</button>
         <button type="button" class="${isDay ? 'on' : ''}" data-action="plan-view" data-value="day">Jour</button>
       </div>
-      <button type="button" class="btn small" data-action="new-event">${ICON.plus} Événement</button>
+      <div class="plan-nav">
+        <button type="button" class="icon-btn" data-action="plan-move" data-value="-1" aria-label="Précédent">${ICON.left}</button>
+        <button type="button" class="plan-range" data-action="plan-today">${range}</button>
+        <button type="button" class="icon-btn" data-action="plan-move" data-value="1" aria-label="Suivant">${ICON.right}</button>
+      </div>
+      <button type="button" class="btn small plan-ev" data-action="new-event" title="Horaires fixes : travail, cours, sport…">${ICON.plus} Événement</button>
     </div>
-    <div class="plan-nav">
-      <button type="button" class="icon-btn" data-action="plan-move" data-value="-1" aria-label="Précédent">${ICON.left}</button>
-      <button type="button" class="plan-range" data-action="plan-today">${range}</button>
-      <button type="button" class="icon-btn" data-action="plan-move" data-value="1" aria-label="Suivant">${ICON.right}</button>
-    </div>
-    ${state.events.length ? '' : '<p class="hint plan-hint">Astuce : ajoute tes horaires fixes (travail, cours…) avec <b>+ Événement</b>, puis cale tes tâches autour.</p>'}
     <div class="plan-layout">
     <div class="cal${isDay ? ' is-day' : ''}">
       <div class="cal-head"><div class="cal-gutter"></div><div class="cal-days" style="--n:7">${heads}</div></div>
@@ -2159,6 +2187,14 @@ sheet.addEventListener('change', (e) => {
   if (form) commitPlanForm(form);
 });
 
+// Choix d'un projet dans la barre « À planifier ».
+document.addEventListener('change', (e) => {
+  if (e.target.dataset.change !== 'side-cat') return;
+  state.ui.sideCat = e.target.value || 'all';
+  writeLocal(); render();
+  $('.side-list')?.scrollTo(0, 0);
+});
+
 // Toucher un créneau, un bloc ou un événement pendant qu'une tâche est « en main » : on la place là.
 function placeHere(el, e) {
   const col = el.closest('.cal-col');
@@ -2208,6 +2244,7 @@ const actions = {
     render();
   },
   'side-toggle'() { state.ui.planSide = state.ui.planSide === false; writeLocal(); render(); },
+  'side-cat'(el) { state.ui.sideCat = el.dataset.value; writeLocal(); render(); $('.side-list')?.scrollTo(0, 0); },
   'cancel-placing'() { temp.placing = null; document.body.classList.remove('placing'); render(); },
   slot(el, e) {
     if (placeHere(el, e)) return;
