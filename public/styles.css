@@ -436,6 +436,14 @@ body[data-tab="plan"] { padding-bottom: calc(var(--tabbar-h) + env(safe-area-ins
 .cal-body { display: flex; }
 .cal { --hour: 46px; }
 .cal.is-day { --hour: 60px; }
+/* gestes : la grille gère le pincement et le balayage horizontal (le défilement vertical reste normal) */
+.cal { touch-action: pan-y; }
+.cal-cols, .cal-days { transition: transform .2s ease; }
+.cal.swiping .cal-cols, .cal.swiping .cal-days { transition: none; }
+@keyframes from-left { from { transform: translateX(-42px); } }
+@keyframes from-right { from { transform: translateX(42px); } }
+.cal.slide-from-left .cal-cols, .cal.slide-from-left .cal-days { animation: from-left .22s ease-out; }
+.cal.slide-from-right .cal-cols, .cal.slide-from-right .cal-days { animation: from-right .22s ease-out; }
 .cal-hours { position: relative; height: calc(18 * var(--hour)); } /* de 6h à 24h */
 .cal-hours span { position: absolute; right: 5px; transform: translateY(-50%); font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .cal-col {

@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '1.8.0';
+const VERSION = '1.9.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -1885,6 +1885,9 @@ function viewPlan() {
 
   const tray = trayTasks(weekStart, weekEnd);
   const placing = getTask(temp.placing);
+  const zoom = ui[isDay ? 'zoomDay' : 'zoomWeek'];
+  const slide = temp.slideFrom;
+  temp.slideFrom = null;
   const dockOpen = !!ui.dockOpen; // téléphone : bandeau du bas agrandi
 
   // Catégories de la barre : ★ Favoris d'abord, puis Tout, puis chaque projet qui a des tâches à faire.
@@ -1953,7 +1956,7 @@ function viewPlan() {
       <button type="button" class="btn small plan-ev" data-action="new-event" title="Horaires fixes : travail, cours, sport…">${ICON.plus} Événement</button>
     </div>
     <div class="plan-layout">
-    <div class="cal${isDay ? ' is-day' : ''}">
+    <div class="cal${isDay ? ' is-day' : ''}${slide ? ` slide-from-${slide}` : ''}"${zoom ? ` style="--hour:${zoom}px"` : ''}>
       <div class="cal-head"><div class="cal-gutter"></div><div class="cal-days" style="--n:7">${heads}</div></div>
       <div class="cal-body">
         <div class="cal-hours">${[...Array(17)].map((_, i) => `<span style="top:${posPct((i + 7) * 60)}%">${i + 7}h</span>`).join('')}</div>
@@ -2005,6 +2008,128 @@ function closeSideOnPhone() {
   writeLocal();
   $('.side')?.classList.remove('open');
 }
+
+/* ----- Gestes sur la grille : balayer pour changer de semaine, pincer pour zoomer les heures ----- */
+
+const HOUR_MIN = 24;   // hauteur d'une heure (px) : dézoom maximal…
+const HOUR_MAX = 160;  // … et zoom maximal
+const gest = { mode: null };
+const zoomKey = () => (state.ui.planView === 'day' ? 'zoomDay' : 'zoomWeek');
+const hourPx = () => parseFloat(getComputedStyle($('.cal')).getPropertyValue('--hour')) || 46;
+
+// Semaine (ou jour) suivante / précédente. « from » : côté d'où arrive le nouveau contenu.
+function changePeriod(step, from) {
+  const d = parseYmd(state.ui.planDate || ymd(new Date()));
+  const days = (state.ui.planView === 'day' ? 1 : 7) * step;
+  state.ui.planDate = ymd(new Date(d.getFullYear(), d.getMonth(), d.getDate() + days));
+  temp.slideFrom = from;
+  writeLocal(); render(); buzz();
+}
+
+// Change la hauteur des heures en gardant sous les doigts (ou la souris) la même heure.
+function setHour(px, focalY) {
+  const cal = $('.cal');
+  const col = $('.cal-col');
+  if (!cal || !col) return;
+  const r = col.getBoundingClientRect();
+  const m = VIEW_START + ((focalY - r.top) / r.height) * VIEW_SPAN;
+  const topPage = r.top + scrollY;
+  const h = Math.max(HOUR_MIN, Math.min(HOUR_MAX, px));
+  cal.style.setProperty('--hour', `${h}px`);
+  state.ui[zoomKey()] = Math.round(h);
+  window.scrollTo(0, topPage + ((m - VIEW_START) / VIEW_SPAN) * (18 * h) - focalY);
+}
+
+function swipeShift(dx) {
+  for (const el of $$('.cal-cols, .cal-days')) el.style.transform = dx ? `translateX(${dx}px)` : '';
+  $('.cal')?.classList.toggle('swiping', !!dx);
+}
+
+document.addEventListener('touchstart', (e) => {
+  if (state.ui.tab !== 'plan' || !profile || drag.active) return;
+  const onCal = !!e.target.closest('.cal');
+  if (e.touches.length === 2 && (onCal || gest.mode)) {
+    const [a, b] = e.touches;
+    cancelPending();
+    swipeShift(0);
+    Object.assign(gest, { mode: 'pinch', d0: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), h0: hourPx() });
+    return;
+  }
+  if (e.touches.length === 1 && onCal) {
+    Object.assign(gest, { mode: 'swipe', x0: e.touches[0].clientX, y0: e.touches[0].clientY, lock: null, dx: 0 });
+  } else if (e.touches.length === 1) gest.mode = null;
+}, { passive: true });
+
+document.addEventListener('touchmove', (e) => {
+  if (!gest.mode || state.ui.tab !== 'plan') return;
+  if (drag.active) { gest.mode = null; swipeShift(0); return; }
+  if (gest.mode === 'pinch' && e.touches.length === 2) {
+    e.preventDefault(); // la page ne zoome pas : seule la grille change
+    const [a, b] = e.touches;
+    setHour(gest.h0 * (Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) / gest.d0), (a.clientY + b.clientY) / 2);
+    return;
+  }
+  if (gest.mode === 'swipe' && e.touches.length === 1) {
+    const dx = e.touches[0].clientX - gest.x0;
+    const dy = e.touches[0].clientY - gest.y0;
+    if (!gest.lock) {
+      if (Math.abs(dx) > 12 && Math.abs(dx) > Math.abs(dy) * 1.3) gest.lock = 'x';
+      else if (Math.abs(dy) > 12) { gest.mode = null; return; } // défilement vertical normal
+    }
+    if (gest.lock === 'x') {
+      e.preventDefault();
+      cancelPending();
+      gest.dx = dx;
+      swipeShift(dx * 0.45);
+    }
+  }
+}, { passive: false });
+
+document.addEventListener('touchend', (e) => {
+  if (gest.mode === 'pinch') {
+    if (e.touches.length < 2) { gest.mode = null; writeLocal(); }
+    return;
+  }
+  if (gest.mode === 'swipe' && gest.lock === 'x') {
+    const { dx } = gest;
+    gest.mode = null;
+    swipeShift(0);
+    // Balayer vers la droite → semaine suivante ; vers la gauche → semaine précédente.
+    if (Math.abs(dx) > 60) changePeriod(dx > 0 ? 1 : -1, dx > 0 ? 'left' : 'right');
+    return;
+  }
+  gest.mode = null;
+}, { passive: true });
+document.addEventListener('touchcancel', () => { gest.mode = null; swipeShift(0); });
+
+// iPhone : bloque le zoom de toute la page quand on pince le planning.
+for (const ev of ['gesturestart', 'gesturechange']) {
+  document.addEventListener(ev, (e) => { if (state.ui.tab === 'plan' && profile) e.preventDefault(); }, { passive: false });
+}
+
+// Ordinateur : pincer sur le pavé tactile (ou Ctrl + molette) zoome la grille ;
+// glisser à deux doigts sur le côté change de semaine.
+document.addEventListener('wheel', (e) => {
+  if (state.ui.tab !== 'plan' || !profile || !e.target.closest('.cal')) return;
+  if (e.ctrlKey) {
+    e.preventDefault();
+    setHour(hourPx() * Math.exp(-e.deltaY * 0.01), e.clientY);
+    clearTimeout(gest.wsave);
+    gest.wsave = setTimeout(writeLocal, 300);
+    return;
+  }
+  if (Math.abs(e.deltaX) > Math.abs(e.deltaY) * 1.5) {
+    e.preventDefault();
+    gest.wx = (gest.wx || 0) + e.deltaX;
+    clearTimeout(gest.wreset);
+    gest.wreset = setTimeout(() => { gest.wx = 0; }, 250);
+    if (Math.abs(gest.wx) > 120 && !(gest.wcool > Date.now())) {
+      changePeriod(gest.wx > 0 ? 1 : -1, gest.wx > 0 ? 'right' : 'left');
+      gest.wx = 0;
+      gest.wcool = Date.now() + 700;
+    }
+  }
+}, { passive: false });
 
 // Poignée du bandeau : glisser vers le haut pour l'agrandir, vers le bas pour le réduire.
 document.addEventListener('pointerdown', (e) => { if (e.target.closest('.dock-grab')) temp.grabY = e.clientY; });
@@ -2477,10 +2602,8 @@ const actions = {
     writeLocal(); render();
   },
   'plan-move'(el) {
-    const d = parseYmd(state.ui.planDate || ymd(new Date()));
-    const step = (state.ui.planView === 'day' ? 1 : 7) * Number(el.dataset.value);
-    state.ui.planDate = ymd(new Date(d.getFullYear(), d.getMonth(), d.getDate() + step));
-    writeLocal(); render();
+    const step = Number(el.dataset.value);
+    changePeriod(step, step > 0 ? 'right' : 'left');
   },
   'plan-today'() { state.ui.planDate = ymd(new Date()); writeLocal(); render(); scrollPlanToHour(); },
   'pick-tray'(el) {
