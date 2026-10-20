@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '1.7.1';
+const VERSION = '1.7.2';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -1302,6 +1302,7 @@ function newCode() {
 }
 
 const fmtCode = (c) => c.match(/.{1,4}/g).join('-');
+const maskCode = (c) => `${c.slice(0, 4)}-••••-••••-••••-${c.slice(-4)}`; // début et fin visibles pour comparer
 
 function readCode(input) {
   const c = String(input || '').toUpperCase().replace(/[\s-]/g, '');
@@ -1577,13 +1578,18 @@ async function enableSync() {
 
 async function joinSync() {
   if (!crypto.subtle) { toast('Synchro possible uniquement sur la version en ligne (https)'); return; }
+  const switching = !!syncConf.code;
   const input = await ask({
-    title: 'Code de synchro', text: 'Saisis le code affiché sur ton autre appareil (Réglages › Synchronisation).',
+    title: switching ? 'Code de l’autre appareil' : 'Code de synchro',
+    text: switching
+      ? 'Saisis le code affiché sur ton autre appareil. Les données de cet appareil seront regroupées avec les siennes, et les deux utiliseront ce code.'
+      : 'Saisis le code affiché sur ton autre appareil (Réglages › Synchronisation).',
     input: true, placeholder: 'XXXX-XXXX-XXXX-XXXX-XXXX', ok: 'Valider', code: true,
   });
   if (!input) return;
   const code = readCode(input);
   if (!code) { toast(`Code incomplet ou mal saisi (${CODE_LEN} caractères)`); return; }
+  if (code === syncConf.code) { toast('C’est déjà le code de cet appareil ✓'); return; }
 
   let remote = null;
   let rev = '';
@@ -1610,7 +1616,8 @@ async function joinSync() {
     // Rien encore pour ce profil : on envoie simplement ses données actuelles.
     syncConf = { code, last: 0, error: '' };
     saveSyncConf();
-    Object.assign(state.ui, { syncRev: '', syncDirty: true, pristine: false });
+    resetOtherProfiles();
+    Object.assign(state.ui, { syncRev: '', syncFmt: 0, syncDirty: true, pristine: false });
     writeLocal();
     refreshSyncUi();
     toast('Synchro activée ✓');
@@ -1634,14 +1641,28 @@ async function joinSync() {
   }
   mergeRemote(remote);
   snapshot();
-  Object.assign(state.ui, { syncRev: rev, syncDirty: !fresh, pristine: false });
+  Object.assign(state.ui, { syncRev: rev, syncFmt: 0, syncDirty: !fresh, pristine: false });
   writeLocal();
   syncConf = { code, last: now(), error: '' };
   saveSyncConf();
+  resetOtherProfiles();
   render();
   refreshSyncUi();
   toast('Synchro activée ✓');
   if (!fresh) syncNow();
+}
+
+// Nouveau code : l'autre profil de cet appareil repartira de zéro avec ce code à sa prochaine ouverture
+// (première fusion sans doublons ; projets de départ jamais utilisés remplacés par ceux de l'autre appareil).
+function resetOtherProfiles() {
+  for (const pr of PROFILES) {
+    if (pr.id === profile) continue;
+    const st = peek(pr.id);
+    if (!st) continue;
+    const unused = !st.tasks.length && !st.sessions.length;
+    Object.assign(st.ui, { syncRev: '', syncFmt: 0, syncDirty: true, pristine: unused || st.ui.pristine });
+    try { localStorage.setItem(storeKey(pr.id), JSON.stringify(st)); } catch (e) { /* plein */ }
+  }
 }
 
 async function disableSync() {
@@ -1684,11 +1705,12 @@ function syncSection() {
   const [cls, text] = syncStatus();
   return `<p class="sync-state ${cls}">${esc(text)}</p>
     <div class="code-box">
-      <code>${temp.showCode ? fmtCode(syncConf.code) : fmtCode('•'.repeat(CODE_LEN))}</code>
+      <code>${temp.showCode ? fmtCode(syncConf.code) : maskCode(syncConf.code)}</code>
       <button type="button" class="link" data-action="sync-reveal">${temp.showCode ? 'Masquer' : 'Afficher'}</button>
     </div>
-    <p class="hint">Sur ton autre appareil : <b>Réglages › Synchronisation › J’ai déjà un code</b>, puis saisis ce code. Garde-le pour toi : il donne accès à tes données.</p>
+    <p class="hint">Tous vos appareils doivent avoir <b>le même code</b> (compare le début et la fin). Si ton autre appareil affiche un code différent, touche <b>Utiliser le code d’un autre appareil</b> sur l’un des deux et saisis le code de l’autre. Garde-le pour toi : il donne accès à vos données.</p>
     <button type="button" class="btn wide" data-action="sync-copy">Copier le code</button>
+    <button type="button" class="btn wide" data-action="sync-join">Utiliser le code d’un autre appareil</button>
     <button type="button" class="btn wide" data-action="sync-now">Synchroniser maintenant</button>
     <button type="button" class="btn wide ghost danger" data-action="sync-off">Désactiver sur cet appareil</button>`;
 }
@@ -1710,6 +1732,7 @@ function syncBadge() {
   else if (syncConf.error) st = ['err', `Problème de synchro : ${syncConf.error}`];
   else if (state.ui.syncDirty) st = ['pending', 'Modifications en attente d’envoi'];
   else st = ['ok', syncConf.last ? `Synchronisé ${ago(syncConf.last)}` : 'Synchronisé'];
+  if (syncConf.code) st[1] += ` · code ${syncConf.code.slice(0, 4)}…${syncConf.code.slice(-4)}`;
   el.className = `sync-dot ${st[0]}`;
   el.title = st[1];
   el.setAttribute('aria-label', st[1]);
