@@ -46,7 +46,7 @@
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body { margin: 0; }
 body {
-  font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+  font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji";
   background: var(--bg);
   color: var(--text);
   min-height: 100dvh;
@@ -534,8 +534,6 @@ body.is-dragging, body.is-dragging * { cursor: grabbing !important; }
   .side.open { transform: none; }
   body.is-dragging .side { transform: translateX(105%); }
   /* catégories sur une ligne qui défile au doigt */
-  .side-cats { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
-  .side-cats::-webkit-scrollbar { display: none; }
   .side-row { min-height: 42px; font-size: 14.5px; }
 }
 
@@ -544,7 +542,7 @@ body.is-dragging, body.is-dragging * { cursor: grabbing !important; }
   body[data-tab="plan"] .wrap { max-width: none; padding: 0 18px; }
   .plan-layout .cal { margin: 0; }
   .side {
-    position: sticky; top: calc(var(--top-h, 60px) + 6px); width: clamp(250px, 21vw, 330px); flex: none;
+    position: sticky; top: calc(var(--top-h, 60px) + 6px); width: clamp(280px, 24vw, 360px); flex: none;
     max-height: calc(100dvh - var(--top-h, 60px) - var(--tabbar-h) - 22px);
     background: var(--card-2); border: 1px solid var(--line); border-radius: var(--radius);
   }
@@ -631,17 +629,59 @@ body.drag-move.drop-hover .drop-remove { background: var(--late); color: #fff; }
 form[data-form="event"]:has(input[value="once"]:checked) .when-weekly,
 form[data-form="event"]:has(input[value="weekly"]:checked) .when-once { display: none; }
 
-/* Catégories sur une ligne : ★ Favoris · Tout · [Projet ▾] */
+/* Catégories sur une ligne : ★ Favoris · Tout · [Projets ▾] */
 .side-cats { flex-wrap: nowrap; }
-.side-proj { position: relative; flex: 1; min-width: 0; padding-right: 22px; }
-.side-proj select {
-  appearance: none; -webkit-appearance: none; border: 0; background: transparent; color: inherit; font: inherit;
-  width: 100%; min-width: 0; padding: 0; cursor: pointer; outline: none; text-overflow: ellipsis;
+.proj-pick { position: relative; flex: 1; min-width: 0; display: flex; }
+.side-proj { width: 100%; }
+.side-proj span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: left; }
+.side-proj svg { width: 15px; height: 15px; flex: none; margin-right: -2px; transition: transform .2s; }
+.side-proj.open svg { transform: rotate(180deg); }
+.proj-menu {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 40; width: max(100%, 236px); max-height: min(55vh, 380px);
+  overflow-y: auto; padding: 6px; background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+  box-shadow: 0 16px 40px rgba(15, 15, 30, .2); animation: menu-in .14s ease-out;
 }
-.side-proj::after {
-  content: ""; position: absolute; right: 9px; top: 50%; width: 6px; height: 6px; margin-top: -5px;
-  border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(45deg); opacity: .7; pointer-events: none;
-}
-.side-proj select option { color: var(--text); background: var(--card); }
+@keyframes menu-in { from { transform: translateY(-6px) scale(.98); } }
+.proj-opt { width: 100%; display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 10px; font-size: 14px; font-weight: 600; text-align: left; }
+.proj-opt:hover { background: var(--card-2); }
+.proj-opt i { width: 10px; height: 10px; border-radius: 50%; background: var(--c); flex: none; }
+.proj-opt span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proj-opt small { min-width: 24px; padding: 1px 7px; border-radius: 999px; background: var(--card-2); color: var(--muted); font-size: 12px; font-weight: 700; text-align: center; }
+.proj-opt.on { background: color-mix(in srgb, var(--c) 14%, var(--card)); }
+.proj-opt.on small { background: var(--c); color: #fff; }
 .side-empty { margin: 4px 14px 14px; color: var(--muted); font-size: 14px; }
 @media (min-width: 760px) { .side-hint { display: none; } }
+@media (max-width: 759px) { .side-cats { overflow: visible; } }
+
+/* ---------- Ordre des projets (poignée ⋮⋮) ---------- */
+.proj-list { overflow: visible; }
+.proj-item { position: relative; display: flex; align-items: stretch; border-bottom: 1px solid var(--line); background: var(--card); transition: transform .18s ease; }
+.proj-item:first-child { border-radius: var(--radius) var(--radius) 0 0; }
+.proj-item:last-child { border-bottom: 0; border-radius: 0 0 var(--radius) var(--radius); }
+.proj-item:only-child { border-radius: var(--radius); }
+.proj-item .proj-row { padding-left: 2px; background: transparent; }
+.proj-grip { width: 40px; flex: none; display: grid; place-items: center; color: color-mix(in srgb, var(--muted) 65%, transparent); cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; }
+.proj-grip svg { width: 18px; height: 18px; }
+.proj-grip:hover { color: var(--text); }
+.proj-item.sorting { z-index: 5; transition: none; border-radius: 14px; box-shadow: 0 14px 34px rgba(15, 15, 30, .24); }
+body.is-sorting, body.is-sorting * { cursor: grabbing !important; user-select: none; -webkit-user-select: none; }
+
+/* ---------- Emojis dans les noms ---------- */
+.emoji-field { position: relative; display: flex; align-items: center; width: 100%; }
+.emoji-field input { width: 100%; padding-right: 46px !important; }
+.emoji-btn { position: absolute; right: 5px; top: 50%; transform: translateY(-50%); width: 38px; height: 38px; border-radius: 10px; display: grid; place-items: center; color: var(--muted); }
+.emoji-btn:hover { background: var(--line); color: var(--text); }
+.emoji-btn svg { width: 22px; height: 22px; }
+.emoji-panel { margin: 6px 0 12px; padding: 8px; border-radius: 14px; background: var(--card-2); border: 1px solid var(--line); animation: menu-in .14s ease-out; }
+.emoji-top { display: flex; gap: 6px; align-items: center; }
+.emoji-panel .emoji-search { flex: 1; min-width: 0; min-height: 40px; padding: 8px 12px; border-radius: 10px; border: 1.5px solid var(--line); background: var(--card); font-size: 16px; outline: none; }
+.emoji-panel .emoji-search:focus { border-color: var(--accent); }
+.emoji-tabs { display: flex; gap: 2px; margin: 6px 0 4px; overflow-x: auto; scrollbar-width: none; }
+.emoji-tabs::-webkit-scrollbar { display: none; }
+.emoji-tabs button { flex: none; width: 40px; height: 34px; border-radius: 9px; font-size: 19px; opacity: .55; }
+.emoji-tabs button:hover { opacity: .85; }
+.emoji-tabs button.on { background: var(--card); opacity: 1; box-shadow: 0 1px 3px rgba(20, 20, 40, .12); }
+.emoji-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(42px, 1fr)); gap: 2px; max-height: 180px; overflow-y: auto; overscroll-behavior: contain; }
+.emoji-grid button { height: 42px; border-radius: 10px; font-size: 24px; line-height: 1; }
+.emoji-grid button:hover { background: var(--card); transform: scale(1.12); }
+.emoji-none { grid-column: 1 / -1; margin: 10px; color: var(--muted); font-size: 14px; text-align: center; }

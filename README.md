@@ -15,6 +15,8 @@ Todo avec chronomètre par tâche, projets et sous-projets. Application web inst
 - **Tâches prioritaires** : l’étoile ★ fait passer une tâche en tête de liste.
 - **Planning** (vue semaine ou jour, de 6h à 24h) : les tâches à placer sont dans une barre à droite (fixe sur ordinateur, volet qui s’efface pendant le glisser sur téléphone). Glisser-déposer dans la grille (appui long puis glisser au doigt), ou toucher une tâche puis un créneau, ou toucher un créneau vide puis choisir la tâche. Les blocs se déplacent, s’allongent (bord du bas) et se retirent en les déposant sur la zone « retirer ». Événements fixes récurrents (travail, cours…) affichés en fond pour caler les tâches autour.
 - **Page projet** : tâches rangées par sous-projet, ajout direct, transformation d’un projet en sous-projet.
+- **Ordre des projets** : glisser la poignée ⋮⋮ dans l’onglet Projets (ordre synchronisé).
+- **Emojis** dans les noms (tâches, projets, sous-projets, événements) : bouton 🙂 avec recherche en français, thèmes et récents.
 
 Les données sont enregistrées sur l’appareil (localStorage). Sans synchro, rien n’est envoyé sur internet.
 

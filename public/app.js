@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '1.6.0';
+const VERSION = '1.7.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -43,6 +43,9 @@ const ICON = {
   right: svg('<path d="M9 5l7 7-7 7"/>'),
   star: svg('<path d="M12 3.6l2.55 5.2 5.7.83-4.13 4.02.98 5.68L12 16.65l-5.1 2.68.98-5.68L3.75 9.63l5.7-.83z"/>'),
   cal: svg('<rect x="3.5" y="5" width="17" height="15" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/>'),
+  smile: svg('<circle cx="12" cy="12" r="8.6"/><path d="M8.6 14.2a4.3 4.3 0 0 0 6.8 0"/><circle cx="9.3" cy="10" r=".9" class="fill"/><circle cx="14.7" cy="10" r=".9" class="fill"/>'),
+  grip: svg('<circle cx="9" cy="6.5" r="1.6"/><circle cx="15" cy="6.5" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="17.5" r="1.6"/><circle cx="15" cy="17.5" r="1.6"/>', 'fill'),
+  down: svg('<path d="M6 9l6 6 6-6"/>'),
   list: svg('<path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1.2"/><circle cx="4.5" cy="12" r="1.2"/><circle cx="4.5" cy="18" r="1.2"/>'),
 };
 
@@ -205,6 +208,7 @@ function addProject(name, color) {
   const p = {
     id: uid(), name, archived: false, createdAt: now(),
     color: color || COLORS.find((c) => !used.has(c)) || COLORS[state.projects.length % COLORS.length],
+    order: Math.max(-1, ...state.projects.map((x, i) => x.order ?? i)) + 1,
   };
   state.projects.push(p);
   return p;
@@ -387,8 +391,15 @@ async function leaveProfile() {
   }
 }
 
+// Les projets suivent l'ordre choisi par glisser-déposer (champ « order », synchronisé).
+function sortProjects() {
+  const idx = new Map(state.projects.map((x, i) => [x.id, i]));
+  state.projects.sort((a, b) => (a.order ?? idx.get(a.id)) - (b.order ?? idx.get(b.id)));
+}
+
 function render() {
   if (!profile) { renderProfiles(); return; }
+  sortProjects();
   document.body.dataset.screen = 'app';
   $('#profiles').hidden = true;
   const me = getProfile(profile);
@@ -576,19 +587,22 @@ function viewProjects() {
     const subs = subsOf(p.id).map((s) => s.name).join(' · ');
     const n = openCount.get(p.id) || 0;
     const total = totals.get(p.id) || 0;
-    return `<button type="button" class="proj-row" data-action="open-project" data-id="${p.id}" style="--c:${p.color}">
-      <span class="dot"></span>
-      <span class="proj-name">${esc(p.name)}<small>${esc(subs || 'Aucun sous-projet')}</small></span>
-      <span class="proj-stats"><b>${total ? fmtDur(total) : '—'}</b><small>${n ? `${n} à faire` : 'rien à faire'}</small></span>
-    </button>`;
+    return `<div class="proj-item" data-id="${p.id}" style="--c:${p.color}">
+      <span class="proj-grip" title="Glisser pour changer l’ordre" aria-label="Déplacer ${esc(p.name)}">${ICON.grip}</span>
+      <button type="button" class="proj-row" data-action="open-project" data-id="${p.id}">
+        <span class="dot"></span>
+        <span class="proj-name">${esc(p.name)}<small>${esc(subs || 'Aucun sous-projet')}</small></span>
+        <span class="proj-stats"><b>${total ? fmtDur(total) : '—'}</b><small>${n ? `${n} à faire` : 'rien à faire'}</small></span>
+      </button>
+    </div>`;
   };
   const active = state.projects.filter((p) => !p.archived);
   const archived = state.projects.filter((p) => p.archived);
   return `<div class="stack-gap">
-    ${active.length ? `<div class="card">${active.map(row).join('')}</div>` : '<div class="empty"><b>Aucun projet</b>Crée un projet pour classer tes tâches.</div>'}
+    ${active.length ? `<div class="card proj-list">${active.map(row).join('')}</div>` : '<div class="empty"><b>Aucun projet</b>Crée un projet pour classer tes tâches.</div>'}
     <button type="button" class="btn primary wide" data-action="new-project">${ICON.plus} Nouveau projet</button>
-    ${archived.length ? `<div class="section-title">Archivés</div><div class="card">${archived.map(row).join('')}</div>` : ''}
-    <p class="hint center">Touche un projet pour voir ses tâches et en ajouter.</p>
+    ${archived.length ? `<div class="section-title">Archivés</div><div class="card proj-list">${archived.map(row).join('')}</div>` : ''}
+    <p class="hint center">Touche un projet pour voir ses tâches. Glisse la poignée ⋮⋮ pour changer l’ordre.</p>
   </div>`;
 }
 
@@ -858,11 +872,11 @@ window.addEventListener('popstate', () => {
 });
 sheet.addEventListener('click', (e) => { if (e.target === sheet) closeSheet(); });
 
-function ask({ title, text = '', input = false, value = '', placeholder = '', ok = 'OK', danger = false, code = false }) {
+function ask({ title, text = '', input = false, value = '', placeholder = '', ok = 'OK', danger = false, code = false, emoji = false }) {
   const d = $('#ask');
   d.innerHTML = `<form class="ask-form">
     <h3>${esc(title)}</h3>${text ? `<p>${esc(text)}</p>` : ''}
-    ${input ? `<input name="v" value="${esc(value)}" placeholder="${esc(placeholder)}" maxlength="60" autocomplete="off" autofocus enterkeyhint="done"${code ? ' class="code" autocapitalize="characters" autocorrect="off" spellcheck="false"' : ''}>` : ''}
+    ${input ? (emoji ? emojiField : (h) => h)(`<input name="v" value="${esc(value)}" placeholder="${esc(placeholder)}" maxlength="60" autocomplete="off" autofocus enterkeyhint="done"${code ? ' class="code" autocapitalize="characters" autocorrect="off" spellcheck="false"' : ''}>`) : ''}
     <div class="ask-actions"><button type="button" class="btn ghost" data-ask="cancel">Annuler</button><button class="btn ${danger ? 'danger solid' : 'primary'}">${esc(ok)}</button></div>
   </form>`;
   return new Promise((resolve) => {
@@ -941,7 +955,7 @@ function openTaskSheet(id, preset) {
 
   openSheet(`<form class="sheet-body" data-form="task" data-id="${id || ''}" data-pp="${t.projectId || ''}" autocomplete="off">
     ${head(isNew ? 'Nouvelle tâche' : 'Tâche')}
-    <label class="field"><span>Tâche</span><input class="big" name="title" value="${esc(t.title)}" placeholder="Ex. Préparer le cours S2" maxlength="200" required enterkeyhint="done"${isNew ? ' autofocus' : ''}></label>
+    <label class="field"><span>Tâche</span>${emojiField(`<input class="big" name="title" value="${esc(t.title)}" placeholder="Ex. Préparer le cours S2" maxlength="200" required enterkeyhint="done"${isNew ? ' autofocus' : ''}>`)}</label>
     <label class="toggle star-toggle"><input type="checkbox" name="starred"${t.starred ? ' checked' : ''}> ${ICON.star} Prioritaire (affichée en premier)</label>
     <div class="row2">
       <label class="field"><span>Projet</span><select name="projectId">${projectOptions(t.projectId)}</select></label>
@@ -1003,7 +1017,7 @@ sheet.addEventListener('change', async (e) => {
   const ss = form.elements.subprojectId;
   if (e.target === ps) {
     if (ps.value === '__new') {
-      const name = await ask({ title: 'Nouveau projet', input: true, placeholder: 'Nom du projet', ok: 'Créer' });
+      const name = await ask({ title: 'Nouveau projet', input: true, placeholder: 'Nom du projet', ok: 'Créer', emoji: true });
       if (name) { const p = addProject(name); save(); ps.innerHTML = projectOptions(p.id); }
       else ps.value = form.dataset.pp;
     }
@@ -1011,7 +1025,7 @@ sheet.addEventListener('change', async (e) => {
     ss.innerHTML = subOptions(ps.value, null);
     ss.disabled = !ps.value;
   } else if (e.target === ss && ss.value === '__new') {
-    const name = await ask({ title: 'Nouveau sous-projet', text: `Dans « ${getProject(ps.value)?.name || ''} »`, input: true, placeholder: 'Nom du sous-projet', ok: 'Créer' });
+    const name = await ask({ title: 'Nouveau sous-projet', text: `Dans « ${getProject(ps.value)?.name || ''} »`, input: true, placeholder: 'Nom du sous-projet', ok: 'Créer', emoji: true });
     if (name) { const s = addSub(ps.value, name); save(); ss.innerHTML = subOptions(ps.value, s.id); }
     else ss.value = '';
   }
@@ -1021,7 +1035,7 @@ sheet.addEventListener('change', async (e) => {
 /* ----- Projet ----- */
 
 function subRow(name, value) {
-  return `<div class="sub-row"><div class="field" style="flex:1;margin:0"><input name="${name}" value="${esc(value)}" placeholder="Nom du sous-projet" maxlength="60"></div>
+  return `<div class="sub-row"><div class="field" style="flex:1;margin:0">${emojiField(`<input name="${name}" value="${esc(value)}" placeholder="Nom du sous-projet" maxlength="60">`)}</div>
     <button type="button" class="icon-btn danger" data-action="remove-sub-row" aria-label="Supprimer le sous-projet">${ICON.trash}</button></div>`;
 }
 
@@ -1040,7 +1054,7 @@ function openProjectSheet(id) {
     </div>` : '';
   openSheet(`<form class="sheet-body" data-form="project" data-id="${p?.id || ''}" autocomplete="off">
     ${head(isNew ? 'Nouveau projet' : 'Projet')}
-    <label class="field"><span>Nom</span><input class="big" name="name" value="${esc(p?.name || '')}" placeholder="Ex. Pro, Agreg, Famille…" maxlength="60" required${isNew ? ' autofocus' : ''}></label>
+    <label class="field"><span>Nom</span>${emojiField(`<input class="big" name="name" value="${esc(p?.name || '')}" placeholder="Ex. Pro, Agreg, Famille…" maxlength="60" required${isNew ? ' autofocus' : ''}>`)}</label>
     <div class="field"><span>Couleur</span><div class="swatches">${COLORS.map((c) => `<label class="swatch" style="--c:${c}"><input type="radio" name="color" value="${c}"${c === color ? ' checked' : ''}><i></i></label>`).join('')}</div></div>
     <div class="field"><span>Sous-projets</span>
       <div class="subs">${isNew ? '' : subsOf(p.id).map((s) => subRow(`sub:${s.id}`, s.name)).join('')}</div>
@@ -1843,11 +1857,12 @@ function viewPlan() {
         <button type="button" class="icon-btn side-close" data-action="side-toggle" aria-label="Masquer la liste">${ICON.right}</button></div>
       ${tray.length ? `<div class="side-cats">
         ${cats.filter((c) => c.key === 'star' || c.key === 'all').map((c) => `<button type="button" class="side-cat${c.key === cat ? ' on' : ''}" data-action="side-cat" data-value="${c.key}">${esc(c.label)}<small>${c.n}</small></button>`).join('')}
-        <label class="side-cat side-proj${projCat ? ' on' : ''}"${projCat?.color ? ` style="--c:${projCat.color}"` : ''}>${projCat?.color ? '<i></i>' : ''}
-          <select data-change="side-cat" aria-label="Choisir un projet">
-            <option value=""${projCat ? '' : ' selected'}>Projet…</option>
-            ${cats.filter((c) => c.key !== 'star' && c.key !== 'all').map((c) => `<option value="${c.key}"${c.key === cat ? ' selected' : ''}>${esc(c.label)} (${c.n})</option>`).join('')}
-          </select></label>
+        <div class="proj-pick">
+          <button type="button" class="side-cat side-proj${projCat ? ' on' : ''}${temp.projMenu ? ' open' : ''}" data-action="proj-menu" aria-haspopup="menu" aria-expanded="${!!temp.projMenu}"${projCat?.color ? ` style="--c:${projCat.color}"` : ''}>
+            ${projCat?.color ? '<i></i>' : ''}<span>${esc(projCat ? projCat.label : 'Projets')}</span>${projCat ? `<small>${projCat.n}</small>` : ''}${ICON.down}</button>
+          ${temp.projMenu ? `<div class="proj-menu" role="menu">${cats.filter((c) => c.key !== 'star' && c.key !== 'all').map((c) => `<button type="button" role="menuitemradio" aria-checked="${c.key === cat}" class="proj-opt${c.key === cat ? ' on' : ''}" data-action="side-cat" data-value="${c.key}" style="--c:${c.color || NO_COLOR}">
+            <i></i><span>${esc(c.label)}</span><small>${c.n}</small></button>`).join('')}</div>` : ''}
+        </div>
       </div>
       <div class="side-list">${list.map(row).join('')}</div>
       <p class="side-hint">Glisse une tâche dans le planning, ou touche-la puis touche un créneau.</p>`
@@ -2145,7 +2160,7 @@ function openEventSheet(id, preset = {}) {
   openSheet(`<form class="sheet-body" data-form="event" data-id="${found ? id : ''}" autocomplete="off">
     ${head(found ? 'Événement fixe' : 'Nouvel événement fixe')}
     <p class="hint" style="margin-top:0">Un créneau qui n’est pas une tâche (travail, cours, sport…). Il s’affiche en fond du planning pour caler tes tâches autour.</p>
-    <label class="field"><span>Nom</span><input class="big" name="title" value="${esc(ev.title)}" placeholder="Ex. Travail" maxlength="60" required${found ? '' : ' autofocus'}></label>
+    <label class="field"><span>Nom</span>${emojiField(`<input class="big" name="title" value="${esc(ev.title)}" placeholder="Ex. Travail" maxlength="60" required${found ? '' : ' autofocus'}>`)}</label>
     <div class="seg2">
       <label><input type="radio" name="repeat" value="weekly"${once ? '' : ' checked'}><span>Chaque semaine</span></label>
       <label><input type="radio" name="repeat" value="once"${once ? ' checked' : ''}><span>Une seule fois</span></label>
@@ -2187,14 +2202,6 @@ sheet.addEventListener('change', (e) => {
   if (form) commitPlanForm(form);
 });
 
-// Choix d'un projet dans la barre « À planifier ».
-document.addEventListener('change', (e) => {
-  if (e.target.dataset.change !== 'side-cat') return;
-  state.ui.sideCat = e.target.value || 'all';
-  writeLocal(); render();
-  $('.side-list')?.scrollTo(0, 0);
-});
-
 // Toucher un créneau, un bloc ou un événement pendant qu'une tâche est « en main » : on la place là.
 function placeHere(el, e) {
   const col = el.closest('.cal-col');
@@ -2220,6 +2227,164 @@ setInterval(() => {
 
 new ResizeObserver(() => document.documentElement.style.setProperty('--top-h', `${$('.top').offsetHeight}px`)).observe($('.top'));
 
+/* ---------- Emojis dans les noms (tâches, projets, sous-projets, événements) ---------- */
+
+// [catégorie, icône, « emoji mots-clés | emoji mots-clés … »] : la recherche se fait en français.
+const EMOJIS = [
+  ['Travail', '💼', '💼 travail pro bureau boulot|📚 cours livre école lecture|📝 copie note corriger écrire|✏️ crayon écrire dessin|🧑‍🏫 prof classe élève enseigner|🎓 diplôme agreg examen concours|🏫 lycée école collège|📊 stats tableau graphique|📈 progrès hausse|🗂️ classer dossier archive|📎 pièce jointe trombone|💻 ordinateur code appli site|📧 mail email|📞 appel téléphone appeler|🎤 oral micro discours|📻 radio émission|🖨️ imprimer impression|📋 liste checklist|🔍 chercher recherche|💡 idée|🧪 science expérience|🌐 site web internet'],
+  ['Maison', '🏠', '🏠 maison logement|🧹 ménage balai nettoyer|🧺 linge lessive|🍳 cuisine repas cuisiner|🛒 courses supermarché|🔧 réparer bricolage outil|🪴 plante jardin|🛏️ lit chambre dormir|🚿 douche salle de bain|🗑️ poubelle déchets|📦 colis carton déménagement|🔑 clé|🐶 chien|🐱 chat|🚗 voiture garage|🧸 enfant jouet'],
+  ['Famille', '❤️', '❤️ amour couple cœur|👨‍👩‍👧 famille|👶 bébé enfant|🎂 anniversaire gâteau|🎁 cadeau|💬 message discuter|🤝 rendez-vous réunion|👫 amis|💍 mariage|🥂 fête apéro soirée|📸 photo|✉️ lettre courrier|🏖️ vacances plage|✈️ voyage avion|🚆 train|🗺️ carte voyage'],
+  ['Sport', '🏃', '🏃 course running trail|🚴 vélo|🏊 natation piscine|🏋️ muscu salle sport|🧘 yoga méditation|⚽ foot|🎾 tennis|🥾 rando randonnée montagne|💪 force motivation|🍎 manger sain fruit|💊 médicament santé|🩺 médecin docteur|🦷 dentiste|😴 sommeil repos|💧 eau boire|🧠 cerveau mental'],
+  ['Argent', '💶', '💶 argent euro|💳 carte paiement|🏦 banque|🧾 facture ticket|📑 papiers documents administratif|🖋️ signer signature contrat|🏛️ impôts administration|📬 courrier boîte|🛡️ assurance|💰 épargne économies|🔒 sécurité mot de passe|🪪 identité carte|⚖️ juridique droit|🧮 calcul compta comptes'],
+  ['Loisirs', '🎉', '🎉 fête|🎮 jeu vidéo|🎨 peinture art dessin|🎵 musique chanson|🎸 guitare|📖 lire roman|🎬 film cinéma série|📺 télé|🎭 théâtre|🧩 puzzle|🍿 popcorn|🍕 pizza resto|☕ café pause|🍷 vin|🧑‍🍳 cuisiner recette batch|🌍 monde'],
+  ['Symboles', '✅', '✅ fait validé|⭐ étoile|🔥 urgent feu|⚠️ attention|❗ important|❓ question|🚀 lancer projet|🎯 objectif but|⏳ attente|⏰ deadline réveil|📌 épingle|🔁 répéter|🔴 rouge|🟠 orange|🟢 vert|🔵 bleu|🟣 violet|💤 plus tard|🏆 victoire|✨ nouveau'],
+].map(([label, icon, list]) => ({ label, icon, items: list.split('|').map((x) => { const [e, ...k] = x.split(' '); return { e, k: k.join(' ') }; }) }));
+const EMOJI_RECENT = 'chronotodo:emoji';
+const fold = (s) => String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+
+function recentEmojis() {
+  try { return JSON.parse(localStorage.getItem(EMOJI_RECENT)) || []; } catch (e) { return []; }
+}
+
+// Champ de nom avec un bouton 🙂 qui ouvre le sélecteur juste en dessous.
+function emojiField(inputHtml) {
+  return `<div class="emoji-field">${inputHtml}<button type="button" class="emoji-btn" data-action="emoji" aria-label="Ajouter un emoji" title="Ajouter un emoji">${ICON.smile}</button></div>`;
+}
+
+function toggleEmojiPanel(field) {
+  const anchor = field.closest('label.field, .sub-row') || field;
+  const open = anchor.nextElementSibling?.classList.contains('emoji-panel');
+  $$('.emoji-panel').forEach((x) => x.remove());
+  if (open) return;
+  const input = $('input', field);
+  input.id ||= `in-${uid()}`;
+  const panel = document.createElement('div');
+  panel.className = 'emoji-panel';
+  panel.dataset.for = input.id;
+  const recent = recentEmojis();
+  panel.innerHTML = `<div class="emoji-top">
+      <input class="emoji-search" type="search" placeholder="Chercher : sport, école, banque…" autocomplete="off" enterkeyhint="search" aria-label="Chercher un emoji">
+      <button type="button" class="icon-btn" data-action="emoji-close" aria-label="Fermer">${ICON.close}</button>
+    </div>
+    <div class="emoji-tabs">${recent.length ? '<button type="button" data-action="emoji-tab" data-value="recent" title="Récents">🕘</button>' : ''}${EMOJIS.map((c, i) => `<button type="button" data-action="emoji-tab" data-value="${i}" title="${c.label}">${c.icon}</button>`).join('')}</div>
+    <div class="emoji-grid"></div>`;
+  anchor.insertAdjacentElement('afterend', panel);
+  fillEmojiPanel(panel, recent.length ? 'recent' : '0');
+  panel.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+function fillEmojiPanel(panel, tab, query = '') {
+  let items;
+  if (query) {
+    const q = fold(query.trim());
+    items = EMOJIS.flatMap((c) => c.items).filter((x) => fold(x.k).includes(q) || x.e === query.trim());
+  } else if (tab === 'recent') {
+    items = recentEmojis().map((e) => ({ e, k: '' }));
+  } else {
+    items = EMOJIS[Number(tab)]?.items || [];
+  }
+  $$('.emoji-tabs button', panel).forEach((b) => b.classList.toggle('on', !query && b.dataset.value === String(tab)));
+  $('.emoji-grid', panel).innerHTML = items.length
+    ? items.map((x) => `<button type="button" data-action="emoji-pick" data-e="${x.e}" title="${esc(x.k)}">${x.e}</button>`).join('')
+    : '<p class="emoji-none">Aucun emoji pour cette recherche.</p>';
+}
+
+// Insère l'emoji là où était le curseur (au début du nom si le champ n'a pas encore été touché).
+function pickEmoji(btn) {
+  const panel = btn.closest('.emoji-panel');
+  const input = document.getElementById(panel.dataset.for);
+  const e = btn.dataset.e;
+  if (!input) return;
+  const v = input.value;
+  const caret = input.dataset.caret;
+  let pos;
+  if (caret == null) {
+    input.value = v ? `${e} ${v.replace(/^\s+/, '')}` : `${e} `;
+    pos = e.length + 1;
+  } else {
+    const at = Math.min(Number(caret), v.length);
+    const before = v.slice(0, at);
+    const ins = (before && !/\s$/.test(before) ? ' ' : '') + e + (v.slice(at).startsWith(' ') ? '' : ' ');
+    input.value = before + ins + v.slice(at);
+    pos = at + ins.length;
+  }
+  input.dataset.caret = pos;
+  try { localStorage.setItem(EMOJI_RECENT, JSON.stringify([e, ...recentEmojis().filter((x) => x !== e)].slice(0, 18))); } catch (err) { /* plein */ }
+  panel.remove();
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.dispatchEvent(new Event('change', { bubbles: true })); // enregistre aussitôt dans une fiche déjà créée
+  if (matchMedia('(pointer: fine)').matches) { input.focus(); input.setSelectionRange(pos, pos); }
+}
+
+document.addEventListener('focusout', (e) => {
+  if (e.target.matches?.('.emoji-field input')) e.target.dataset.caret = e.target.selectionStart ?? e.target.value.length;
+});
+document.addEventListener('input', (e) => {
+  if (e.target.matches?.('.emoji-search')) fillEmojiPanel(e.target.closest('.emoji-panel'), '', e.target.value);
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && e.target.matches?.('.emoji-search')) {
+    e.preventDefault(); // ne pas valider le formulaire
+    $('.emoji-grid button', e.target.closest('.emoji-panel'))?.click();
+  }
+  if (e.key === 'Escape' && temp.projMenu) { temp.projMenu = false; render(); }
+});
+
+/* ---------- Ordre des projets (glisser la poignée ⋮⋮) ---------- */
+
+const sortDrag = { active: null };
+
+document.addEventListener('pointerdown', (e) => {
+  const grip = e.target.closest('.proj-grip');
+  if (!grip || (e.pointerType === 'mouse' && e.button !== 0)) return;
+  e.preventDefault();
+  const item = grip.closest('.proj-item');
+  const items = $$('.proj-item', item.parentElement);
+  const from = items.indexOf(item);
+  sortDrag.active = {
+    item, items, from, to: from, y0: e.clientY + scrollY,
+    centers: items.map((el) => { const r = el.getBoundingClientRect(); return r.top + scrollY + r.height / 2; }),
+    h: item.getBoundingClientRect().height,
+  };
+  item.classList.add('sorting');
+  document.body.classList.add('is-sorting');
+  buzz();
+});
+
+window.addEventListener('pointermove', (e) => {
+  const s = sortDrag.active;
+  if (!s) return;
+  if (e.clientY < 110) scrollBy(0, -10); else if (e.clientY > innerHeight - 120) scrollBy(0, 10);
+  const dy = e.clientY + scrollY - s.y0;
+  s.item.style.transform = `translateY(${dy}px)`;
+  const center = s.centers[s.from] + dy;
+  s.to = s.centers.filter((c, j) => j !== s.from && c < center).length;
+  s.items.forEach((el, j) => {
+    if (j === s.from) return;
+    const off = s.from < s.to && j > s.from && j <= s.to ? -s.h : s.to < s.from && j >= s.to && j < s.from ? s.h : 0;
+    el.style.transform = off ? `translateY(${off}px)` : '';
+  });
+});
+
+function endSort() {
+  const s = sortDrag.active;
+  if (!s) return;
+  sortDrag.active = null;
+  document.body.classList.remove('is-sorting');
+  if (s.to !== s.from) {
+    const ids = s.items.map((el) => el.dataset.id);
+    ids.splice(s.to, 0, ids.splice(s.from, 1)[0]);
+    const queue = ids.map(getProject);
+    const set = new Set(ids);
+    state.projects = state.projects.map((x) => (set.has(x.id) ? queue.shift() : x));
+    state.projects.forEach((x, i) => { x.order = i; });
+    save(); buzz();
+  }
+  render();
+}
+window.addEventListener('pointerup', endSort);
+window.addEventListener('pointercancel', endSort);
+
 /* ---------- Actions ---------- */
 
 const actions = {
@@ -2244,7 +2409,12 @@ const actions = {
     render();
   },
   'side-toggle'() { state.ui.planSide = state.ui.planSide === false; writeLocal(); render(); },
-  'side-cat'(el) { state.ui.sideCat = el.dataset.value; writeLocal(); render(); $('.side-list')?.scrollTo(0, 0); },
+  'side-cat'(el) { state.ui.sideCat = el.dataset.value; temp.projMenu = false; writeLocal(); render(); $('.side-list')?.scrollTo(0, 0); },
+  'proj-menu'() { temp.projMenu = !temp.projMenu; render(); },
+  emoji(el) { toggleEmojiPanel(el.closest('.emoji-field')); },
+  'emoji-tab'(el) { const panel = el.closest('.emoji-panel'); $('.emoji-search', panel).value = ''; fillEmojiPanel(panel, el.dataset.value); },
+  'emoji-pick'(el) { pickEmoji(el); },
+  'emoji-close'(el) { el.closest('.emoji-panel')?.remove(); },
   'cancel-placing'() { temp.placing = null; document.body.classList.remove('placing'); render(); },
   slot(el, e) {
     if (placeHere(el, e)) return;
@@ -2467,6 +2637,7 @@ const actions = {
 };
 
 document.addEventListener('click', (e) => {
+  if (temp.projMenu && !e.target.closest('.proj-pick')) { temp.projMenu = false; $('.proj-menu')?.remove(); $('.side-proj')?.classList.remove('open'); }
   const el = e.target.closest('[data-action]');
   if (!el || el.disabled) return;
   const fn = actions[el.dataset.action];
