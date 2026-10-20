@@ -685,3 +685,33 @@ body.is-sorting, body.is-sorting * { cursor: grabbing !important; user-select: n
 .emoji-grid button { height: 42px; border-radius: 10px; font-size: 24px; line-height: 1; }
 .emoji-grid button:hover { background: var(--card); transform: scale(1.12); }
 .emoji-none { grid-column: 1 / -1; margin: 10px; color: var(--muted); font-size: 14px; text-align: center; }
+
+/* ---------- Indicateur de synchro (nuage dans l'en-tête) ---------- */
+.sync-dot { position: relative; width: 40px; height: 40px; margin-right: 6px; border-radius: 12px; display: grid; place-items: center; flex: none; color: var(--muted); }
+.sync-dot:hover { background: var(--line); }
+.sync-dot svg { width: 24px; height: 24px; }
+.sync-dot i {
+  position: absolute; right: 4px; bottom: 6px; width: 15px; height: 15px; border-radius: 50%;
+  border: 2px solid var(--bg); display: grid; place-items: center; background: var(--muted);
+  color: #fff; font-size: 9px; font-style: normal; font-weight: 900; line-height: 1;
+}
+.sync-dot.ok { color: var(--run); }
+.sync-dot.ok i { background: var(--run); }
+.sync-dot.ok i::after { content: "✓"; }
+.sync-dot.pending { color: #d97706; }
+.sync-dot.pending i { background: #f59e0b; }
+.sync-dot.busy { color: var(--accent); }
+.sync-dot.busy i { background: var(--accent); animation: pulse 1s ease-in-out infinite; }
+.sync-dot.offline i::after { content: "–"; }
+.sync-dot.err { color: var(--danger); }
+.sync-dot.err i { background: var(--danger); }
+.sync-dot.err i::after { content: "!"; }
+.sync-dot.off { opacity: .55; }
+.sync-dot.off i::after { content: "×"; font-size: 11px; }
+@media (min-width: 900px) {
+  body[data-tab="plan"] #sync { order: 3; }
+  body[data-tab="plan"] #who { order: 4; }
+  body[data-tab="plan"] .topbar > .icon-btn { order: 5; }
+}
+.who-sync { margin: 18px 0 0 !important; font-size: 13.5px !important; color: var(--muted); }
+.who-sync.on { color: var(--run); font-weight: 600; }

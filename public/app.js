@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '1.7.0';
+const VERSION = '1.7.1';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -46,6 +46,7 @@ const ICON = {
   smile: svg('<circle cx="12" cy="12" r="8.6"/><path d="M8.6 14.2a4.3 4.3 0 0 0 6.8 0"/><circle cx="9.3" cy="10" r=".9" class="fill"/><circle cx="14.7" cy="10" r=".9" class="fill"/>'),
   grip: svg('<circle cx="9" cy="6.5" r="1.6"/><circle cx="15" cy="6.5" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="17.5" r="1.6"/><circle cx="15" cy="17.5" r="1.6"/>', 'fill'),
   down: svg('<path d="M6 9l6 6 6-6"/>'),
+  cloud: svg('<path d="M7.2 18.5h10.3a4 4 0 0 0 .5-7.97 6 6 0 0 0-11.6-1.2A4.6 4.6 0 0 0 7.2 18.5z"/>'),
   list: svg('<path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1.2"/><circle cx="4.5" cy="12" r="1.2"/><circle cx="4.5" cy="18" r="1.2"/>'),
 };
 
@@ -178,6 +179,7 @@ function save() {
     if (syncConf.code) { state.ui.syncDirty = true; scheduleSync(); }
   }
   writeLocal();
+  syncBadge();
 }
 
 // Écrit sur l'appareil sans dater : suffit quand seul l'affichage change (onglet, filtres…).
@@ -353,6 +355,7 @@ function renderProfiles() {
         <span class="who-name">${esc(p.name)}<small>${esc(info)}</small></span>${ICON.right}
       </button>`;
     }).join('')}</div>
+    <p class="who-sync${syncConf.code ? ' on' : ''}">${syncConf.code ? '☁️ Synchro activée sur cet appareil' : 'Synchro non activée sur cet appareil (Réglages › Synchronisation)'}</p>
   </div>`;
 }
 
@@ -406,6 +409,7 @@ function render() {
   const pill = $('#who');
   pill.style.setProperty('--c', me.color);
   pill.innerHTML = `<i></i>${esc(me.name)}`;
+  syncBadge();
   const tab = state.ui.tab;
   const openP = tab === 'projects' ? getProject(temp.openProject) : null;
   if (!openP) temp.openProject = null;
@@ -1318,16 +1322,19 @@ async function syncKeys(code, prof = profile) {
 // Chiffrement AES-GCM (après compression gzip si le navigateur sait le faire).
 const pipeBytes = (bytes, stream) => new Response(new Blob([bytes]).stream().pipeThrough(stream)).arrayBuffer();
 
+// Envoi sans compression : les iPhone avant iOS 16.4 ne savent pas décompresser,
+// et ne pourraient alors ni lire ni envoyer leurs données.
 async function seal(text, key) {
-  const gzip = typeof CompressionStream === 'function';
-  let data = new TextEncoder().encode(text);
-  if (gzip) data = await pipeBytes(data, new CompressionStream('gzip'));
+  const data = new TextEncoder().encode(text);
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const head = new Uint8Array([gzip ? 2 : 1, ...iv]);
+  const head = new Uint8Array([1, ...iv]);
   return new Blob([head, await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: head }, key, data)]);
 }
 
 async function unseal(buf, key) {
+  if (new Uint8Array(buf, 0, 1)[0] === 2 && typeof DecompressionStream !== 'function') {
+    throw new Error('données compressées par un autre appareil : elles seront relues dès sa prochaine synchro');
+  }
   try {
     const head = new Uint8Array(buf, 0, 13);
     const data = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: head.slice(1), additionalData: head }, key, new Uint8Array(buf, 13));
@@ -1447,12 +1454,12 @@ class SyncError extends Error {
   constructor(message, offline = false) { super(message); this.offline = offline; }
 }
 
-async function api(method, id, { body, base, have } = {}) {
+async function api(method, id, { body, base, have, keepalive = false } = {}) {
   const url = `api/sync/${id}${have ? `?have=${encodeURIComponent(have)}` : ''}`;
   let res;
   try {
     const signal = AbortSignal.timeout ? AbortSignal.timeout(20000) : undefined; // réseau bloqué : on n'attend pas indéfiniment
-    res = await fetch(url, { method, body, signal, cache: 'no-store', headers: base === undefined ? {} : { 'x-base-rev': base } });
+    res = await fetch(url, { method, body, signal, keepalive, cache: 'no-store', headers: base === undefined ? {} : { 'x-base-rev': base } });
   } catch (e) {
     throw new SyncError('hors ligne', true);
   }
@@ -1469,14 +1476,15 @@ function scheduleSync(delay = SYNC_DELAY) {
   if (syncConf.code) syncTimer = setTimeout(syncNow, delay);
 }
 
-function syncNow() {
+// opts.keepalive : l'app passe en arrière-plan (l'envoi doit aboutir même si elle est fermée).
+function syncNow(opts = {}) {
   clearTimeout(syncTimer);
   if (!syncConf.code || !profile) return Promise.resolve();
   if (syncing) { syncAgain = true; return syncing; }
   if (editing()) { scheduleSync(3000); return Promise.resolve(); }
   syncing = (async () => {
     try {
-      if (await syncOnce()) Object.assign(syncConf, { last: now(), error: '' });
+      if (await syncOnce(opts)) Object.assign(syncConf, { last: now(), error: '' });
     } catch (e) {
       syncConf.error = e.offline ? 'offline' : e.message;
     }
@@ -1486,22 +1494,27 @@ function syncNow() {
     refreshSyncUi();
     if (syncAgain) { syncAgain = false; scheduleSync(300); }
   });
+  syncBadge();
   return syncing;
 }
 
 // Récupère les données des autres appareils, fusionne, puis envoie le résultat si besoin.
-async function syncOnce() {
+async function syncOnce(opts = {}) {
   const { code } = syncConf;
   const prof = profile;
   if (!crypto.subtle) throw new SyncError('connexion non sécurisée (https requis)');
   const { id, key } = await syncKeys(code, prof);
   for (let attempt = 0; attempt < 4; attempt++) {
-    const res = await api('GET', id, { have: state.ui.syncRev });
+    // Tant que le nouveau format n'est pas confirmé, on retélécharge tout (pour repérer l'ancien format).
+    const res = await api('GET', id, { have: state.ui.syncFmt === 2 ? state.ui.syncRev : '' });
     let rev = state.ui.syncRev;
     let remote = null;
+    let legacy = false;
     if (res.status === 200) {
       rev = res.headers.get('x-rev') || '';
-      remote = readDoc(await unseal(await res.arrayBuffer(), key));
+      const buf = await res.arrayBuffer();
+      legacy = new Uint8Array(buf, 0, 1)[0] === 2; // ancien format compressé : on le réécrit lisible par tous
+      remote = readDoc(await unseal(buf, key));
     } else if (res.status === 404) {
       rev = '';
       remote = readDoc('{}');
@@ -1522,7 +1535,8 @@ async function syncOnce() {
       const adopted = !ui.syncRev && adoptNames(remote); // première fusion : pas de projets en double
       const { changed, differs } = mergeRemote(remote);
       if (changed || adopted) { snapshot(); render(); }
-      push = differs;
+      push = differs || legacy;
+      if (res.status === 200 && !legacy) ui.syncFmt = 2;
     }
     if (!push) {
       if (remote || ui.syncDirty || ui.syncRev !== rev) { Object.assign(ui, { syncRev: rev, syncDirty: false }); writeLocal(); }
@@ -1535,8 +1549,8 @@ async function syncOnce() {
     try {
       const body = await seal(docText(state), key);
       if (profile !== prof) return false;
-      const put = await api('PUT', id, { body, base: rev });
-      if (put.status === 200) { state.ui.syncRev = (await put.json()).rev; sent = true; return true; }
+      const put = await api('PUT', id, { body, base: rev, keepalive: !!opts.keepalive && body.size < 60000 });
+      if (put.status === 200) { Object.assign(state.ui, { syncRev: (await put.json()).rev, syncFmt: 2 }); sent = true; return true; }
       // 409 : un autre appareil vient d'envoyer ses données ; on refusionne et on réessaie.
       if (put.status !== 409) throw new SyncError(`erreur du serveur (${put.status})`);
     } finally {
@@ -1682,6 +1696,24 @@ function syncSection() {
 function refreshSyncUi() {
   const box = $('#sync-box');
   if (box) box.innerHTML = syncSection();
+  syncBadge();
+}
+
+// Nuage dans l'en-tête : état de la synchro d'un coup d'œil (le toucher synchronise tout de suite).
+function syncBadge() {
+  const el = $('#sync');
+  if (!el || !profile) return;
+  let st;
+  if (!syncConf.code) st = ['off', 'Synchro non activée sur cet appareil'];
+  else if (syncing) st = ['busy', 'Synchronisation…'];
+  else if (syncConf.error === 'offline') st = ['offline', 'Hors ligne : envoi dès le retour du réseau'];
+  else if (syncConf.error) st = ['err', `Problème de synchro : ${syncConf.error}`];
+  else if (state.ui.syncDirty) st = ['pending', 'Modifications en attente d’envoi'];
+  else st = ['ok', syncConf.last ? `Synchronisé ${ago(syncConf.last)}` : 'Synchronisé'];
+  el.className = `sync-dot ${st[0]}`;
+  el.title = st[1];
+  el.setAttribute('aria-label', st[1]);
+  if (!el.firstChild) el.innerHTML = `${ICON.cloud}<i></i>`;
 }
 
 async function copyCode() {
@@ -2623,6 +2655,16 @@ const actions = {
   'export-csv'() { exportCsv(); },
   'reset-all'() { resetAll(); },
   'sync-enable'() { enableSync(); },
+  async 'sync-badge'() {
+    if (!syncConf.code) {
+      openSettings();
+      setTimeout(() => $('#sync-box')?.scrollIntoView({ block: 'center', behavior: 'smooth' }), 120);
+      return;
+    }
+    await syncNow();
+    const err = syncConf.error;
+    toast(!err ? 'Synchronisé ✓' : err === 'offline' ? 'Hors ligne : la synchro reprendra au retour du réseau' : `Problème de synchro : ${err}`);
+  },
   'sync-join'() { joinSync(); },
   'sync-off'() { disableSync(); },
   'sync-copy'() { copyCode(); },
@@ -2660,7 +2702,7 @@ render();
 setInterval(() => { if (state.active && !document.hidden) tick(); }, 1000);
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) { render(); syncNow(); }
-  else if (state.ui.syncDirty) syncNow(); // envoie les dernières modifications avant que l'app passe en arrière-plan
+  else if (state.ui.syncDirty) syncNow({ keepalive: true }); // envoie les dernières modifications avant que l'app passe en arrière-plan
 });
 
 // Synchro entre appareils : au démarrage, au retour du réseau et régulièrement quand l'app est ouverte.
