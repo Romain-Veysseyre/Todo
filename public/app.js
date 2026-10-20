@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '1.4.0';
+const VERSION = '1.5.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -43,6 +43,7 @@ const ICON = {
   right: svg('<path d="M9 5l7 7-7 7"/>'),
   star: svg('<path d="M12 3.6l2.55 5.2 5.7.83-4.13 4.02.98 5.68L12 16.65l-5.1 2.68.98-5.68L3.75 9.63l5.7-.83z"/>'),
   cal: svg('<rect x="3.5" y="5" width="17" height="15" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/>'),
+  list: svg('<path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1.2"/><circle cx="4.5" cy="12" r="1.2"/><circle cx="4.5" cy="18" r="1.2"/>'),
 };
 
 /* ---------- Données ---------- */
@@ -1681,6 +1682,9 @@ async function copyCode() {
 /* ---------- Planning (emploi du temps de la semaine) ---------- */
 
 const DAY_MIN = 1440;
+const VIEW_START = 6 * 60;               // la grille commence à 6h
+const VIEW_SPAN = DAY_MIN - VIEW_START;
+const posPct = (m) => (((m - VIEW_START) / VIEW_SPAN) * 100).toFixed(3);
 const SNAP = 15;          // les créneaux se calent au quart d'heure
 const PLAN_DUR = 60;      // durée par défaut d'une tâche planifiée
 const EVENT_COLORS = ['#64748b', '#0ea5e9', '#10b981', '#f59e0b', '#ec4899', '#8b5cf6'];
@@ -1740,7 +1744,7 @@ function pack(items) {
   return items;
 }
 
-const boxStyle = (it) => `top:${((it.s / DAY_MIN) * 100).toFixed(3)}%;height:${(((it.e - it.s) / DAY_MIN) * 100).toFixed(3)}%;`
+const boxStyle = (it) => `top:${posPct(it.s)}%;height:${(((it.e - it.s) / VIEW_SPAN) * 100).toFixed(3)}%;`
   + `left:calc(${((it.col / it.ncol) * 100).toFixed(2)}% + 2px);width:calc(${(100 / it.ncol).toFixed(2)}% - 4px)`;
 
 // Tâches à planifier : prioritaires d'abord, puis celles pas encore planifiées cette semaine.
@@ -1790,8 +1794,10 @@ function viewPlan() {
 
   const cols = shown.map((d) => {
     const key = ymd(d);
-    const evs = pack(eventsOn(d).map((ev) => ({ ev, s: ev.start, e: Math.max(ev.end, ev.start + SNAP) })));
-    const pls = pack(plansOn(key).map((p) => ({ p, s: minOfDay(p.start, key), e: Math.max(minOfDay(p.end, key), minOfDay(p.start, key) + SNAP) })));
+    // Ce qui commence avant 6h est coupé à 6h ; ce qui finit avant 6h n'apparaît pas.
+    const visible = (it) => ({ ...it, s0: it.s, s: Math.max(it.s, VIEW_START) });
+    const evs = pack(eventsOn(d).map((ev) => visible({ ev, s: ev.start, e: Math.max(ev.end, ev.start + SNAP) })).filter((it) => it.e > it.s));
+    const pls = pack(plansOn(key).map((p) => visible({ p, s: minOfDay(p.start, key), e: Math.max(minOfDay(p.end, key), minOfDay(p.start, key) + SNAP) })).filter((it) => it.e > it.s));
     return `<div class="cal-col${key === today ? ' today' : ''}" data-action="slot" data-day="${key}">
       ${evs.map((it) => `<div class="ev-block" data-action="open-event" data-id="${it.ev.id}" style="${boxStyle(it)};--c:${it.ev.color || EVENT_COLORS[0]}">
         <b>${esc(it.ev.title)}</b><span>${shortLabel(it.ev.start)}–${shortLabel(it.ev.end)}</span></div>`).join('')}
@@ -1799,22 +1805,28 @@ function viewPlan() {
         const t = getTask(it.p.taskId);
         const running = state.active?.taskId === t.id;
         return `<div class="plan-block${t.done ? ' done' : ''}${running ? ' running' : ''}" data-action="open-plan" data-id="${it.p.id}" style="${boxStyle(it)};--c:${colorOf(t.projectId)}">
-          <b>${t.starred ? '★ ' : ''}${esc(t.title)}</b><span>${shortLabel(it.s)}–${shortLabel(it.e)}</span>
+          <b>${t.starred ? '★ ' : ''}${esc(t.title)}</b><span>${shortLabel(it.s0)}–${shortLabel(it.e)}</span>
           <i class="plan-resize" aria-hidden="true"></i></div>`;
       }).join('')}
-      ${key === today ? `<div class="now-line" style="top:${((nowMin / DAY_MIN) * 100).toFixed(3)}%"></div>` : ''}
+      ${key === today && nowMin >= VIEW_START ? `<div class="now-line" style="top:${posPct(nowMin)}%"></div>` : ''}
     </div>`;
   }).join('');
 
   const tray = trayTasks(weekStart, weekEnd);
   const placing = getTask(temp.placing);
-  const trayBody = placing
-    ? `<div class="tray-msg"><span>Touche un créneau pour placer <b>« ${esc(placing.title)} »</b></span><button type="button" class="btn small" data-action="cancel-placing">Annuler</button></div>`
-    : tray.length
-      ? `<div class="tray-head"><span>À planifier</span><small>Glisse une tâche dans le planning, ou touche-la puis touche un créneau</small></div>
-        <div class="tray-list">${tray.map(({ t, planned }) => `<button type="button" class="tray-chip${planned ? ' planned' : ''}" data-action="pick-tray" data-drag-task="${t.id}" style="--c:${colorOf(t.projectId)}">
-          ${t.starred ? ICON.star : ''}<span>${esc(t.title)}</span>${planned ? '<em>✓</em>' : ''}</button>`).join('')}</div>`
-      : '<p class="tray-empty">Aucune tâche à faire. Ajoute-en dans l’onglet Tâches.</p>';
+  const sideOpen = ui.planSide !== false;
+  const side = `<aside class="side${sideOpen ? ' open' : ''}" aria-label="Tâches à planifier">
+      <div class="side-head"><b>À planifier</b><small>${tray.length}</small>
+        <button type="button" class="icon-btn side-close" data-action="side-toggle" aria-label="Masquer la liste">${ICON.right}</button></div>
+      ${tray.length ? `<p class="side-hint">Glisse une tâche dans le planning, ou touche-la puis touche un créneau.</p>
+      <div class="side-list">${tray.map(({ t, planned }) => `<button type="button" class="side-task${planned ? ' planned' : ''}${temp.placing === t.id ? ' on' : ''}" data-action="pick-tray" data-drag-task="${t.id}" style="--c:${colorOf(t.projectId)}">
+        <span class="side-title">${t.starred ? ICON.star : ''}${esc(t.title)}</span>
+        <small>${planned ? '✓ déjà planifiée' : esc(getProject(t.projectId)?.name || 'Sans projet')}</small></button>`).join('')}</div>`
+        : '<p class="side-hint">Aucune tâche à faire. Ajoute-en dans l’onglet Tâches.</p>'}
+    </aside>`;
+  const floating = placing
+    ? `<div class="place-bar"><span>Touche un créneau pour placer <b>« ${esc(placing.title)} »</b></span><button type="button" class="btn small" data-action="cancel-placing">Annuler</button></div>`
+    : `<button type="button" class="side-handle${sideOpen ? '' : ' show'}" data-action="side-toggle">${ICON.list}<span>À planifier</span><b>${tray.length}</b></button>`;
 
   return `<div class="plan-bar">
       <div class="seg-mini" role="group" aria-label="Affichage">
@@ -1829,15 +1841,18 @@ function viewPlan() {
       <button type="button" class="icon-btn" data-action="plan-move" data-value="1" aria-label="Suivant">${ICON.right}</button>
     </div>
     ${state.events.length ? '' : '<p class="hint plan-hint">Astuce : ajoute tes horaires fixes (travail, cours…) avec <b>+ Événement</b>, puis cale tes tâches autour.</p>'}
+    <div class="plan-layout">
     <div class="cal${isDay ? ' is-day' : ''}">
       <div class="cal-head"><div class="cal-gutter"></div><div class="cal-days" style="--n:7">${heads}</div></div>
       <div class="cal-body">
-        <div class="cal-hours">${[...Array(23)].map((_, i) => `<span style="top:${(((i + 1) / 24) * 100).toFixed(3)}%">${i + 1}h</span>`).join('')}</div>
+        <div class="cal-hours">${[...Array(17)].map((_, i) => `<span style="top:${posPct((i + 7) * 60)}%">${i + 7}h</span>`).join('')}</div>
         <div class="cal-cols" style="--n:${shown.length}">${cols}</div>
       </div>
     </div>
-    <div class="tray"><div class="tray-inner">${trayBody}</div>
-      <div class="tray-drop">${ICON.trash} Déposer ici pour retirer du planning</div></div>`;
+    ${side}
+    </div>
+    ${floating}
+    <div class="drop-remove">${ICON.trash} Déposer ici pour retirer du planning</div>`;
 }
 
 // Fait défiler la grille vers le début de journée (ou l'heure actuelle cette semaine).
@@ -1846,9 +1861,9 @@ function scrollPlanToHour() {
   if (!col) return;
   const r = col.getBoundingClientRect();
   const showsToday = !!$('.cal-col.today');
-  const hour = showsToday ? Math.max(0, new Date().getHours() - 1) : 7;
+  const hour = showsToday ? Math.max(6, new Date().getHours() - 1) : 7;
   const head = $('.top').offsetHeight + $('.cal-head').offsetHeight;
-  window.scrollTo(0, Math.max(0, window.scrollY + r.top + (r.height / 24) * hour - head - 6));
+  window.scrollTo(0, Math.max(0, window.scrollY + r.top + ((hour * 60 - VIEW_START) / VIEW_SPAN) * r.height - head - 6));
 }
 
 function createPlan(taskId, day, startMin, dur = PLAN_DUR) {
@@ -1866,7 +1881,23 @@ function createPlan(taskId, day, startMin, dur = PLAN_DUR) {
 // Créneau touché dans une colonne : minute de la journée (arrondie à la demi-heure).
 function slotAt(col, y) {
   const r = col.getBoundingClientRect();
-  return Math.max(0, Math.min(DAY_MIN - 30, Math.floor((((y - r.top) / r.height) * DAY_MIN) / 30) * 30));
+  const m = VIEW_START + ((y - r.top) / r.height) * VIEW_SPAN;
+  return Math.max(VIEW_START, Math.min(DAY_MIN - 30, Math.floor(m / 30) * 30));
+}
+
+// Barre latérale : fixe à droite sur grand écran, volet qui glisse depuis la droite sur téléphone.
+const sideDocked = () => matchMedia('(min-width: 760px)').matches;
+function closeSideOnPhone() {
+  if (sideDocked() || state.ui.planSide === false) return;
+  state.ui.planSide = false;
+  writeLocal();
+  $('.side')?.classList.remove('open');
+}
+// Bas de la zone où l'on peut déposer (au-dessus de la barre d'onglets ou de la zone « retirer »).
+function gridBottom() {
+  const rm = $('.drop-remove');
+  const r = rm && getComputedStyle(rm).display !== 'none' ? rm.getBoundingClientRect() : $('.tabbar').getBoundingClientRect();
+  return r.top;
 }
 
 /* ----- Glisser-déposer (souris : tout de suite ; tactile : appui long puis glisser) ----- */
@@ -1899,7 +1930,7 @@ window.addEventListener('pointerup', () => { if (drag.active) endDrag(true); els
 window.addEventListener('pointercancel', () => { if (drag.active) endDrag(false); else cancelPending(); });
 // Pendant un glisser au doigt, la page ne doit pas défiler.
 document.addEventListener('touchmove', (e) => { if (drag.active) e.preventDefault(); }, { passive: false });
-document.addEventListener('contextmenu', (e) => { if (drag.active || drag.pending || e.target.closest('.cal, .tray')) e.preventDefault(); });
+document.addEventListener('contextmenu', (e) => { if (drag.active || drag.pending || e.target.closest('.cal, .side')) e.preventDefault(); });
 
 function cancelPending() {
   if (drag.pending) clearTimeout(drag.pending.timer);
@@ -1920,6 +1951,7 @@ function beginDrag() {
     a.ghost.style.setProperty('--c', a.color);
     document.body.appendChild(a.ghost);
     temp.placing = null;
+    closeSideOnPhone(); // le volet s'efface pour laisser toute la grille
   } else {
     const plan = state.plans.find((x) => x.id === p.id);
     const col = p.el.closest('.cal-col');
@@ -1931,9 +1963,9 @@ function beginDrag() {
     a.dur = Math.max(SNAP, minOfDay(plan.end, day) - a.startMin);
     a.color = colorOf(getTask(plan.taskId)?.projectId);
     const r = col.getBoundingClientRect();
-    a.grab = ((p.y0 - r.top) / r.height) * DAY_MIN - a.startMin;
+    a.grab = VIEW_START + ((p.y0 - r.top) / r.height) * VIEW_SPAN - a.startMin;
     p.el.classList.add('dragging');
-    if (p.kind === 'move') $('.tray')?.classList.add('drop-on');
+    if (p.kind === 'move') document.body.classList.add('drag-move');
   }
   drag.active = a;
   document.body.classList.add('is-dragging');
@@ -1944,20 +1976,24 @@ function beginDrag() {
 
 function dropTarget(x, y) {
   const a = drag.active;
-  const tray = $('.tray')?.getBoundingClientRect();
+  const inside = (el) => { const r = el?.getBoundingClientRect(); return r && r.width && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom; };
+  // Bloc déposé sur la zone « retirer » (ou sur la barre latérale fixe) : on le retire du planning.
+  // (sur téléphone, le volet s'efface pendant le glisser : on n'en tient pas compte)
+  const overSide = sideDocked() && inside($('.side'));
+  if (a.kind === 'move' && (inside($('.drop-remove')) || overSide)) return { tray: true };
+  if (overSide || y >= gridBottom()) return null;
   const headBottom = $('.cal-head')?.getBoundingClientRect().bottom ?? 0;
-  if (tray && y >= tray.top) return { tray: true };
   if (y < headBottom) return null;
   for (const col of $$('.cal-col')) {
     const r = col.getBoundingClientRect();
     if (x < r.left - 1 || x > r.right + 1) continue;
-    const at = ((y - r.top) / r.height) * DAY_MIN;
+    const at = VIEW_START + ((y - r.top) / r.height) * VIEW_SPAN;
     if (a.kind === 'resize') {
       if (col.dataset.day !== a.day) return null;
       const end = Math.max(a.startMin + SNAP, Math.min(DAY_MIN, Math.round(at / SNAP) * SNAP));
       return { col, day: a.day, start: a.startMin, end };
     }
-    const start = Math.max(0, Math.min(DAY_MIN - a.dur, Math.round((at - a.grab) / SNAP) * SNAP));
+    const start = Math.max(VIEW_START, Math.min(DAY_MIN - a.dur, Math.round((at - a.grab) / SNAP) * SNAP));
     return { col, day: col.dataset.day, start, end: start + a.dur };
   }
   return null;
@@ -1969,7 +2005,7 @@ function moveDrag(x, y) {
   if (a.ghost) a.ghost.style.transform = `translate(${x}px, ${y}px)`;
   const target = dropTarget(x, y);
   a.target = target;
-  $('.tray')?.classList.toggle('drop-hover', !!target?.tray && a.kind === 'move');
+  document.body.classList.toggle('drop-hover', !!target?.tray && a.kind === 'move');
   let pv = $('.plan-preview');
   if (!target?.col) { pv?.remove(); return; }
   if (!pv || pv.parentElement !== target.col) {
@@ -1978,8 +2014,8 @@ function moveDrag(x, y) {
     target.col.appendChild(pv);
   }
   pv.style.setProperty('--c', a.color);
-  pv.style.top = `${(target.start / DAY_MIN) * 100}%`;
-  pv.style.height = `${((target.end - target.start) / DAY_MIN) * 100}%`;
+  pv.style.top = `${posPct(target.start)}%`;
+  pv.style.height = `${((target.end - target.start) / VIEW_SPAN) * 100}%`;
   pv.textContent = `${minLabel(target.start)}–${minLabel(target.end)}`;
 }
 
@@ -1987,7 +2023,7 @@ function moveDrag(x, y) {
 function autoScroll() {
   const a = drag.active;
   if (!a) return;
-  const tray = $('.tray')?.getBoundingClientRect().top ?? innerHeight;
+  const tray = gridBottom();
   const head = $('.cal-head')?.getBoundingClientRect().bottom ?? 0;
   let dy = 0;
   if (a.y < head + 50 && a.y > head - 80) dy = -Math.ceil((head + 50 - a.y) / 6);
@@ -2002,7 +2038,7 @@ function endDrag(drop) {
   cancelAnimationFrame(drag.raf);
   a.ghost?.remove();
   $('.plan-preview')?.remove();
-  document.body.classList.remove('is-dragging');
+  document.body.classList.remove('is-dragging', 'drag-move', 'drop-hover');
   temp.suppressClick = true; // le relâchement ne doit pas compter comme un « toucher »
   setTimeout(() => { temp.suppressClick = false; }, 350);
   const tg = drop ? a.target : null;
@@ -2136,12 +2172,14 @@ function placeHere(el, e) {
 
 // Avant le reste : un relâchement de glisser-déposer ne doit pas déclencher d'action.
 document.addEventListener('click', (e) => {
-  if (temp.suppressClick && e.target.closest('.cal, .tray')) { e.preventDefault(); e.stopPropagation(); }
+  if (temp.suppressClick && e.target.closest('.cal, .side')) { e.preventDefault(); e.stopPropagation(); }
 }, true);
+// Un nouveau toucher n'est jamais ignoré.
+document.addEventListener('pointerdown', () => { temp.suppressClick = false; }, true);
 
 setInterval(() => {
   const line = $('.now-line');
-  if (line && !drag.active) line.style.top = `${(((new Date().getHours() * 60 + new Date().getMinutes()) / DAY_MIN) * 100).toFixed(3)}%`;
+  if (line && !drag.active) line.style.top = `${posPct(new Date().getHours() * 60 + new Date().getMinutes())}%`;
 }, 60e3);
 
 new ResizeObserver(() => document.documentElement.style.setProperty('--top-h', `${$('.top').offsetHeight}px`)).observe($('.top'));
@@ -2165,9 +2203,11 @@ const actions = {
   'pick-tray'(el) {
     const id = el.dataset.dragTask;
     temp.placing = temp.placing === id ? null : id;
+    if (temp.placing) closeSideOnPhone();
     document.body.classList.toggle('placing', !!temp.placing);
     render();
   },
+  'side-toggle'() { state.ui.planSide = state.ui.planSide === false; writeLocal(); render(); },
   'cancel-placing'() { temp.placing = null; document.body.classList.remove('placing'); render(); },
   slot(el, e) {
     if (placeHere(el, e)) return;
