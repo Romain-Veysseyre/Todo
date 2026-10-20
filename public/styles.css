@@ -118,7 +118,7 @@ svg .fill, svg.fill { fill: currentColor; stroke: none; }
 }
 .fab svg { width: 28px; height: 28px; stroke-width: 2.4; }
 .fab:active { transform: scale(.94); }
-body:not([data-tab="tasks"]) .fab { display: none; }
+body:not([data-tab="tasks"]):not([data-in-project]) .fab { display: none; }
 
 /* ---------- Puces de filtre ---------- */
 .chips { display: flex; gap: 8px; overflow-x: auto; padding: 4px 16px 10px; margin: 0 -16px; scrollbar-width: none; }
@@ -368,3 +368,12 @@ dialog.ask { border: 0; border-radius: 20px; padding: 0; width: min(92vw, 380px)
 .summary small { display: block; font-size: 12.5px; color: var(--muted); font-weight: 600; }
 .summary b { font-size: 21px; font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
 .summary:active { opacity: .85; }
+
+/* ---------- Page d'un projet ---------- */
+.proj-nav { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 0 10px; }
+.proj-nav .back { display: inline-flex; align-items: center; gap: 2px; padding: 8px 4px 8px 0; font-size: 16px; }
+.proj-nav .back svg { width: 20px; height: 20px; }
+.proj-summary { border-left: 4px solid var(--c); }
+.section-title button { display: inline-flex; align-items: center; gap: 4px; }
+.section-title button svg { width: 16px; height: 16px; stroke-width: 2.6; }
+.section-empty { margin: 0 2px; }
