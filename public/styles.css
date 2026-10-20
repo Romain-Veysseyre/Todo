@@ -941,3 +941,35 @@ body.is-sorting, body.is-sorting * { cursor: grabbing !important; user-select: n
 .pp-x { width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; color: inherit; }
 .pp-x svg { width: 14px; height: 14px; }
 .pp-x:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+
+/* ---------- Choix du projet / sous-projet dans les fiches ---------- */
+.pick-field { position: relative; }
+.pick-btn {
+  width: 100%; min-height: 48px; display: flex; align-items: center; gap: 8px; padding: 0 10px 0 13px; text-align: left;
+  border-radius: 12px; border: 1.5px solid var(--line); background: var(--card-2); font-size: 16px;
+}
+.slot-new .pick-btn { background: var(--card); }
+.pick-btn i { width: 10px; height: 10px; border-radius: 50%; background: var(--c); flex: none; }
+.pick-btn span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pick-btn svg { width: 16px; height: 16px; flex: none; color: var(--muted); }
+.pick-btn:disabled { opacity: .5; }
+.pick-btn:not(:disabled):hover { border-color: var(--accent); }
+.pf-menu {
+  position: absolute; left: 0; top: calc(100% + 4px); z-index: 30; width: max(100%, 240px); max-height: min(50vh, 340px); overflow-y: auto;
+  padding: 6px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 16px 40px rgba(15, 15, 30, .2);
+  animation: menu-in .14s ease-out;
+}
+.row2 .pick-field:last-child .pf-menu { left: auto; right: 0; }
+.proj-opt[style*="transparent"] i { border: 1.5px dashed var(--muted); }
+.pf-new { color: var(--accent); }
+.pf-new svg { width: 16px; height: 16px; }
+
+/* Nettoyer les projets inutilisés */
+.clean-btn { margin-top: 2px; color: var(--muted); }
+.clean-list { padding: 2px 0; }
+.clean-row { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.clean-row:last-child { border-bottom: 0; }
+.clean-row input { width: 20px; height: 20px; accent-color: var(--danger); flex: none; }
+.clean-row .dot { background: var(--c); }
+.clean-row span:last-child { flex: 1; min-width: 0; font-weight: 620; }
+.clean-row small { display: block; font-weight: 500; font-size: 12.5px; color: var(--muted); }

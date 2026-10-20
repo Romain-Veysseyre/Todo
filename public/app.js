@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.2.0';
+const VERSION = '2.3.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -226,6 +226,12 @@ function deleteSub(id) {
   for (const x of [...state.tasks, ...state.sessions]) if (x.subprojectId === id) x.subprojectId = null;
   state.subprojects = state.subprojects.filter((s) => s.id !== id);
   if (state.ui.subfilter === id) state.ui.subfilter = 'all';
+}
+
+// Projets sans aucune tâche (même terminée) ni temps enregistré.
+function unusedProjects() {
+  const used = new Set([...state.tasks, ...state.sessions, ...state.plans.map((p) => getTask(p.taskId) || {})].map((x) => x.projectId).filter(Boolean));
+  return state.projects.filter((p) => !used.has(p.id));
 }
 
 function deleteProject(id) {
@@ -607,6 +613,7 @@ function viewProjects() {
     ${active.length ? `<div class="card proj-list">${active.map(row).join('')}</div>` : '<div class="empty"><b>Aucun projet</b>Crée un projet pour classer tes tâches.</div>'}
     <button type="button" class="btn primary wide" data-action="new-project">${ICON.plus} Nouveau projet</button>
     ${archived.length ? `<div class="section-title">Archivés</div><div class="card proj-list">${archived.map(row).join('')}</div>` : ''}
+    ${unusedProjects().length ? `<button type="button" class="btn ghost wide clean-btn" data-action="clean-projects">🧹 Nettoyer les projets inutilisés (${unusedProjects().length})</button>` : ''}
     <p class="hint center">Touche un projet pour voir ses tâches. Glisse la poignée ⋮⋮ pour changer l’ordre.</p>
   </div>`;
 }
@@ -911,14 +918,50 @@ function toast(msg, action) {
 
 /* ----- Tâche ----- */
 
-function projectOptions(selected) {
-  const list = state.projects.filter((p) => !p.archived || p.id === selected);
-  return `<option value="">Sans projet</option>${list.map((p) => `<option value="${p.id}"${p.id === selected ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}<option value="__new">＋ Nouveau projet…</option>`;
+// Projet et sous-projet d'une fiche : boutons qui ouvrent un menu (comme la barre « À planifier »).
+const projBtn = (pid) => {
+  const p = getProject(pid);
+  return `<i style="--c:${p ? p.color : 'transparent'}"></i><span>${esc(p ? p.name : 'Sans projet')}</span>${ICON.down}`;
+};
+const subBtn = (pid, sid) => `<span>${esc(getSub(sid)?.name || (pid ? 'Aucun' : '—'))}</span>${ICON.down}`;
+
+function pickFields(projectId, subprojectId) {
+  return `<div class="row2">
+      <div class="field pick-field"><span>Projet</span><input type="hidden" name="projectId" value="${projectId || ''}">
+        <button type="button" class="pick-btn" data-action="pf-open" data-field="project" aria-haspopup="menu">${projBtn(projectId)}</button></div>
+      <div class="field pick-field"><span>Sous-projet</span><input type="hidden" name="subprojectId" value="${projectId && subprojectId ? subprojectId : ''}">
+        <button type="button" class="pick-btn" data-action="pf-open" data-field="sub" aria-haspopup="menu"${projectId ? '' : ' disabled'}>${subBtn(projectId, subprojectId)}</button></div>
+    </div>`;
 }
 
-function subOptions(projectId, selected) {
-  if (!projectId) return '<option value="">—</option>';
-  return `<option value="">Aucun</option>${subsOf(projectId).map((s) => `<option value="${s.id}"${s.id === selected ? ' selected' : ''}>${esc(s.name)}</option>`).join('')}<option value="__new">＋ Nouveau sous-projet…</option>`;
+function pfMenu(form, field) {
+  const pid = form.elements.projectId.value;
+  const sid = form.elements.subprojectId.value;
+  const opt = (value, label, color, n, on) => `<button type="button" role="menuitemradio" aria-checked="${on}" class="proj-opt${on ? ' on' : ''}" data-action="pf-choose" data-field="${field}" data-value="${value}" style="--c:${color}">
+      <i></i><span>${esc(label)}</span>${n ? `<small>${n}</small>` : ''}</button>`;
+  if (field === 'project') {
+    const counts = new Map();
+    for (const t of state.tasks) if (!t.done && t.projectId) counts.set(t.projectId, (counts.get(t.projectId) || 0) + 1);
+    return `<div class="pf-menu" role="menu">
+      ${opt('', 'Sans projet', 'transparent', 0, !pid)}
+      ${state.projects.filter((p) => !p.archived || p.id === pid).map((p) => opt(p.id, p.name, p.color, counts.get(p.id), p.id === pid)).join('')}
+      <button type="button" class="proj-opt pf-new" data-action="pf-choose" data-field="project" data-value="__new">${ICON.plus}<span>Nouveau projet…</span></button>
+    </div>`;
+  }
+  const color = getProject(pid)?.color || NO_COLOR;
+  return `<div class="pf-menu" role="menu">
+    ${opt('', 'Aucun sous-projet', 'transparent', 0, !sid)}
+    ${subsOf(pid).map((x) => opt(x.id, x.name, color, 0, x.id === sid)).join('')}
+    <button type="button" class="proj-opt pf-new" data-action="pf-choose" data-field="sub" data-value="__new">${ICON.plus}<span>Nouveau sous-projet…</span></button>
+  </div>`;
+}
+
+function pfRefresh(form) {
+  const pid = form.elements.projectId.value;
+  const [pb, sb] = form.querySelectorAll('.pick-btn');
+  pb.innerHTML = projBtn(pid);
+  sb.innerHTML = subBtn(pid, form.elements.subprojectId.value);
+  sb.disabled = !pid;
 }
 
 function newTaskDefaults() {
@@ -962,14 +1005,11 @@ function openTaskSheet(id, preset) {
         <button type="button" class="btn primary grow" data-action="close-sheet">OK</button>
       </div>`;
 
-  openSheet(`<form class="sheet-body" data-form="task" data-id="${id || ''}" data-pp="${t.projectId || ''}" autocomplete="off">
+  openSheet(`<form class="sheet-body" data-form="task" data-id="${id || ''}" autocomplete="off">
     ${head(isNew ? 'Nouvelle tâche' : 'Tâche')}
     <label class="field"><span>Tâche</span>${emojiField(`<input class="big" name="title" value="${esc(t.title)}" placeholder="Ex. Préparer le cours S2" maxlength="200" required enterkeyhint="done"${isNew ? ' autofocus' : ''}>`)}</label>
     <label class="toggle star-toggle"><input type="checkbox" name="starred"${t.starred ? ' checked' : ''}> ${ICON.star} Prioritaire (affichée en premier)</label>
-    <div class="row2">
-      <label class="field"><span>Projet</span><select name="projectId">${projectOptions(t.projectId)}</select></label>
-      <label class="field"><span>Sous-projet</span><select name="subprojectId"${t.projectId ? '' : ' disabled'}>${subOptions(t.projectId, t.subprojectId)}</select></label>
-    </div>
+    ${pickFields(t.projectId, t.subprojectId)}
     <label class="field"><span>Échéance (facultatif)</span><input type="date" name="deadline" value="${esc(t.deadline || '')}"></label>
     <div class="quick-dates">
       <button type="button" data-action="set-deadline" data-value="0">Aujourd’hui</button>
@@ -1039,26 +1079,10 @@ function createTask(form, start) {
   else { save(); render(); toast(`Tâche ajoutée${planned}`); }
 }
 
-sheet.addEventListener('change', async (e) => {
+// Fiche d'une tâche existante : chaque modification est enregistrée aussitôt.
+sheet.addEventListener('change', (e) => {
   const form = e.target.closest('form[data-form="task"]');
-  if (!form) return;
-  const ps = form.elements.projectId;
-  const ss = form.elements.subprojectId;
-  if (e.target === ps) {
-    if (ps.value === '__new') {
-      const name = await ask({ title: 'Nouveau projet', input: true, placeholder: 'Nom du projet', ok: 'Créer', emoji: true });
-      if (name) { const p = addProject(name); save(); ps.innerHTML = projectOptions(p.id); }
-      else ps.value = form.dataset.pp;
-    }
-    form.dataset.pp = ps.value;
-    ss.innerHTML = subOptions(ps.value, null);
-    ss.disabled = !ps.value;
-  } else if (e.target === ss && ss.value === '__new') {
-    const name = await ask({ title: 'Nouveau sous-projet', text: `Dans « ${getProject(ps.value)?.name || ''} »`, input: true, placeholder: 'Nom du sous-projet', ok: 'Créer', emoji: true });
-    if (name) { const s = addSub(ps.value, name); save(); ss.innerHTML = subOptions(ps.value, s.id); }
-    else ss.value = '';
-  }
-  if (form.dataset.id && form.isConnected) { commitTaskForm(form); render(); }
+  if (form?.dataset.id && form.isConnected) { commitTaskForm(form); render(); }
 });
 
 /* ----- Projet ----- */
@@ -1185,6 +1209,16 @@ sheet.addEventListener('submit', (e) => {
   } else if (form.dataset.form === 'project') saveProject(form);
   else if (form.dataset.form === 'session') saveSession(form);
   else if (form.dataset.form === 'event') saveEvent(form);
+  else if (form.dataset.form === 'clean') {
+    const ids = new Set(new FormData(form).getAll('drop'));
+    if (!ids.size) { closeSheet(); return; }
+    const removed = { projects: state.projects.filter((p) => ids.has(p.id)), subs: state.subprojects.filter((x) => ids.has(x.projectId)) };
+    for (const id of ids) deleteProject(id);
+    save(); closeSheet(); render();
+    toast(`${ids.size} projet${ids.size > 1 ? 's supprimés' : ' supprimé'}`, {
+      label: 'Annuler', fn: () => { state.projects.push(...removed.projects); state.subprojects.push(...removed.subs); save(); render(); },
+    });
+  }
   else if (form.dataset.form === 'plan') closeSheet();
 });
 
@@ -1450,6 +1484,19 @@ function mergeTimers(a, b) {
   return { taskId: win.taskId, start: win.start };
 }
 
+// Première fusion avec les autres appareils : les projets jamais utilisés de cet appareil
+// (projets de départ, par exemple) ne sont pas envoyés aux autres.
+function pruneUnusedLocal(remote) {
+  if (!remote.projects.length) return false;
+  const remoteIds = new Set(remote.projects.map((p) => p.id));
+  const used = new Set([...state.tasks, ...state.sessions].map((x) => x.projectId).filter(Boolean));
+  const drop = new Set(state.projects.filter((p) => !remoteIds.has(p.id) && !used.has(p.id)).map((p) => p.id));
+  if (!drop.size) return false;
+  state.projects = state.projects.filter((p) => !drop.has(p.id));
+  state.subprojects = state.subprojects.filter((x) => !drop.has(x.projectId));
+  return true;
+}
+
 // Avant une première fusion : les projets et sous-projets de même nom ne sont pas dédoublés.
 function adoptNames(remote) {
   const norm = (s) => String(s || '').trim().toLowerCase();
@@ -1558,7 +1605,8 @@ async function syncOnce(opts = {}) {
     }
     if (remote) ui.pristine = false;
     if (remote) {
-      const adopted = !ui.syncRev && adoptNames(remote); // première fusion : pas de projets en double
+      const pruned = !ui.syncRev && pruneUnusedLocal(remote);
+      const adopted = (!ui.syncRev && adoptNames(remote)) || pruned; // première fusion : pas de projets en double
       const { changed, differs } = mergeRemote(remote);
       if (changed || adopted) { snapshot(); render(); }
       push = differs || legacy;
@@ -1662,6 +1710,7 @@ async function joinSync() {
       ok: 'Regrouper',
     });
     if (!ok) return;
+    pruneUnusedLocal(remote);
     adoptNames(remote);
   }
   mergeRemote(remote);
@@ -2381,12 +2430,9 @@ function openSlotSheet(day, min, maxDur = DAY_MIN - min) {
   const pick = durs.includes(PLAN_DUR) ? PLAN_DUR : durs[durs.length - 1];
   openSheet(`<div class="sheet-body">
     ${head(`${cap(fmt(d, { weekday: 'long', day: 'numeric', month: 'short' }))} · ${minLabel(min)}`)}
-    <form class="slot-new" data-form="task" data-slot-day="${day}" data-slot-min="${min}" data-pp="${def.projectId || ''}" autocomplete="off">
+    <form class="slot-new" data-form="task" data-slot-day="${day}" data-slot-min="${min}" autocomplete="off">
       <label class="field"><span>Nouvelle tâche à ${minLabel(min)}</span>${emojiField(`<input class="big" name="title" placeholder="Ex. Appeler le garage" maxlength="200" required enterkeyhint="done"${matchMedia('(pointer: fine)').matches ? ' autofocus' : ''}>`)}</label>
-      <div class="row2">
-        <label class="field"><span>Projet</span><select name="projectId">${projectOptions(def.projectId)}</select></label>
-        <label class="field"><span>Sous-projet</span><select name="subprojectId"${def.projectId ? '' : ' disabled'}>${subOptions(def.projectId, def.subprojectId)}</select></label>
-      </div>
+      ${pickFields(def.projectId, def.subprojectId)}
       <div class="field"><span>Durée</span><div class="dur-pick">${durs.map((x) => `<label><input type="radio" name="dur" value="${x}"${x === pick ? ' checked' : ''}><span>${fmtDur(x * 60e3)}</span></label>`).join('')}</div></div>
       <button class="btn primary wide">${ICON.plus} Créer et planifier à ${minLabel(min)}</button>
     </form>
@@ -3222,6 +3268,50 @@ const actions = {
     } else validateToday(kind, id);
   },
   'today-later'(el) { postponeToday(el.dataset.kind, el.dataset.id); },
+  'pf-open'(el) {
+    const field = el.closest('.pick-field');
+    const open = field.querySelector('.pf-menu');
+    $$('.pf-menu').forEach((m) => m.remove());
+    if (!open) field.insertAdjacentHTML('beforeend', pfMenu(el.closest('form'), el.dataset.field));
+  },
+  async 'pf-choose'(el) {
+    const form = el.closest('form');
+    const { field } = el.dataset;
+    let val = el.dataset.value;
+    el.closest('.pf-menu').remove();
+    if (field === 'project') {
+      if (val === '__new') {
+        const name = await ask({ title: 'Nouveau projet', input: true, placeholder: 'Nom du projet', ok: 'Créer', emoji: true });
+        if (!name) return;
+        val = addProject(name).id;
+        save();
+      }
+      if (val !== form.elements.projectId.value) form.elements.subprojectId.value = '';
+      form.elements.projectId.value = val;
+    } else {
+      if (val === '__new') {
+        const pid = form.elements.projectId.value;
+        const name = await ask({ title: 'Nouveau sous-projet', text: `Dans « ${getProject(pid)?.name || ''} »`, input: true, placeholder: 'Nom du sous-projet', ok: 'Créer', emoji: true });
+        if (!name) return;
+        val = addSub(pid, name).id;
+        save();
+      }
+      form.elements.subprojectId.value = val;
+    }
+    pfRefresh(form);
+    if (form.dataset.id && form.isConnected) { commitTaskForm(form); render(); }
+  },
+  'clean-projects'() {
+    const list = unusedProjects();
+    if (!list.length) return;
+    openSheet(`<form class="sheet-body" data-form="clean">
+      ${head('Projets inutilisés')}
+      <p class="hint" style="margin-top:0">Ces projets n’ont ni tâche ni temps enregistré. Décoche ceux que tu veux garder.</p>
+      <div class="card clean-list">${list.map((p) => `<label class="clean-row" style="--c:${p.color}"><input type="checkbox" name="drop" value="${p.id}" checked>
+        <span class="dot"></span><span>${esc(p.name)}${subsOf(p.id).length ? `<small>${esc(subsOf(p.id).map((x) => x.name).join(' · '))}</small>` : ''}</span></label>`).join('')}</div>
+      <div class="sheet-actions"><button class="btn danger solid grow">${ICON.trash} Supprimer la sélection</button></div>
+    </form>`);
+  },
   'pp-pick'(el) { ppOpen(el.closest('.pp'), el.dataset.day, Number(el.dataset.min)); },
   'pp-other'(el) {
     const pp = el.closest('.pp');
@@ -3468,6 +3558,8 @@ const actions = {
 };
 
 document.addEventListener('click', (e) => {
+  const pf = $('.pf-menu');
+  if (pf && !e.target.closest('.pf-menu, [data-action="pf-open"]')) pf.remove();
   if (temp.projMenu && !e.target.closest('.proj-pick')) { temp.projMenu = false; $('.proj-menu')?.remove(); $('.side-proj')?.classList.remove('open'); }
   if (temp.catMenu && !e.target.closest('.strip-cat, .cat-menu')) { temp.catMenu = false; $('.cat-menu')?.remove(); $('.strip-cat')?.classList.remove('open'); }
   const el = e.target.closest('[data-action]');
