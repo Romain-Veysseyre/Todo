@@ -8,6 +8,7 @@ Todo avec chronomètre par tâche, projets et sous-projets. Application web inst
 - **Tâches** : titre, projet, sous-projet, échéance, notes. Badges « En retard », « Aujourd’hui », « Demain ».
 - **Chrono** : bouton ▶ sur chaque tâche. Plusieurs chronos peuvent tourner en même temps (un par tâche) : lancer une tâche n’arrête pas les autres. Le bandeau du haut affiche une ligne par chrono, chacune avec son bouton d’arrêt. Les chronos continuent même si l’app est fermée. Au-delà de 4 h, l’app propose de corriger la durée (chrono oublié).
 - **Journal** : chaque session est enregistrée, modifiable, et on peut ajouter du temps à la main.
+- **Temps prévu** : une tâche planifiée terminée sans aucun temps chronométré propose d’enregistrer la durée prévue au planning (à l’heure du créneau, ou se terminant maintenant si elle est finie en avance). Si un chrono tourne, sa durée réelle est gardée et la question n’est pas posée. Pour une tâche régulière, la question porte sur le créneau validé du jour.
 - **Projets / sous-projets** : couleurs, archivage (masqué mais gardé dans les stats).
 - **Stats** : jour, semaine, mois, trimestre et année scolaire (août → juillet), par projet, sous-projet et tâche.
 - **Sauvegarde** : export/import JSON, export du journal en CSV pour Excel.

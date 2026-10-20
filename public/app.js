@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.6.0';
+const VERSION = '2.7.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -909,12 +909,12 @@ window.addEventListener('popstate', () => {
 });
 sheet.addEventListener('click', (e) => { if (e.target === sheet) closeSheet(); });
 
-function ask({ title, text = '', input = false, value = '', placeholder = '', ok = 'OK', danger = false, code = false, emoji = false }) {
+function ask({ title, text = '', input = false, value = '', placeholder = '', ok = 'OK', cancel = 'Annuler', danger = false, code = false, emoji = false }) {
   const d = $('#ask');
   d.innerHTML = `<form class="ask-form">
     <h3>${esc(title)}</h3>${text ? `<p>${esc(text)}</p>` : ''}
     ${input ? (emoji ? emojiField : (h) => h)(`<input name="v" value="${esc(value)}" placeholder="${esc(placeholder)}" maxlength="60" autocomplete="off" autofocus enterkeyhint="done"${code ? ' class="code" autocapitalize="characters" autocorrect="off" spellcheck="false"' : ''}>`) : ''}
-    <div class="ask-actions"><button type="button" class="btn ghost" data-ask="cancel">Annuler</button><button class="btn ${danger ? 'danger solid' : 'primary'}">${esc(ok)}</button></div>
+    <div class="ask-actions"><button type="button" class="btn ghost" data-ask="cancel">${esc(cancel)}</button><button class="btn ${danger ? 'danger solid' : 'primary'}">${esc(ok)}</button></div>
   </form>`;
   return new Promise((resolve) => {
     const form = $('form', d);
@@ -3138,7 +3138,7 @@ function celebrate() {
 }
 
 // Valider (ou dévalider) un bloc ou une tâche de la journée.
-function validateToday(kind, id) {
+async function validateToday(kind, id) {
   const before = todayModel();
   if (kind === 'plan') {
     const p = state.plans.find((x) => x.id === id);
@@ -3150,28 +3150,78 @@ function validateToday(kind, id) {
       save(); render();
       return;
     }
+    const extra = await askPlannedTime(t, plannedToCount(t, p));
     const prev = { pDone: !!p.done, tDone: t.done, tAt: t.doneAt };
     const stopped = finishTimer(t.id);
     p.done = true;
+    state.sessions.push(...extra);
     // Si la tâche a d'autres créneaux à venir, seul ce créneau est validé.
     const later = state.plans.filter((x) => x.taskId === t.id && x !== p && !x.done && x.start > now()).sort((a, b) => a.start - b.start)[0];
     if (!later) { t.done = true; t.doneAt = now(); }
     save(); render();
-    doneToast(before, later ? `Créneau validé · suite ${planLabel(later)}` : 'Bravo, tâche terminée ✓',
-      () => { p.done = prev.pDone; t.done = prev.tDone; t.doneAt = prev.tAt; save(); render(); });
+    doneToast(before, `${later ? `Créneau validé · suite ${planLabel(later)}` : 'Bravo, tâche terminée ✓'}${countedLabel(extra)}`, () => {
+      Object.assign(p, { done: prev.pDone });
+      Object.assign(t, { done: prev.tDone, doneAt: prev.tAt });
+      state.sessions = state.sessions.filter((s) => !extra.includes(s));
+      save(); render();
+    });
     afterTimer(stopped, null);
   } else {
     const t = getTask(id);
     if (!t) return;
     if (t.done) { t.done = false; t.doneAt = null; save(); render(); return; }
+    const extra = await askPlannedTime(t, plannedToCount(t));
     const stopped = finishTimer(t.id);
     t.done = true;
     t.doneAt = now();
+    state.sessions.push(...extra);
     save(); render();
-    doneToast(before, 'Bravo, tâche terminée ✓', () => { t.done = false; t.doneAt = null; save(); render(); });
+    doneToast(before, `Bravo, tâche terminée ✓${countedLabel(extra)}`, () => {
+      t.done = false; t.doneAt = null;
+      state.sessions = state.sessions.filter((s) => !extra.includes(s));
+      save(); render();
+    });
     afterTimer(stopped, null);
   }
 }
+
+// Tâche terminée sans temps chronométré mais planifiée : créneaux dont on peut compter le temps prévu.
+// Rien si un chrono tourne (sa durée réelle passe avant). p : créneau validé dans « Ma journée »
+// (pour une tâche régulière, on regarde seulement ce jour-là) ; sinon les créneaux déjà commencés (ou le prochain).
+function plannedToCount(t, p) {
+  if (timerOf(t.id)) return [];
+  if (p) {
+    if (p.allDay) return [];
+    const day = ymd(new Date(p.start));
+    const [a, b] = p.series ? [dateAt(day, 0), dateAt(day, DAY_MIN)] : [-Infinity, Infinity];
+    return state.sessions.some((s) => s.taskId === t.id && s.end > a && s.start < b) ? [] : [p];
+  }
+  if (state.sessions.some((s) => s.taskId === t.id)) return [];
+  const mine = state.plans.filter((x) => x.taskId === t.id && !x.allDay && !x.done).sort((x, y) => x.start - y.start);
+  const started = mine.filter((x) => x.start <= now());
+  return started.length ? started : mine.slice(0, 1);
+}
+
+// Demande s'il faut enregistrer le temps prévu ; renvoie les sessions à ajouter (aucune si « Non »).
+// Un créneau à venir (tâche finie en avance) est compté comme se terminant maintenant.
+async function askPlannedTime(t, plans) {
+  if (!plans.length) return [];
+  const total = plans.reduce((n, x) => n + (x.end - x.start), 0);
+  const slot = (x) => `${fmt(new Date(x.start), { weekday: 'short', day: 'numeric' })} · ${hm(new Date(x.start)).replace(':', 'h')}–${hm(new Date(x.end)).replace(':', 'h')}`;
+  const ok = await ask({
+    title: 'Enregistrer le temps prévu ?',
+    text: `Aucun temps chronométré pour « ${t.title} ». Compter ${fmtDur(total)}, la durée prévue au planning (${plans.length > 1 ? `${plans.length} créneaux` : slot(plans[0])}) ?`,
+    ok: `Enregistrer ${fmtDur(total)}`,
+    cancel: 'Non',
+  });
+  if (!ok) return [];
+  const n = now();
+  return plans.map((x) => {
+    const [start, end] = x.start > n ? [n - (x.end - x.start), n] : [x.start, x.end];
+    return { id: uid(), taskId: t.id, title: t.title, projectId: t.projectId || null, subprojectId: t.subprojectId || null, start, end };
+  });
+}
+const countedLabel = (list) => (list.length ? ` · ${fmtDur(list.reduce((n, s) => n + (s.end - s.start), 0))} comptée${list.length > 1 ? 's' : ''}` : '');
 
 // Un seul message (avec « Annuler ») ; s'il bouclait la journée, on fête ça.
 function doneToast(before, msg, undo) {
@@ -3500,16 +3550,24 @@ const actions = {
   'pick-profile'(el) { selectProfile(el.dataset.value); },
   'switch-profile'() { leaveProfile(); },
 
-  'toggle-done'(el) {
+  async 'toggle-done'(el) {
     const t = getTask(el.dataset.id);
     if (!t) return;
     const inSheet = !!el.closest('#sheet');
     if (inSheet) closeSheet(); // enregistre aussi les modifications du formulaire
+    const extra = t.done ? [] : await askPlannedTime(t, plannedToCount(t));
     const done = t.done ? null : finishTimer(t.id);
     t.done = !t.done;
     t.doneAt = t.done ? now() : null;
+    state.sessions.push(...extra);
     save(); render(); buzz();
-    if (t.done) toast('Tâche terminée', { label: 'Annuler', fn: () => { t.done = false; t.doneAt = null; save(); render(); } });
+    if (t.done) {
+      toast(`Tâche terminée${countedLabel(extra)}`, { label: 'Annuler', fn: () => {
+        t.done = false; t.doneAt = null;
+        state.sessions = state.sessions.filter((s) => !extra.includes(s));
+        save(); render();
+      } });
+    }
     afterTimer(done, null);
   },
   'open-task'(el) { openTaskSheet(el.dataset.id); },
