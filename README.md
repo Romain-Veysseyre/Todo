@@ -4,6 +4,7 @@ Todo avec chronomètre par tâche, projets et sous-projets. Application web inst
 
 ## Fonctionnalités
 
+- **Ma journée** (onglet « Aujourd’hui », page d’accueil) : progression du jour, temps chronométré par projet, carte « Maintenant / Ensuite », programme du jour (événements, créneaux, créneaux libres, ligne « maintenant »), tâches du jour et en retard en blocs à valider (✓ ou balayage vers la droite ; balayage vers la gauche = reporter à demain), « Caler » / « Tout caler » dans les créneaux libres, prioritaires à ajouter, récap des tâches faites, aperçu de demain.
 - **Tâches** : titre, projet, sous-projet, échéance, notes. Badges « En retard », « Aujourd’hui », « Demain ».
 - **Chrono** : bouton ▶ sur chaque tâche. Un seul chrono à la fois (lancer une tâche arrête la précédente). Il continue même si l’app est fermée. Au-delà de 4 h, l’app propose de corriger la durée (chrono oublié).
 - **Journal** : chaque session est enregistrée, modifiable, et on peut ajouter du temps à la main.

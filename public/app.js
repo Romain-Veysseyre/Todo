@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '1.9.1';
+const VERSION = '2.0.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -65,7 +65,7 @@ function blankState() {
     active: null,    // { taskId, start }
     deleted: {},     // id supprimé (ou "timer:…" pour un chrono arrêté) → date, pour la synchro
     ui: {
-      tab: 'tasks', filter: 'all', subfilter: 'all', showDone: false,
+      tab: 'today', filter: 'all', subfilter: 'all', showDone: false,
       period: 'week', offset: 0, lastProjectId: '', lastSubId: '', lastBackup: 0, hideInstall: false,
       syncRev: '',       // version du serveur déjà fusionnée dans ces données
       syncDirty: false,  // modifications pas encore envoyées
@@ -366,6 +366,7 @@ function selectProfile(id) {
   snapshot();
   Object.assign(temp, { openProject: null, keys: null });
   temp.statsOpen.clear();
+  state.ui.tab = 'today'; // la journée est la page d'accueil
   writeLocal();
   render();
   window.scrollTo(0, 0);
@@ -417,11 +418,11 @@ function render() {
   if (openP) document.body.dataset.inProject = '1'; else delete document.body.dataset.inProject;
   if (tab !== 'plan') temp.placing = null;
   document.body.classList.toggle('placing', !!temp.placing);
-  $('#title').textContent = openP ? openP.name : { tasks: 'Tâches', plan: 'Planning', projects: 'Projets', stats: 'Statistiques' }[tab];
+  $('#title').textContent = openP ? openP.name : { today: 'Ma journée', tasks: 'Tâches', plan: 'Planning', projects: 'Projets', stats: 'Statistiques' }[tab];
   $$('.tabbar button').forEach((b) => b.classList.toggle('on', b.dataset.value === tab));
   renderBanner();
   const sideScroll = $('.side-list')?.scrollTop || 0;
-  $('#view').innerHTML = openP ? viewProject(openP) : tab === 'projects' ? viewProjects() : tab === 'stats' ? viewStats() : tab === 'plan' ? viewPlan() : viewTasks();
+  $('#view').innerHTML = openP ? viewProject(openP) : tab === 'projects' ? viewProjects() : tab === 'stats' ? viewStats() : tab === 'plan' ? viewPlan() : tab === 'today' ? viewToday() : viewTasks();
   if (sideScroll && $('.side-list')) $('.side-list').scrollTop = sideScroll;
   tick();
 }
@@ -541,7 +542,7 @@ function viewTasks() {
   const list = open.filter(match).sort((a, b) => !!b.starred - !!a.starred || (b.id === act) - (a.id === act) || cmpDeadline(a, b) || b.createdAt - a.createdAt);
   const done = state.tasks.filter((t) => t.done && match(t)).sort((a, b) => (b.doneAt || 0) - (a.doneAt || 0));
 
-  let html = installHint() + summaryCard();
+  let html = summaryCard();
 
   if (showChips) {
     const chip = (value, label, color, n) =>
@@ -966,6 +967,12 @@ function openTaskSheet(id, preset) {
       <label class="field"><span>Sous-projet</span><select name="subprojectId"${t.projectId ? '' : ' disabled'}>${subOptions(t.projectId, t.subprojectId)}</select></label>
     </div>
     <label class="field"><span>Échéance (facultatif)</span><input type="date" name="deadline" value="${esc(t.deadline || '')}"></label>
+    <div class="quick-dates">
+      <button type="button" data-action="set-deadline" data-value="0">Aujourd’hui</button>
+      <button type="button" data-action="set-deadline" data-value="1">Demain</button>
+      <button type="button" data-action="set-deadline" data-value="7">Dans 1 semaine</button>
+      <button type="button" data-action="set-deadline" data-value="">Aucune</button>
+    </div>
     <label class="field"><span>Notes</span><textarea name="notes" rows="3" placeholder="Détails, étapes, liens…">${esc(t.notes || '')}</textarea></label>
     ${footer}
   </form>`);
@@ -1830,7 +1837,7 @@ function trayTasks(weekStart, weekEnd) {
 function nextPlanOf(taskId) {
   const t = now();
   let best = null;
-  for (const p of state.plans) if (p.taskId === taskId && p.end > t && (!best || p.start < best.start)) best = p;
+  for (const p of state.plans) if (p.taskId === taskId && !p.done && p.end > t && (!best || p.start < best.start)) best = p;
   return best;
 }
 
@@ -1875,7 +1882,7 @@ function viewPlan() {
       ${pls.map((it) => {
         const t = getTask(it.p.taskId);
         const running = state.active?.taskId === t.id;
-        return `<div class="plan-block${t.done ? ' done' : ''}${running ? ' running' : ''}" data-action="open-plan" data-id="${it.p.id}" style="${boxStyle(it)};--c:${colorOf(t.projectId)}">
+        return `<div class="plan-block${t.done || it.p.done ? ' done' : ''}${running ? ' running' : ''}" data-action="open-plan" data-id="${it.p.id}" style="${boxStyle(it)};--c:${colorOf(t.projectId)}">
           <b>${t.starred ? '★ ' : ''}${esc(t.title)}</b><span>${shortLabel(it.s0)}–${shortLabel(it.e)}</span>
           <i class="plan-resize" aria-hidden="true"></i></div>`;
       }).join('')}
@@ -2422,7 +2429,7 @@ function placeHere(el, e) {
 
 // Avant le reste : un relâchement de glisser-déposer ne doit pas déclencher d'action.
 document.addEventListener('click', (e) => {
-  if (temp.suppressClick && e.target.closest('.cal, .side')) { e.preventDefault(); e.stopPropagation(); }
+  if (temp.suppressClick && e.target.closest('.cal, .side, .day-card')) { e.preventDefault(); e.stopPropagation(); }
 }, true);
 // Un nouveau toucher n'est jamais ignoré.
 document.addEventListener('pointerdown', () => { temp.suppressClick = false; }, true);
@@ -2592,6 +2599,363 @@ function endSort() {
 window.addEventListener('pointerup', endSort);
 window.addEventListener('pointercancel', endSort);
 
+/* ---------- Onglet « Aujourd'hui » : la journée en blocs à valider (page d'accueil) ---------- */
+
+const DAY_WINDOW_END = 23 * 60; // créneaux libres proposés jusqu'à 23h
+const SWIPE_GO = 90;            // distance de balayage (px) pour valider / reporter
+const nowMin = () => { const d = new Date(); return d.getHours() * 60 + d.getMinutes(); };
+const planDone = (p) => !!p.done || !!getTask(p.taskId)?.done;
+const greeting = () => { const h = new Date().getHours(); return h >= 18 || h < 5 ? 'Bonsoir' : h < 12 ? 'Bonjour' : 'Bon après-midi'; };
+
+// Événements fixes et créneaux planifiés d'un jour, dans l'ordre (minutes depuis minuit).
+function dayAgenda(day) {
+  const evs = eventsOn(parseYmd(day)).map((ev) => ({ kind: 'event', ev, s: ev.start, e: Math.min(ev.end, DAY_MIN) }));
+  const pls = plansOn(day).map((p) => ({ kind: 'plan', p, t: getTask(p.taskId), s: minOfDay(p.start, day), e: minOfDay(p.end, day) || DAY_MIN }));
+  return [...evs, ...pls].sort((a, b) => a.s - b.s || (a.kind === 'event' ? -1 : 1));
+}
+
+// Créneaux libres (30 min et plus) entre « from » et 23h.
+function freeGaps(items, from, to = DAY_WINDOW_END) {
+  const gaps = [];
+  let cur = from;
+  for (const { s, e } of [...items].sort((a, b) => a.s - b.s)) {
+    if (cur >= to) break;
+    if (e <= cur) continue;
+    if (s - cur >= 30) gaps.push({ s: cur, e: Math.min(s, to) });
+    cur = Math.max(cur, e);
+  }
+  if (to - cur >= 30) gaps.push({ s: cur, e: to });
+  return gaps.filter((g) => g.e - g.s >= 30);
+}
+
+function nextFreeSlot(day) {
+  const from = Math.max(VIEW_START, Math.ceil(nowMin() / 15) * 15);
+  const gap = freeGaps(dayAgenda(day), from)[0];
+  return gap ? { s: gap.s, dur: Math.min(PLAN_DUR, gap.e - gap.s) } : null;
+}
+
+// Tout ce qui concerne aujourd'hui : agenda, tâches à faire, prioritaires, progression.
+function todayModel() {
+  const day = ymd(new Date());
+  const d0 = dateAt(day, 0);
+  const d1 = dateAt(day, DAY_MIN);
+  const items = dayAgenda(day);
+  const blocks = items.filter((i) => i.kind === 'plan');
+  const plannedIds = new Set(blocks.map((i) => i.t.id));
+  const due = state.tasks
+    .filter((t) => !t.done && t.deadline && t.deadline <= day && !plannedIds.has(t.id))
+    .sort((a, b) => !!b.starred - !!a.starred || cmpDeadline(a, b) || a.createdAt - b.createdAt);
+  const prio = state.tasks
+    .filter((t) => !t.done && t.starred && !plannedIds.has(t.id) && !(t.deadline && t.deadline <= day))
+    .sort((a, b) => cmpDeadline(a, b) || b.createdAt - a.createdAt);
+  const extraDone = state.tasks.filter((t) => t.done && t.doneAt >= d0 && t.doneAt < d1 && !plannedIds.has(t.id));
+  const total = blocks.length + due.length + extraDone.length;
+  const doneN = blocks.filter((i) => planDone(i.p)).length + extraDone.length;
+  return { day, d0, d1, items, blocks, due, prio, extraDone, total, doneN };
+}
+
+// Bloc de tâche à valider (agenda, « à faire aujourd'hui », « terminé »).
+function todayCard({ t, p, dur, done, totals }) {
+  const running = state.active?.taskId === t.id;
+  const kind = p ? 'plan' : 'task';
+  const id = p ? p.id : t.id;
+  const late = !p && !done && dueInfo(t.deadline);
+  const spent = totals.get(t.id) || 0;
+  return `<div class="swipe-wrap">
+    <div class="swipe-bg" aria-hidden="true"><span class="sw-done">${ICON.check} Fait</span><span class="sw-later">Demain ↷</span></div>
+    <div class="day-card${done ? ' done' : ''}${running ? ' running' : ''}" data-swipe="${kind}" data-id="${id}" style="--c:${colorOf(t.projectId)}">
+      <button type="button" class="check" data-action="today-done" data-kind="${kind}" data-id="${id}" aria-label="${done ? 'Annuler la validation' : 'Valider'}">${ICON.check}</button>
+      <div class="day-main" role="button" tabindex="0" data-action="${p ? 'open-plan' : 'open-task'}" data-id="${id}">
+        <div class="day-title">${t.starred ? `<span class="day-star">${ICON.star}</span>` : ''}${esc(t.title)}</div>
+        <div class="day-meta">
+          ${t.projectId ? `<span class="tag"><i></i>${esc(pathLabel(t.projectId, t.subprojectId))}</span>` : ''}
+          ${p ? `<span>${fmtDur(dur * 60e3)}</span>` : ''}
+          ${late && late.cls === 'late' ? `<span class="due late">${esc(late.text)}</span>` : ''}
+          ${spent || running ? `<span class="spent">${ICON.clock}<b${running ? ` data-tick="dur" data-base="${spent}"` : ''}>${fmtDur(spent + (running ? activeElapsed() : 0))}</b></span>` : ''}
+        </div>
+      </div>
+      ${done ? '' : `${p ? '' : `<button type="button" class="mini-btn" data-action="today-fit" data-id="${t.id}" title="Caler dans le prochain créneau libre" aria-label="Caler dans le prochain créneau libre">${ICON.cal}</button>`}
+      <button type="button" class="mini-btn later-btn" data-action="today-later" data-kind="${kind}" data-id="${id}" title="Reporter à demain" aria-label="Reporter à demain">↷</button>
+      <button type="button" class="play" data-action="toggle-timer" data-id="${t.id}" aria-label="${running ? 'Arrêter' : 'Lancer le chrono'}">${running ? ICON.stop : ICON.play}</button>`}
+    </div>
+  </div>`;
+}
+
+function viewToday() {
+  const m = todayModel();
+  const nm = nowMin();
+  const me = getProfile(profile);
+  const totals = taskTotals();
+  const today = new Date();
+  const allDone = m.total > 0 && m.doneN === m.total;
+  const pct = m.total ? Math.round((m.doneN / m.total) * 100) : 0;
+
+  // Temps chronométré aujourd'hui, par projet
+  const per = new Map();
+  for (const s of allSessions()) {
+    const ms = overlap(s, m.d0, m.d1);
+    if (ms) { const k = getProject(s.projectId) ? s.projectId : 'none'; per.set(k, (per.get(k) || 0) + ms); }
+  }
+  const perSorted = [...per.entries()].sort((a, b) => b[1] - a[1]);
+  const lt = liveTotal(m.d0, m.d1);
+  const mood = allDone ? '🎉' : nm < 12 * 60 ? '☀️' : nm < 18 * 60 ? '👋' : '🌙';
+
+  const hero = `<section class="today-hero">
+      <div class="hero-text">
+        <p class="hero-date">${esc(cap(fmt(today, { weekday: 'long', day: 'numeric', month: 'long' })))}</p>
+        <h2>${greeting()} ${esc(me.name)} ${mood}</h2>
+        <p class="hero-sub">${allDone ? 'Journée bouclée, bravo !' : m.total ? `${m.total - m.doneN} à faire · ${m.doneN} ${m.doneN > 1 ? 'faites' : 'faite'}` : 'Rien de prévu pour l’instant'}</p>
+      </div>
+      <div class="ring${allDone ? ' full' : ''}" role="img" aria-label="${m.doneN} sur ${m.total} faites">
+        <svg viewBox="0 0 36 36"><circle class="bg" cx="18" cy="18" r="15.9155"/><circle class="fg" cx="18" cy="18" r="15.9155" stroke-dasharray="${pct} 100"/></svg>
+        <b>${m.total ? `${m.doneN}/${m.total}` : '–'}</b>
+      </div>
+    </section>
+    <div class="card today-time">
+      <div class="tt-head">${ICON.clock}<b${lt.live ? ` data-tick="dur" data-base="${lt.base}"` : ''}>${fmtDur(lt.base + (lt.live ? activeElapsed() : 0))}</b> chronométrées aujourd’hui</div>
+      ${perSorted.length ? `<div class="mix">${perSorted.map(([k, ms]) => `<i style="flex:${ms} 0 0;background:${colorOf(k)}"></i>`).join('')}</div>
+      <div class="mix-legend">${perSorted.slice(0, 3).map(([k, ms]) => `<span style="--c:${colorOf(k)}"><i></i>${esc(getProject(k)?.name || 'Sans projet')} · ${fmtDur(ms)}</span>`).join('')}</div>` : ''}
+    </div>`;
+
+  // Carte « Maintenant » : créneau en cours, sinon le prochain
+  const open = (i) => i.kind === 'plan' && !planDone(i.p);
+  const current = m.items.find((i) => open(i) && i.s <= nm && nm < i.e);
+  const next = m.items.find((i) => open(i) && i.s > nm);
+  const busyEvent = m.items.find((i) => i.kind === 'event' && i.s <= nm && nm < i.e);
+  const focus = current || next;
+  let nowCard = '';
+  if (focus) {
+    const t = focus.t;
+    const running = state.active?.taskId === t.id;
+    const isNow = focus === current;
+    const label = isNow
+      ? `Maintenant · ${minLabel(focus.s)}–${minLabel(focus.e)}`
+      : `Ensuite · ${minLabel(focus.s)} (dans ${fmtDur((focus.s - nm) * 60e3)})`;
+    nowCard = `<section class="now-card${running ? ' running' : ''}" style="--c:${colorOf(t.projectId)}">
+      <div class="now-label"><span class="pulse"></span>${label}</div>
+      <div class="now-title" role="button" tabindex="0" data-action="open-plan" data-id="${focus.p.id}">${t.starred ? '★ ' : ''}${esc(t.title)}</div>
+      <div class="now-meta">${esc(pathLabel(t.projectId, t.subprojectId))}${isNow ? ` · reste ${fmtDur((focus.e - nm) * 60e3)}` : busyEvent ? ` · après « ${esc(busyEvent.ev.title)} »` : ''}</div>
+      ${isNow ? `<div class="now-progress"><i style="width:${Math.round(((nm - focus.s) / (focus.e - focus.s)) * 100)}%"></i></div>` : ''}
+      <div class="now-actions">
+        <button type="button" class="btn ${running ? 'stop' : 'primary'} grow" data-action="toggle-timer" data-id="${t.id}">${running ? `${ICON.stop} <span data-tick="clock" data-base="0">${fmtClock(activeElapsed())}</span>` : `${ICON.play} ${isNow ? 'Lancer le chrono' : 'Commencer maintenant'}`}</button>
+        <button type="button" class="btn grow" data-action="today-done" data-kind="plan" data-id="${focus.p.id}">${ICON.check} Fait</button>
+      </div>
+    </section>`;
+  }
+
+  // Programme : agenda + créneaux libres + ligne « maintenant »
+  const from = Math.max(VIEW_START, Math.ceil(nm / 15) * 15);
+  const rows = [...m.items, ...freeGaps(m.items, from).map((g) => ({ kind: 'gap', ...g }))]
+    .sort((a, b) => a.s - b.s || (a.kind === 'gap' ? 1 : -1));
+  const nowRule = `<li class="ag-now"><time>${minLabel(nm)}</time><div class="rule"></div></li>`;
+  let placed = false;
+  const agenda = rows.map((i) => {
+    let html = '';
+    const isCur = i.kind !== 'gap' && i.s <= nm && nm < i.e;
+    if (!placed && (isCur || i.s > nm)) { placed = true; if (!isCur) html += nowRule; }
+    if (i.kind === 'gap') {
+      return `${html}<li class="ag ag-gap"><time>${minLabel(i.s)}</time><div class="gap-card">
+        <span><b>Libre</b> · ${fmtDur((i.e - i.s) * 60e3)}<small>${minLabel(i.s)} – ${minLabel(i.e)}</small></span>
+        <button type="button" class="btn small" data-action="gap-plan" data-min="${i.s}">${ICON.plus} Planifier</button></div></li>`;
+    }
+    const past = i.e <= nm;
+    if (i.kind === 'event') {
+      return `${html}<li class="ag ag-ev${past ? ' past' : ''}${isCur ? ' current' : ''}" style="--c:${i.ev.color || EVENT_COLORS[0]}"><time>${minLabel(i.s)}</time>
+        <div class="ev-card" role="button" tabindex="0" data-action="open-event" data-id="${i.ev.id}"><b>${esc(i.ev.title)}</b><span>${shortLabel(i.ev.start)}–${shortLabel(i.ev.end)}</span></div></li>`;
+    }
+    const done = planDone(i.p);
+    return `${html}<li class="ag ag-plan${past ? ' past' : ''}${isCur && !done ? ' current' : ''}" style="--c:${colorOf(i.t.projectId)}"><time>${minLabel(i.s)}</time>
+      ${todayCard({ t: i.t, p: i.p, dur: i.e - i.s, done, totals })}</li>`;
+  }).join('') + (placed || !rows.length ? '' : nowRule);
+
+  const agendaHtml = `<div class="section-title"><span>Programme</span><button type="button" data-action="go-day" data-value="${m.day}">Planning ${ICON.right}</button></div>
+    ${rows.length ? `<ol class="agenda">${agenda}</ol>`
+      : `<div class="card empty-day"><b>Plus de créneau aujourd’hui</b><span>La suite se prépare dans le planning.</span></div>`}`;
+
+  const dueHtml = m.due.length ? `<div class="section-title"><span>À faire aujourd’hui · ${m.due.length}</span>${m.due.length > 1 && nextFreeSlot(m.day) ? `<button type="button" data-action="today-fit-all">✨ Tout caler</button>` : ''}</div>
+    <div class="list">${m.due.map((t) => todayCard({ t, totals })).join('')}</div>` : '';
+
+  const prioShown = temp.showAllPrio ? m.prio : m.prio.slice(0, 4);
+  const prioHtml = m.prio.length ? `<div class="section-title"><span>★ Prioritaires à caser</span></div>
+    <div class="card prio-list">${prioShown.map((t) => `<div class="prio-row" style="--c:${colorOf(t.projectId)}">
+        <span class="dot"></span>
+        <button type="button" class="prio-title" data-action="open-task" data-id="${t.id}">${esc(t.title)}<small>${esc(pathLabel(t.projectId, t.subprojectId))}</small></button>
+        <button type="button" class="btn small" data-action="today-add" data-id="${t.id}">${ICON.plus} Aujourd’hui</button>
+      </div>`).join('')}
+      ${m.prio.length > 4 ? `<button type="button" class="prio-more" data-action="toggle-prio">${temp.showAllPrio ? 'Voir moins' : `Voir les ${m.prio.length - 4} autres`}</button>` : ''}
+    </div>` : '';
+
+  const doneItems = [
+    ...m.blocks.filter((i) => planDone(i.p)).map((i) => ({ t: i.t, p: i.p, dur: i.e - i.s })),
+    ...m.extraDone.map((t) => ({ t })),
+  ];
+  const doneHtml = doneItems.length ? `<div class="section-title"><span>Terminé aujourd’hui · ${doneItems.length}</span><button type="button" data-action="toggle-today-done">${temp.showTodayDone ? 'Masquer' : 'Afficher'}</button></div>
+    ${temp.showTodayDone ? `<div class="list">${doneItems.map((x) => todayCard({ ...x, done: true, totals })).join('')}</div>` : ''}` : '';
+
+  const tm = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+  const tk = ymd(tm);
+  const tPlans = plansOn(tk).length;
+  const tDue = state.tasks.filter((t) => !t.done && t.deadline === tk).length;
+  const tEv = eventsOn(tm).length;
+  const tomorrow = `<button type="button" class="card tomorrow" data-action="go-day" data-value="${tk}">
+      <span class="tm-icon" aria-hidden="true">🌙</span>
+      <span class="tm-text"><b>Demain · ${esc(fmt(tm, { weekday: 'long', day: 'numeric' }))}</b>
+        <small>${[tPlans && `${tPlans} créneau${tPlans > 1 ? 'x' : ''}`, tDue && `${tDue} échéance${tDue > 1 ? 's' : ''}`, tEv && `${tEv} événement${tEv > 1 ? 's' : ''}`].filter(Boolean).join(' · ') || 'Rien de prévu pour l’instant'}</small></span>
+      ${ICON.right}</button>`;
+
+  const hint = !state.ui.hideSwipeHint && (m.due.length || m.blocks.some((i) => !planDone(i.p)))
+    ? `<div class="swipe-hint"><span>👆 Balaie une tâche <b>vers la droite</b> pour la valider, <b>vers la gauche</b> pour la reporter à demain.</span><button type="button" class="icon-btn" data-action="hide-swipe-hint" aria-label="Masquer l’astuce">${ICON.close}</button></div>`
+    : '';
+
+  return `${installHint()}${hero}${nowCard}${hint}${agendaHtml}${dueHtml}${prioHtml}${doneHtml}${tomorrow}`;
+}
+
+/* ----- Valider, reporter, caler ----- */
+
+function celebrate() {
+  buzz();
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const box = Object.assign(document.createElement('div'), { className: 'confetti' });
+  const em = ['🎉', '✨', '🎊', '⭐', '💪', '🥳'];
+  for (let i = 0; i < 24; i++) {
+    const sp = Object.assign(document.createElement('span'), { textContent: em[i % em.length] });
+    sp.style.setProperty('--x', `${Math.round((Math.random() * 2 - 1) * 44)}vw`);
+    sp.style.setProperty('--y', `${-Math.round(25 + Math.random() * 45)}vh`);
+    sp.style.setProperty('--r', `${Math.round((Math.random() * 2 - 1) * 360)}deg`);
+    sp.style.animationDelay = `${Math.random() * 0.15}s`;
+    box.appendChild(sp);
+  }
+  document.body.appendChild(box);
+  setTimeout(() => box.remove(), 1700);
+}
+
+// Valider (ou dévalider) un bloc ou une tâche de la journée.
+function validateToday(kind, id) {
+  const before = todayModel();
+  if (kind === 'plan') {
+    const p = state.plans.find((x) => x.id === id);
+    const t = getTask(p?.taskId);
+    if (!p || !t) return;
+    if (planDone(p)) { // annuler la validation
+      p.done = false;
+      if (t.done) { t.done = false; t.doneAt = null; }
+      save(); render();
+      return;
+    }
+    const prev = { pDone: !!p.done, tDone: t.done, tAt: t.doneAt };
+    const stopped = state.active?.taskId === t.id ? finishActive() : null;
+    p.done = true;
+    // Si la tâche a d'autres créneaux à venir, seul ce créneau est validé.
+    const later = state.plans.filter((x) => x.taskId === t.id && x !== p && !x.done && x.start > now()).sort((a, b) => a.start - b.start)[0];
+    if (!later) { t.done = true; t.doneAt = now(); }
+    save(); render();
+    doneToast(before, later ? `Créneau validé · suite ${planLabel(later)}` : 'Bravo, tâche terminée ✓',
+      () => { p.done = prev.pDone; t.done = prev.tDone; t.doneAt = prev.tAt; save(); render(); });
+    afterTimer(stopped, null);
+  } else {
+    const t = getTask(id);
+    if (!t) return;
+    if (t.done) { t.done = false; t.doneAt = null; save(); render(); return; }
+    const stopped = state.active?.taskId === t.id ? finishActive() : null;
+    t.done = true;
+    t.doneAt = now();
+    save(); render();
+    doneToast(before, 'Bravo, tâche terminée ✓', () => { t.done = false; t.doneAt = null; save(); render(); });
+    afterTimer(stopped, null);
+  }
+}
+
+// Un seul message (avec « Annuler ») ; s'il bouclait la journée, on fête ça.
+function doneToast(before, msg, undo) {
+  const after = todayModel();
+  const finished = after.total && after.doneN === after.total && before.doneN < before.total;
+  if (finished) celebrate();
+  toast(finished ? 'Journée bouclée, bravo ! 🎉' : msg, { label: 'Annuler', fn: undo });
+}
+
+// Reporter à demain : le créneau garde la même heure ; une échéance passe à demain.
+function postponeToday(kind, id) {
+  const tm = new Date();
+  tm.setDate(tm.getDate() + 1);
+  if (kind === 'plan') {
+    const p = state.plans.find((x) => x.id === id);
+    if (!p) return;
+    const old = { start: p.start, end: p.end };
+    const shift = (v) => { const d = new Date(v); d.setDate(d.getDate() + 1); return +d; };
+    Object.assign(p, { start: shift(p.start), end: shift(p.end) });
+    save(); render();
+    toast(`Reporté à demain ${minLabel(minOfDay(p.start, ymd(new Date(p.start))))}`, { label: 'Annuler', fn: () => { Object.assign(p, old); save(); render(); } });
+  } else {
+    const t = getTask(id);
+    if (!t) return;
+    const old = t.deadline;
+    t.deadline = ymd(tm);
+    save(); render();
+    toast('Reporté à demain', { label: 'Annuler', fn: () => { t.deadline = old; save(); render(); } });
+  }
+}
+
+/* ----- Balayer une tâche : vers la droite = valider, vers la gauche = reporter ----- */
+
+const cs = { card: null };
+
+function resetCardSwipe(c) {
+  if (!c) return;
+  c.style.transition = '';
+  c.style.transform = '';
+  const wrap = c.parentElement;
+  if (wrap) { wrap.dataset.dir = ''; wrap.classList.remove('armed'); }
+}
+
+document.addEventListener('touchstart', (e) => {
+  cs.card = null;
+  if (state.ui.tab !== 'today' || !profile || e.touches.length !== 1) return;
+  const card = e.target.closest('.day-card[data-swipe]');
+  if (!card || card.classList.contains('done') || e.target.closest('.play, .check, .mini-btn')) return;
+  Object.assign(cs, { card, x0: e.touches[0].clientX, y0: e.touches[0].clientY, lock: null, dx: 0 });
+}, { passive: true });
+
+document.addEventListener('touchmove', (e) => {
+  const c = cs.card;
+  if (!c) return;
+  if (e.touches.length !== 1) { resetCardSwipe(c); cs.card = null; return; }
+  const dx = e.touches[0].clientX - cs.x0;
+  const dy = e.touches[0].clientY - cs.y0;
+  if (!cs.lock) {
+    if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy) * 1.2) cs.lock = 'x';
+    else if (Math.abs(dy) > 10) { cs.card = null; return; } // défilement vertical normal
+    else return;
+  }
+  e.preventDefault();
+  cs.dx = dx;
+  c.style.transition = 'none';
+  c.style.transform = `translateX(${dx}px)`;
+  const wrap = c.parentElement;
+  wrap.dataset.dir = dx > 0 ? 'done' : 'later';
+  wrap.classList.toggle('armed', Math.abs(dx) > SWIPE_GO);
+}, { passive: false });
+
+document.addEventListener('touchend', () => {
+  const c = cs.card;
+  cs.card = null;
+  if (!c || cs.lock !== 'x') return;
+  const { dx } = cs;
+  temp.suppressClick = true; // le relâchement ne doit pas ouvrir la fiche
+  setTimeout(() => { temp.suppressClick = false; }, 350);
+  if (Math.abs(dx) < SWIPE_GO) { resetCardSwipe(c); return; }
+  c.style.transition = '';
+  c.style.transform = `translateX(${dx > 0 ? 110 : -110}%)`;
+  buzz();
+  const { swipe: kind, id } = c.dataset;
+  setTimeout(() => (dx > 0 ? validateToday(kind, id) : postponeToday(kind, id)), 200);
+});
+document.addEventListener('touchcancel', () => { resetCardSwipe(cs.card); cs.card = null; });
+
+// L'écran se met à jour chaque minute (ligne « maintenant », temps restant, créneau en cours).
+setInterval(() => {
+  if (state.ui.tab === 'today' && profile && !document.hidden && !sheet.open && !$('#ask').open && !cs.card) render();
+}, 60e3);
+
 /* ---------- Actions ---------- */
 
 const actions = {
@@ -2702,9 +3066,68 @@ const actions = {
   'open-task'(el) { openTaskSheet(el.dataset.id); },
   'new-task'(el) {
     // Depuis la page d'un projet : la tâche est déjà rangée dans ce projet (et ce sous-projet).
+    // Depuis « Aujourd'hui » : la tâche est pour aujourd'hui.
     const projectId = el.dataset.project || temp.openProject;
-    openTaskSheet(null, projectId ? { projectId, subprojectId: el.dataset.sub || null } : undefined);
+    if (projectId) openTaskSheet(null, { projectId, subprojectId: el.dataset.sub || null });
+    else openTaskSheet(null, state.ui.tab === 'today' ? { deadline: ymd(new Date()) } : undefined);
   },
+  'today-done'(el) {
+    const { kind, id } = el.dataset;
+    const card = el.closest('.day-card');
+    const already = kind === 'plan' ? planDone(state.plans.find((x) => x.id === id) || {}) : !!getTask(id)?.done;
+    if (card && !already) { // petite animation avant de passer la tâche en « fait »
+      card.classList.add('validating');
+      buzz();
+      setTimeout(() => validateToday(kind, id), 380);
+    } else validateToday(kind, id);
+  },
+  'today-later'(el) { postponeToday(el.dataset.kind, el.dataset.id); },
+  'today-fit'(el) {
+    const day = ymd(new Date());
+    const slot = nextFreeSlot(day);
+    if (!slot) { toast('Plus de créneau libre aujourd’hui (jusqu’à 23h)'); return; }
+    createPlan(el.dataset.id, day, slot.s, slot.dur);
+  },
+  'today-fit-all'() {
+    const day = ymd(new Date());
+    const created = [];
+    for (const t of todayModel().due) {
+      const slot = nextFreeSlot(day);
+      if (!slot) break;
+      const p = { id: uid(), taskId: t.id, start: dateAt(day, slot.s), end: dateAt(day, slot.s + slot.dur) };
+      state.plans.push(p);
+      created.push(p);
+    }
+    if (!created.length) { toast('Plus de créneau libre aujourd’hui (jusqu’à 23h)'); return; }
+    save(); render(); buzz();
+    const ids = new Set(created.map((p) => p.id));
+    toast(`${created.length} tâche${created.length > 1 ? 's calées' : ' calée'} dans ta journée`, {
+      label: 'Annuler', fn: () => { state.plans = state.plans.filter((p) => !ids.has(p.id)); save(); render(); },
+    });
+  },
+  'today-add'(el) {
+    const t = getTask(el.dataset.id);
+    if (!t) return;
+    const old = t.deadline;
+    t.deadline = ymd(new Date());
+    save(); render(); buzz();
+    toast('Ajoutée à ta journée', { label: 'Annuler', fn: () => { t.deadline = old; save(); render(); } });
+  },
+  'gap-plan'(el) { openSlotSheet(ymd(new Date()), Number(el.dataset.min)); },
+  'go-day'(el) {
+    Object.assign(state.ui, { tab: 'plan', planView: 'day', planDate: el.dataset.value });
+    writeLocal(); render(); window.scrollTo(0, 0); scrollPlanToHour();
+  },
+  'toggle-today-done'() { temp.showTodayDone = !temp.showTodayDone; render(); },
+  'toggle-prio'() { temp.showAllPrio = !temp.showAllPrio; render(); },
+  'hide-swipe-hint'() { state.ui.hideSwipeHint = true; writeLocal(); render(); },
+  'set-deadline'(el) {
+    const input = el.closest('form').elements.deadline;
+    if (el.dataset.value === '') input.value = '';
+    else { const d = new Date(); d.setDate(d.getDate() + Number(el.dataset.value)); input.value = ymd(d); }
+    input.dispatchEvent(new Event('change', { bubbles: true })); // enregistre aussitôt une tâche existante
+  },
+
   async 'delete-task'(el) {
     const t = getTask(el.dataset.id);
     if (!t) return;
