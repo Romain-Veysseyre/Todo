@@ -901,3 +901,43 @@ body.is-sorting, body.is-sorting * { cursor: grabbing !important; user-select: n
 /* boutons radio / cases masqués : rester à l'intérieur de leur étiquette (pas de débordement horizontal) */
 .dur-pick label, .seg2 label, .daypick label, .swatch { position: relative; }
 .dur-pick input, .seg2 input, .daypick input, .swatch input { left: 0; top: 0; width: 1px; height: 1px; margin: 0; }
+
+/* ---------- Planifier dans l'agenda (fiche d'une tâche) ---------- */
+.pp { margin: 14px 0 6px; padding: 10px 12px 12px; border-radius: var(--radius); background: var(--card-2); border: 1px solid var(--line); }
+.pp-head { display: flex; align-items: center; justify-content: space-between; min-height: 28px; margin-bottom: 8px; font-size: 13px; font-weight: 700; color: var(--muted); }
+.pp-head span { display: inline-flex; align-items: center; gap: 6px; }
+.pp-head svg { width: 16px; height: 16px; }
+.pp-off { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; color: var(--muted); visibility: hidden; }
+.pp-off svg { width: 16px; height: 16px; }
+.pp[data-on="1"] .pp-off { visibility: visible; }
+.pp-sugg { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; scrollbar-width: none; }
+.pp-sugg::-webkit-scrollbar { display: none; }
+.pp-chip {
+  flex: none; min-width: 76px; display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+  padding: 6px 12px; border-radius: 12px; background: var(--card); border: 1.5px solid var(--line); text-align: left;
+}
+.pp-chip small { font-size: 11.5px; font-weight: 650; color: var(--muted); }
+.pp-chip b { font-size: 15px; font-variant-numeric: tabular-nums; }
+.pp-chip:hover { border-color: var(--accent); }
+.pp-chip.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.pp-chip.on small { color: inherit; opacity: .85; }
+.pp-detail { display: none; margin-top: 8px; }
+.pp[data-on="1"] .pp-detail { display: block; }
+.pp-detail .row2 .field { margin: 4px 0 8px; }
+.pp-detail .field input { background: var(--card); }
+.pp-bar { min-height: 1px; }
+.ppb-track { position: relative; height: 28px; margin-top: 10px; border-radius: 9px; background: var(--card); border: 1px solid var(--line); overflow: hidden; cursor: pointer; }
+.ppb-track i { position: absolute; top: 5px; bottom: 5px; border-radius: 4px; background: color-mix(in srgb, var(--c) 40%, transparent); }
+.ppb-track i.event { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--c) 38%, transparent) 0 4px, color-mix(in srgb, var(--c) 12%, transparent) 4px 8px); }
+.ppb-sel { position: absolute; top: 2px; bottom: 2px; border-radius: 6px; border: 2px solid var(--accent); background: color-mix(in srgb, var(--accent) 30%, transparent); transition: left .15s, width .15s; }
+.ppb-sel.clash { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 30%, transparent); }
+.ppb-scale { display: flex; justify-content: space-between; margin-top: 3px; font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.ppb-sum { margin: 6px 0 0; font-size: 13px; font-weight: 650; color: var(--accent); }
+.ppb-sum.clash { color: var(--warn); }
+.pp-add { margin-top: 10px; }
+.pp-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.pp-plan { display: inline-flex; align-items: center; gap: 2px; padding: 3px 3px 3px 10px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 13px; font-weight: 700; }
+.pp-plan > button:first-child { padding: 3px 2px; }
+.pp-x { width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; color: inherit; }
+.pp-x svg { width: 14px; height: 14px; }
+.pp-x:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }

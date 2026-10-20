@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.1.0';
+const VERSION = '2.2.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -852,6 +852,9 @@ const head = (title) => `<div class="grabber"></div><div class="sheet-head"><h2>
 const taskFormOpen = () => (sheet.open ? $('form[data-form="task"]', sheet) : null);
 
 function openSheet(html) {
+  // la fiche d'une tâche ouverte juste avant est enregistrée avant d'être remplacée
+  const prev = $('form[data-form="task"]', sheet);
+  if (prev?.dataset.id) commitTaskForm(prev);
   sheet.innerHTML = html;
   if (!sheet.open) {
     sheet.showModal();
@@ -865,6 +868,7 @@ function closeSheet() {
 }
 
 sheet.addEventListener('close', () => {
+  if (sheet.open) return; // une autre fiche s'est déjà rouverte entre-temps
   const f = $('form[data-form="task"]', sheet);
   if (f?.dataset.id) { commitTaskForm(f); render(); }
   sheet.innerHTML = '';
@@ -973,6 +977,7 @@ function openTaskSheet(id, preset) {
       <button type="button" data-action="set-deadline" data-value="7">Dans 1 semaine</button>
       <button type="button" data-action="set-deadline" data-value="">Aucune</button>
     </div>
+    ${ppSection(isNew ? null : id)}
     <label class="field"><span>Notes</span><textarea name="notes" rows="3" placeholder="Détails, étapes, liens…">${esc(t.notes || '')}</textarea></label>
     ${footer}
   </form>`);
@@ -1022,8 +1027,16 @@ function createTask(form, start) {
     createPlan(t.id, slotDay, Number(form.dataset.slotMin), Number(new FormData(form).get('dur')) || PLAN_DUR);
     return;
   }
-  if (start) { afterTimer(startTimer(t.id), null); toast('C’est parti, chrono lancé'); }
-  else { save(); render(); toast('Tâche ajoutée'); }
+  // créneau choisi dans le bloc « Planifier dans l'agenda »
+  const pp = form.querySelector('.pp[data-on="1"]');
+  const pv = pp && ppValues(pp);
+  let planned = '';
+  if (pv && pv.day && pv.hasTime) {
+    state.plans.push({ id: uid(), taskId: t.id, start: dateAt(pv.day, pv.min), end: dateAt(pv.day, Math.min(DAY_MIN, pv.min + pv.dur)) });
+    planned = ` · planifiée ${dayWord(pv.day).toLowerCase()} ${minLabel(pv.min)}`;
+  }
+  if (start) { afterTimer(startTimer(t.id), null); toast(`C’est parti, chrono lancé${planned}`); }
+  else { save(); render(); toast(`Tâche ajoutée${planned}`); }
 }
 
 sheet.addEventListener('change', async (e) => {
@@ -2975,6 +2988,110 @@ setInterval(() => {
   if (state.ui.tab === 'today' && profile && !document.hidden && !sheet.open && !$('#ask').open && !cs.card) render();
 }, 60e3);
 
+/* ----- Planifier une tâche depuis sa fiche : suggestions de créneaux libres + frise du jour ----- */
+
+// Prochains créneaux libres (aujourd'hui, demain, après-demain) pour une durée donnée.
+function slotSuggestions(dur = PLAN_DUR) {
+  const out = [];
+  for (let k = 0; k < 3; k++) {
+    const d = new Date();
+    d.setDate(d.getDate() + k);
+    const day = ymd(d);
+    const from = k === 0 ? Math.max(VIEW_START, Math.ceil(nowMin() / 15) * 15) : 8 * 60;
+    const gaps = freeGaps(dayAgenda(day), from).filter((g) => g.e - g.s >= dur);
+    const picks = [];
+    if (gaps[0]) picks.push(gaps[0].s);
+    // une 2e idée : l'après-midi (demain et après) ou le créneau libre suivant (aujourd'hui)
+    const pm = k > 0 && gaps.find((g) => g.e - Math.max(g.s, 14 * 60) >= dur);
+    if (pm) picks.push(Math.max(pm.s, 14 * 60));
+    else if (gaps[1]) picks.push(gaps[1].s);
+    for (const min of [...new Set(picks)].slice(0, k === 2 ? 1 : 2)) out.push({ day, min, k });
+  }
+  return out.slice(0, 5);
+}
+
+const dayWord = (day) => {
+  const diff = Math.round((parseYmd(day) - startOfDay(new Date())) / 864e5);
+  return diff === 0 ? 'Aujourd’hui' : diff === 1 ? 'Demain' : cap(fmt(parseYmd(day), { weekday: 'short' }).replace('.', ''));
+};
+
+// Bloc « Planifier dans l'agenda » de la fiche d'une tâche (taskId : tâche existante).
+function ppSection(taskId) {
+  const upcoming = taskId ? state.plans.filter((p) => p.taskId === taskId && !p.done && p.end > now()).sort((a, b) => a.start - b.start) : [];
+  return `<section class="pp" data-on="0">
+    <div class="pp-head"><span>${ICON.cal} ${taskId ? 'Créneaux dans l’agenda' : 'Planifier dans l’agenda'}</span>
+      <button type="button" class="pp-off" data-action="pp-off" aria-label="Ne pas planifier">${ICON.close}</button></div>
+    ${upcoming.length ? `<div class="pp-list">${upcoming.map((p) => {
+      const d = new Date(p.start);
+      return `<span class="pp-plan"><button type="button" data-action="open-plan" data-id="${p.id}">${dayWord(ymd(d))} · ${minLabel(d.getHours() * 60 + d.getMinutes())}–${hm(new Date(p.end)).replace(':', 'h')}</button>
+        <button type="button" class="pp-x" data-action="pp-remove" data-id="${p.id}" data-task="${taskId}" aria-label="Retirer ce créneau">${ICON.close}</button></span>`;
+    }).join('')}</div>` : ''}
+    <div class="pp-sugg">${slotSuggestions().map((s) => `<button type="button" class="pp-chip" data-action="pp-pick" data-day="${s.day}" data-min="${s.min}">
+        <small>${dayWord(s.day)}</small><b>${minLabel(s.min)}</b></button>`).join('')}
+      <button type="button" class="pp-chip other" data-action="pp-other"><small>Autre</small><b>📆 jour</b></button></div>
+    <div class="pp-detail">
+      <div class="row2">
+        <label class="field"><span>Jour</span><input type="date" name="plan_date"></label>
+        <label class="field"><span>Début</span><input type="time" name="plan_time" step="300"></label>
+      </div>
+      <div class="dur-pick">${[30, 60, 90, 120].map((x) => `<label><input type="radio" name="dur" value="${x}"${x === PLAN_DUR ? ' checked' : ''}><span>${fmtDur(x * 60e3)}</span></label>`).join('')}</div>
+      <div class="pp-bar"></div>
+      ${taskId ? `<button type="button" class="btn primary wide pp-add" data-action="pp-add" data-id="${taskId}">${ICON.plus} Ajouter ce créneau</button>` : ''}
+    </div>
+  </section>`;
+}
+
+const ppValues = (pp) => ({
+  day: pp.querySelector('[name="plan_date"]').value,
+  min: toMin(pp.querySelector('[name="plan_time"]').value),
+  hasTime: !!pp.querySelector('[name="plan_time"]').value,
+  dur: Number(pp.querySelector('[name="dur"]:checked')?.value) || PLAN_DUR,
+});
+
+// Frise du jour choisi (6h → 24h) : occupé en couleur, créneau choisi entouré, alerte s'il chevauche.
+function ppBar(pp) {
+  const v = ppValues(pp);
+  if (!v.day || !v.hasTime) return '';
+  const items = dayAgenda(v.day);
+  const pos = (m) => (((Math.max(VIEW_START, Math.min(DAY_MIN, m)) - VIEW_START) / VIEW_SPAN) * 100).toFixed(2);
+  const s = v.min;
+  const e = Math.min(DAY_MIN, s + v.dur);
+  const clash = items.find((i) => i.s < e && i.e > s);
+  return `<div class="ppb-track" data-action="pp-bar" title="Touche la frise pour choisir l’heure">
+      ${items.map((i) => `<i class="${i.kind}" style="left:${pos(i.s)}%;width:${(pos(i.e) - pos(i.s)).toFixed(2)}%;--c:${i.kind === 'event' ? i.ev.color || EVENT_COLORS[0] : colorOf(i.t.projectId)}"></i>`).join('')}
+      <b class="ppb-sel${clash ? ' clash' : ''}" style="left:${pos(s)}%;width:${Math.max(1.2, pos(e) - pos(s)).toFixed(2)}%"></b>
+    </div>
+    <div class="ppb-scale"><span>6h</span><span>12h</span><span>18h</span><span>24h</span></div>
+    <p class="ppb-sum${clash ? ' clash' : ''}">${clash
+      ? `⚠︎ Chevauche « ${esc(clash.kind === 'event' ? clash.ev.title : clash.t.title)} »`
+      : `${esc(cap(fmt(parseYmd(v.day), { weekday: 'long', day: 'numeric', month: 'long' })))} · ${minLabel(s)} → ${minLabel(e)}`}</p>`;
+}
+
+// Met à jour la frise, la suggestion surlignée et le libellé du bouton « Créer ».
+function ppRefresh(pp) {
+  const v = ppValues(pp);
+  pp.querySelector('.pp-bar').innerHTML = ppBar(pp);
+  let matched = false;
+  for (const c of pp.querySelectorAll('.pp-chip[data-day]')) {
+    const on = pp.dataset.on === '1' && c.dataset.day === v.day && Number(c.dataset.min) === v.min && v.hasTime;
+    c.classList.toggle('on', on);
+    matched ||= on;
+  }
+  pp.querySelector('.pp-chip.other').classList.toggle('on', pp.dataset.on === '1' && !matched);
+  const create = pp.closest('form')?.querySelector('button[value="create"]');
+  if (create) create.textContent = pp.dataset.on === '1' ? 'Créer et planifier' : 'Créer';
+}
+
+function ppOpen(pp, day, min) {
+  pp.dataset.on = '1';
+  pp.querySelector('[name="plan_date"]').value = day;
+  pp.querySelector('[name="plan_time"]').value = hhmm(min);
+  ppRefresh(pp);
+}
+
+sheet.addEventListener('change', (e) => { const pp = e.target.closest('.pp'); if (pp) ppRefresh(pp); });
+sheet.addEventListener('input', (e) => { const pp = e.target.closest('.pp'); if (pp && e.target.type !== 'radio') ppRefresh(pp); });
+
 /* ---------- Actions ---------- */
 
 const actions = {
@@ -3105,6 +3222,47 @@ const actions = {
     } else validateToday(kind, id);
   },
   'today-later'(el) { postponeToday(el.dataset.kind, el.dataset.id); },
+  'pp-pick'(el) { ppOpen(el.closest('.pp'), el.dataset.day, Number(el.dataset.min)); },
+  'pp-other'(el) {
+    const pp = el.closest('.pp');
+    const v = ppValues(pp);
+    const tm = new Date();
+    tm.setDate(tm.getDate() + 1);
+    ppOpen(pp, v.day || ymd(tm), v.hasTime ? v.min : 9 * 60);
+    pp.dataset.on = '1';
+    ppRefresh(pp);
+    if (matchMedia('(pointer: fine)').matches) pp.querySelector('[name="plan_date"]').focus();
+  },
+  'pp-off'(el) { const pp = el.closest('.pp'); pp.dataset.on = '0'; ppRefresh(pp); },
+  'pp-bar'(el, e) {
+    const pp = el.closest('.pp');
+    const r = el.getBoundingClientRect();
+    const v = ppValues(pp);
+    let m = VIEW_START + ((e.clientX - r.left) / r.width) * VIEW_SPAN;
+    m = Math.max(VIEW_START, Math.min(DAY_MIN - v.dur, Math.round(m / 15) * 15));
+    pp.querySelector('[name="plan_time"]').value = hhmm(m);
+    ppRefresh(pp);
+  },
+  'pp-add'(el) {
+    const pp = el.closest('.pp');
+    const v = ppValues(pp);
+    if (!v.day || !v.hasTime) return;
+    const f = taskFormOpen();
+    if (f?.dataset.id) commitTaskForm(f);
+    createPlan(el.dataset.id, v.day, v.min, v.dur);
+    openTaskSheet(el.dataset.id); // la fiche affiche le nouveau créneau
+  },
+  'pp-remove'(el) {
+    const old = state.plans.find((p) => p.id === el.dataset.id);
+    if (!old) return;
+    const f = taskFormOpen();
+    if (f?.dataset.id) commitTaskForm(f);
+    state.plans = state.plans.filter((p) => p !== old);
+    save(); render();
+    openTaskSheet(el.dataset.task);
+    toast('Créneau retiré', { label: 'Annuler', fn: () => { state.plans.push(old); save(); render(); if (sheet.open) openTaskSheet(old.taskId); } });
+  },
+
   'today-fit'(el) {
     const day = ymd(new Date());
     const slot = nextFreeSlot(day);
