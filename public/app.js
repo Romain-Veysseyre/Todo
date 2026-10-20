@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '1.3.0';
+const VERSION = '1.4.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -42,6 +42,7 @@ const ICON = {
   left: svg('<path d="M15 5l-7 7 7 7"/>'),
   right: svg('<path d="M9 5l7 7-7 7"/>'),
   star: svg('<path d="M12 3.6l2.55 5.2 5.7.83-4.13 4.02.98 5.68L12 16.65l-5.1 2.68.98-5.68L3.75 9.63l5.7-.83z"/>'),
+  cal: svg('<rect x="3.5" y="5" width="17" height="15" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/>'),
 };
 
 /* ---------- Données ---------- */
@@ -53,6 +54,8 @@ function blankState() {
     subprojects: [], // { id, projectId, name }
     tasks: [],       // { id, title, notes, projectId, subprojectId, deadline, done, doneAt, createdAt }
     sessions: [],    // { id, taskId, title, projectId, subprojectId, start, end }
+    plans: [],       // créneaux du planning : { id, taskId, start, end }
+    events: [],      // événements fixes : { id, title, color, start, end (minutes), days ('12345' = lun→ven) ou date }
     // (chaque élément a aussi updatedAt, ajouté par stamp() pour la synchro)
     active: null,    // { taskId, start }
     deleted: {},     // id supprimé (ou "timer:…" pour un chrono arrêté) → date, pour la synchro
@@ -87,7 +90,7 @@ function seedState(p) {
 function normalize(data) {
   if (!data || typeof data !== 'object' || !Array.isArray(data.tasks)) throw new Error('format');
   const s = blankState();
-  for (const k of ['projects', 'subprojects', 'tasks', 'sessions']) if (Array.isArray(data[k])) s[k] = data[k];
+  for (const k of ['projects', 'subprojects', 'tasks', 'sessions', 'plans', 'events']) if (Array.isArray(data[k])) s[k] = data[k];
   s.active = data.active && data.active.taskId && data.active.start ? data.active : null;
   if (data.deleted && typeof data.deleted === 'object') s.deleted = { ...data.deleted };
   Object.assign(s.ui, data.ui || {});
@@ -117,7 +120,7 @@ const temp = { statsOpen: new Set(), installEvt: null, showCode: false, keys: nu
 
 /* ----- Suivi des modifications (pour la synchro) ----- */
 
-const SYNCED = ['projects', 'subprojects', 'tasks', 'sessions'];
+const SYNCED = ['projects', 'subprojects', 'tasks', 'sessions', 'plans', 'events'];
 const timerKey = (a) => (a ? `timer:${a.taskId}@${a.start}` : '');
 // Id fixe pour la session d'un chrono : deux appareils qui l'enregistrent produisent la même session.
 const timerSessionId = (a) => `s${a.start.toString(36)}-${a.taskId}`;
@@ -396,10 +399,12 @@ function render() {
   if (!openP) temp.openProject = null;
   document.body.dataset.tab = tab;
   if (openP) document.body.dataset.inProject = '1'; else delete document.body.dataset.inProject;
-  $('#title').textContent = openP ? openP.name : { tasks: 'Tâches', projects: 'Projets', stats: 'Statistiques' }[tab];
+  if (tab !== 'plan') temp.placing = null;
+  document.body.classList.toggle('placing', !!temp.placing);
+  $('#title').textContent = openP ? openP.name : { tasks: 'Tâches', plan: 'Planning', projects: 'Projets', stats: 'Statistiques' }[tab];
   $$('.tabbar button').forEach((b) => b.classList.toggle('on', b.dataset.value === tab));
   renderBanner();
-  $('#view').innerHTML = openP ? viewProject(openP) : tab === 'projects' ? viewProjects() : tab === 'stats' ? viewStats() : viewTasks();
+  $('#view').innerHTML = openP ? viewProject(openP) : tab === 'projects' ? viewProjects() : tab === 'stats' ? viewStats() : tab === 'plan' ? viewPlan() : viewTasks();
   tick();
 }
 
@@ -470,6 +475,7 @@ function taskCard(t, totals, { tag = true } = {}) {
   const running = state.active?.taskId === t.id;
   const total = totals.get(t.id) || 0;
   const due = !t.done && dueInfo(t.deadline);
+  const plan = !t.done && nextPlanOf(t.id);
   const notes = (t.notes || '').split('\n').map((l) => l.replace(/^\s*[-•*]\s*/, '').trim()).filter(Boolean).join(' · ');
   return `<article class="task${running ? ' running' : ''}${t.done ? ' done' : ''}${t.starred && !t.done ? ' starred' : ''}" style="--c:${colorOf(t.projectId)}">
     <button type="button" class="check" data-action="toggle-done" data-id="${t.id}" aria-label="${t.done ? 'Rouvrir' : 'Marquer comme faite'}">${ICON.check}</button>
@@ -479,6 +485,7 @@ function taskCard(t, totals, { tag = true } = {}) {
       <div class="task-meta">
         ${tag && t.projectId ? `<span class="tag"><i></i>${esc(pathLabel(t.projectId, t.subprojectId))}</span>` : ''}
         ${due ? `<span class="due ${due.cls}">${esc(due.text)}</span>` : ''}
+        ${plan ? `<span class="planned">${ICON.cal}${esc(planLabel(plan))}</span>` : ''}
         ${total || running ? `<span class="spent">${ICON.clock}<b${running ? ` data-tick="dur" data-base="${total}"` : ''}>${fmtDur(total + (running ? activeElapsed() : 0))}</b></span>` : ''}
       </div>
     </div>
@@ -1131,6 +1138,8 @@ sheet.addEventListener('submit', (e) => {
     else createTask(form, e.submitter?.value === 'start');
   } else if (form.dataset.form === 'project') saveProject(form);
   else if (form.dataset.form === 'session') saveSession(form);
+  else if (form.dataset.form === 'event') saveEvent(form);
+  else if (form.dataset.form === 'plan') closeSheet();
 });
 
 /* ----- Réglages, sauvegarde ----- */
@@ -1436,7 +1445,7 @@ async function api(method, id, { body, base, have } = {}) {
 }
 
 // Formulaire ouvert : on attend qu'il soit fermé pour ne pas modifier les données sous les doigts.
-const editing = () => (sheet.open && !!$('form', sheet)) || $('#ask').open;
+const editing = () => (sheet.open && !!$('form', sheet)) || $('#ask').open || !!drag.active || !!drag.pending;
 
 function scheduleSync(delay = SYNC_DELAY) {
   clearTimeout(syncTimer);
@@ -1669,17 +1678,536 @@ async function copyCode() {
   }
 }
 
+/* ---------- Planning (emploi du temps de la semaine) ---------- */
+
+const DAY_MIN = 1440;
+const SNAP = 15;          // les créneaux se calent au quart d'heure
+const PLAN_DUR = 60;      // durée par défaut d'une tâche planifiée
+const EVENT_COLORS = ['#64748b', '#0ea5e9', '#10b981', '#f59e0b', '#ec4899', '#8b5cf6'];
+const minLabel = (m) => `${Math.floor(m / 60)}h${pad(m % 60)}`;
+const shortLabel = (m) => (m % 60 ? minLabel(m) : `${m / 60}h`); // « 8h », « 13h30 »
+const toMin = (hhmm) => { const [h, m] = String(hhmm || '0:0').split(':').map(Number); return (h || 0) * 60 + (m || 0); };
+const hhmm = (m) => `${pad(Math.floor(m / 60) % 24)}:${pad(m % 60)}`;
+const dateAt = (day, m) => { const [y, mo, d] = day.split('-').map(Number); return +new Date(y, mo - 1, d, 0, m); };
+// Minute de la journée (heure locale) d'un instant, ou 1440 pour minuit le lendemain.
+const minOfDay = (t, day) => (ymd(new Date(t)) === day ? new Date(t).getHours() * 60 + new Date(t).getMinutes() : t > dateAt(day, 0) ? DAY_MIN : 0);
+
+function dropOrphanPlans() {
+  state.plans = state.plans.filter((p) => getTask(p.taskId));
+}
+
+function planDays() {
+  const anchor = parseYmd(state.ui.planDate || ymd(new Date()));
+  const monday = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() - ((anchor.getDay() + 6) % 7));
+  const week = [...Array(7)].map((_, i) => new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + i));
+  return { anchor, week, shown: state.ui.planView === 'day' ? [anchor] : week };
+}
+
+function eventsOn(d) {
+  const iso = String(((d.getDay() + 6) % 7) + 1);
+  const key = ymd(d);
+  return state.events.filter((ev) => (ev.date ? ev.date === key : String(ev.days || '').includes(iso)));
+}
+
+function plansOn(day) {
+  const a = dateAt(day, 0);
+  const b = dateAt(day, DAY_MIN);
+  return state.plans.filter((p) => p.end > a && p.start < b && getTask(p.taskId));
+}
+
+// Range les blocs qui se chevauchent côte à côte.
+function pack(items) {
+  items.sort((x, y) => x.s - y.s || y.e - x.e);
+  let group = [];
+  let groupEnd = -1;
+  const flush = () => {
+    const cols = [];
+    for (const it of group) {
+      let c = cols.findIndex((end) => end <= it.s);
+      if (c < 0) { c = cols.length; cols.push(0); }
+      cols[c] = it.e;
+      it.col = c;
+    }
+    for (const it of group) it.ncol = cols.length;
+    group = [];
+  };
+  for (const it of items) {
+    if (group.length && it.s >= groupEnd) { flush(); groupEnd = -1; }
+    group.push(it);
+    groupEnd = Math.max(groupEnd, it.e);
+  }
+  if (group.length) flush();
+  return items;
+}
+
+const boxStyle = (it) => `top:${((it.s / DAY_MIN) * 100).toFixed(3)}%;height:${(((it.e - it.s) / DAY_MIN) * 100).toFixed(3)}%;`
+  + `left:calc(${((it.col / it.ncol) * 100).toFixed(2)}% + 2px);width:calc(${(100 / it.ncol).toFixed(2)}% - 4px)`;
+
+// Tâches à planifier : prioritaires d'abord, puis celles pas encore planifiées cette semaine.
+function trayTasks(weekStart, weekEnd) {
+  const planned = new Set(state.plans.filter((p) => p.end > weekStart && p.start < weekEnd).map((p) => p.taskId));
+  return state.tasks
+    .filter((t) => !t.done)
+    .map((t) => ({ t, planned: planned.has(t.id) }))
+    .sort((a, b) => !!b.t.starred - !!a.t.starred || a.planned - b.planned || cmpDeadline(a.t, b.t) || b.t.createdAt - a.t.createdAt);
+}
+
+function nextPlanOf(taskId) {
+  const t = now();
+  let best = null;
+  for (const p of state.plans) if (p.taskId === taskId && p.end > t && (!best || p.start < best.start)) best = p;
+  return best;
+}
+
+function planLabel(p) {
+  if (p.start <= now()) return 'En ce moment';
+  const d = new Date(p.start);
+  const diff = Math.round((startOfDay(d) - startOfDay(new Date())) / 864e5);
+  const day = diff === 0 ? 'Aujourd’hui' : diff === 1 ? 'Demain' : fmt(d, { weekday: 'short', day: 'numeric' });
+  return `${day} ${minLabel(d.getHours() * 60 + d.getMinutes())}`;
+}
+
+function viewPlan() {
+  const ui = state.ui;
+  const { anchor, week, shown } = planDays();
+  const isDay = ui.planView === 'day';
+  const today = ymd(new Date());
+  const weekStart = +week[0];
+  const weekEnd = +new Date(week[6].getFullYear(), week[6].getMonth(), week[6].getDate() + 1);
+  const thisWeek = now() >= weekStart && now() < weekEnd;
+  const nowMin = new Date().getHours() * 60 + new Date().getMinutes();
+
+  const range = isDay
+    ? `<b>${esc(cap(fmt(anchor, { weekday: 'long', day: 'numeric', month: 'short' })))}</b>${ymd(anchor) === today ? '<small>Aujourd’hui</small>' : '<small>Revenir à aujourd’hui</small>'}`
+    : `<b>${fmt(week[0], { day: 'numeric', month: week[0].getMonth() === week[6].getMonth() ? undefined : 'short' })} – ${fmt(week[6], { day: 'numeric', month: 'short' })}</b>${thisWeek ? '<small>Cette semaine</small>' : '<small>Revenir à cette semaine</small>'}`;
+
+  const heads = (isDay ? week : shown).map((d) => {
+    const key = ymd(d);
+    const n = plansOn(key).length;
+    return `<button type="button" class="cal-day${key === today ? ' today' : ''}${isDay && key === ymd(anchor) ? ' on' : ''}" data-action="plan-day" data-value="${key}">
+      <small>${esc(fmt(d, { weekday: 'short' }).replace('.', ''))}</small><b>${d.getDate()}</b><i>${n ? '•'.repeat(Math.min(n, 3)) : ''}</i></button>`;
+  }).join('');
+
+  const cols = shown.map((d) => {
+    const key = ymd(d);
+    const evs = pack(eventsOn(d).map((ev) => ({ ev, s: ev.start, e: Math.max(ev.end, ev.start + SNAP) })));
+    const pls = pack(plansOn(key).map((p) => ({ p, s: minOfDay(p.start, key), e: Math.max(minOfDay(p.end, key), minOfDay(p.start, key) + SNAP) })));
+    return `<div class="cal-col${key === today ? ' today' : ''}" data-action="slot" data-day="${key}">
+      ${evs.map((it) => `<div class="ev-block" data-action="open-event" data-id="${it.ev.id}" style="${boxStyle(it)};--c:${it.ev.color || EVENT_COLORS[0]}">
+        <b>${esc(it.ev.title)}</b><span>${shortLabel(it.ev.start)}–${shortLabel(it.ev.end)}</span></div>`).join('')}
+      ${pls.map((it) => {
+        const t = getTask(it.p.taskId);
+        const running = state.active?.taskId === t.id;
+        return `<div class="plan-block${t.done ? ' done' : ''}${running ? ' running' : ''}" data-action="open-plan" data-id="${it.p.id}" style="${boxStyle(it)};--c:${colorOf(t.projectId)}">
+          <b>${t.starred ? '★ ' : ''}${esc(t.title)}</b><span>${shortLabel(it.s)}–${shortLabel(it.e)}</span>
+          <i class="plan-resize" aria-hidden="true"></i></div>`;
+      }).join('')}
+      ${key === today ? `<div class="now-line" style="top:${((nowMin / DAY_MIN) * 100).toFixed(3)}%"></div>` : ''}
+    </div>`;
+  }).join('');
+
+  const tray = trayTasks(weekStart, weekEnd);
+  const placing = getTask(temp.placing);
+  const trayBody = placing
+    ? `<div class="tray-msg"><span>Touche un créneau pour placer <b>« ${esc(placing.title)} »</b></span><button type="button" class="btn small" data-action="cancel-placing">Annuler</button></div>`
+    : tray.length
+      ? `<div class="tray-head"><span>À planifier</span><small>Glisse une tâche dans le planning, ou touche-la puis touche un créneau</small></div>
+        <div class="tray-list">${tray.map(({ t, planned }) => `<button type="button" class="tray-chip${planned ? ' planned' : ''}" data-action="pick-tray" data-drag-task="${t.id}" style="--c:${colorOf(t.projectId)}">
+          ${t.starred ? ICON.star : ''}<span>${esc(t.title)}</span>${planned ? '<em>✓</em>' : ''}</button>`).join('')}</div>`
+      : '<p class="tray-empty">Aucune tâche à faire. Ajoute-en dans l’onglet Tâches.</p>';
+
+  return `<div class="plan-bar">
+      <div class="seg-mini" role="group" aria-label="Affichage">
+        <button type="button" class="${isDay ? '' : 'on'}" data-action="plan-view" data-value="week">Semaine</button>
+        <button type="button" class="${isDay ? 'on' : ''}" data-action="plan-view" data-value="day">Jour</button>
+      </div>
+      <button type="button" class="btn small" data-action="new-event">${ICON.plus} Événement</button>
+    </div>
+    <div class="plan-nav">
+      <button type="button" class="icon-btn" data-action="plan-move" data-value="-1" aria-label="Précédent">${ICON.left}</button>
+      <button type="button" class="plan-range" data-action="plan-today">${range}</button>
+      <button type="button" class="icon-btn" data-action="plan-move" data-value="1" aria-label="Suivant">${ICON.right}</button>
+    </div>
+    ${state.events.length ? '' : '<p class="hint plan-hint">Astuce : ajoute tes horaires fixes (travail, cours…) avec <b>+ Événement</b>, puis cale tes tâches autour.</p>'}
+    <div class="cal${isDay ? ' is-day' : ''}">
+      <div class="cal-head"><div class="cal-gutter"></div><div class="cal-days" style="--n:7">${heads}</div></div>
+      <div class="cal-body">
+        <div class="cal-hours">${[...Array(23)].map((_, i) => `<span style="top:${(((i + 1) / 24) * 100).toFixed(3)}%">${i + 1}h</span>`).join('')}</div>
+        <div class="cal-cols" style="--n:${shown.length}">${cols}</div>
+      </div>
+    </div>
+    <div class="tray"><div class="tray-inner">${trayBody}</div>
+      <div class="tray-drop">${ICON.trash} Déposer ici pour retirer du planning</div></div>`;
+}
+
+// Fait défiler la grille vers le début de journée (ou l'heure actuelle cette semaine).
+function scrollPlanToHour() {
+  const col = $('.cal-col');
+  if (!col) return;
+  const r = col.getBoundingClientRect();
+  const showsToday = !!$('.cal-col.today');
+  const hour = showsToday ? Math.max(0, new Date().getHours() - 1) : 7;
+  const head = $('.top').offsetHeight + $('.cal-head').offsetHeight;
+  window.scrollTo(0, Math.max(0, window.scrollY + r.top + (r.height / 24) * hour - head - 6));
+}
+
+function createPlan(taskId, day, startMin, dur = PLAN_DUR) {
+  const s = Math.max(0, Math.min(DAY_MIN - SNAP, startMin));
+  const p = { id: uid(), taskId, start: dateAt(day, s), end: dateAt(day, Math.min(DAY_MIN, s + dur)) };
+  state.plans.push(p);
+  save(); render(); buzz();
+  const d = parseYmd(day);
+  toast(`Planifiée ${fmt(d, { weekday: 'short', day: 'numeric' })} · ${minLabel(s)}`, {
+    label: 'Annuler', fn: () => { state.plans = state.plans.filter((x) => x.id !== p.id); save(); render(); },
+  });
+  return p;
+}
+
+// Créneau touché dans une colonne : minute de la journée (arrondie à la demi-heure).
+function slotAt(col, y) {
+  const r = col.getBoundingClientRect();
+  return Math.max(0, Math.min(DAY_MIN - 30, Math.floor((((y - r.top) / r.height) * DAY_MIN) / 30) * 30));
+}
+
+/* ----- Glisser-déposer (souris : tout de suite ; tactile : appui long puis glisser) ----- */
+
+const drag = { pending: null, active: null, raf: 0 };
+
+document.addEventListener('pointerdown', (e) => {
+  if (state.ui.tab !== 'plan' || !profile || drag.active) return;
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  const chip = e.target.closest('[data-drag-task]');
+  const block = e.target.closest('.plan-block');
+  if (!chip && !block) return;
+  const kind = chip ? 'new' : e.target.closest('.plan-resize') ? 'resize' : 'move';
+  drag.pending = { kind, el: chip || block, id: chip ? chip.dataset.dragTask : block.dataset.id, type: e.pointerType, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY };
+  if (e.pointerType !== 'mouse') drag.pending.timer = setTimeout(beginDrag, 260); // appui long
+  else e.preventDefault(); // pas de sélection de texte à la souris
+});
+
+window.addEventListener('pointermove', (e) => {
+  if (drag.active) { moveDrag(e.clientX, e.clientY); return; }
+  const p = drag.pending;
+  if (!p) return;
+  Object.assign(p, { x: e.clientX, y: e.clientY });
+  const dist = Math.hypot(e.clientX - p.x0, e.clientY - p.y0);
+  if (p.type === 'mouse' && dist > 5) beginDrag();
+  else if (p.type !== 'mouse' && dist > 10) cancelPending(); // il fait défiler la page
+});
+
+window.addEventListener('pointerup', () => { if (drag.active) endDrag(true); else cancelPending(); });
+window.addEventListener('pointercancel', () => { if (drag.active) endDrag(false); else cancelPending(); });
+// Pendant un glisser au doigt, la page ne doit pas défiler.
+document.addEventListener('touchmove', (e) => { if (drag.active) e.preventDefault(); }, { passive: false });
+document.addEventListener('contextmenu', (e) => { if (drag.active || drag.pending || e.target.closest('.cal, .tray')) e.preventDefault(); });
+
+function cancelPending() {
+  if (drag.pending) clearTimeout(drag.pending.timer);
+  drag.pending = null;
+}
+
+function beginDrag() {
+  const p = drag.pending;
+  if (!p) return;
+  clearTimeout(p.timer);
+  drag.pending = null;
+  const a = { ...p, dur: PLAN_DUR, grab: 0 };
+  if (p.kind === 'new') {
+    const t = getTask(p.id);
+    if (!t) return;
+    a.color = colorOf(t.projectId);
+    a.ghost = Object.assign(document.createElement('div'), { className: 'drag-ghost', textContent: t.title });
+    a.ghost.style.setProperty('--c', a.color);
+    document.body.appendChild(a.ghost);
+    temp.placing = null;
+  } else {
+    const plan = state.plans.find((x) => x.id === p.id);
+    const col = p.el.closest('.cal-col');
+    if (!plan || !col) return;
+    const day = col.dataset.day;
+    a.plan = plan;
+    a.day = day;
+    a.startMin = minOfDay(plan.start, day);
+    a.dur = Math.max(SNAP, minOfDay(plan.end, day) - a.startMin);
+    a.color = colorOf(getTask(plan.taskId)?.projectId);
+    const r = col.getBoundingClientRect();
+    a.grab = ((p.y0 - r.top) / r.height) * DAY_MIN - a.startMin;
+    p.el.classList.add('dragging');
+    if (p.kind === 'move') $('.tray')?.classList.add('drop-on');
+  }
+  drag.active = a;
+  document.body.classList.add('is-dragging');
+  buzz();
+  moveDrag(a.x, a.y);
+  drag.raf = requestAnimationFrame(autoScroll);
+}
+
+function dropTarget(x, y) {
+  const a = drag.active;
+  const tray = $('.tray')?.getBoundingClientRect();
+  const headBottom = $('.cal-head')?.getBoundingClientRect().bottom ?? 0;
+  if (tray && y >= tray.top) return { tray: true };
+  if (y < headBottom) return null;
+  for (const col of $$('.cal-col')) {
+    const r = col.getBoundingClientRect();
+    if (x < r.left - 1 || x > r.right + 1) continue;
+    const at = ((y - r.top) / r.height) * DAY_MIN;
+    if (a.kind === 'resize') {
+      if (col.dataset.day !== a.day) return null;
+      const end = Math.max(a.startMin + SNAP, Math.min(DAY_MIN, Math.round(at / SNAP) * SNAP));
+      return { col, day: a.day, start: a.startMin, end };
+    }
+    const start = Math.max(0, Math.min(DAY_MIN - a.dur, Math.round((at - a.grab) / SNAP) * SNAP));
+    return { col, day: col.dataset.day, start, end: start + a.dur };
+  }
+  return null;
+}
+
+function moveDrag(x, y) {
+  const a = drag.active;
+  Object.assign(a, { x, y });
+  if (a.ghost) a.ghost.style.transform = `translate(${x}px, ${y}px)`;
+  const target = dropTarget(x, y);
+  a.target = target;
+  $('.tray')?.classList.toggle('drop-hover', !!target?.tray && a.kind === 'move');
+  let pv = $('.plan-preview');
+  if (!target?.col) { pv?.remove(); return; }
+  if (!pv || pv.parentElement !== target.col) {
+    pv?.remove();
+    pv = Object.assign(document.createElement('div'), { className: 'plan-preview' });
+    target.col.appendChild(pv);
+  }
+  pv.style.setProperty('--c', a.color);
+  pv.style.top = `${(target.start / DAY_MIN) * 100}%`;
+  pv.style.height = `${((target.end - target.start) / DAY_MIN) * 100}%`;
+  pv.textContent = `${minLabel(target.start)}–${minLabel(target.end)}`;
+}
+
+// Près du haut ou du bas de l'écran, la grille défile toute seule.
+function autoScroll() {
+  const a = drag.active;
+  if (!a) return;
+  const tray = $('.tray')?.getBoundingClientRect().top ?? innerHeight;
+  const head = $('.cal-head')?.getBoundingClientRect().bottom ?? 0;
+  let dy = 0;
+  if (a.y < head + 50 && a.y > head - 80) dy = -Math.ceil((head + 50 - a.y) / 6);
+  else if (a.y > tray - 50 && a.y < tray + 10) dy = Math.ceil((a.y - (tray - 50)) / 6);
+  if (dy) { window.scrollBy(0, dy); moveDrag(a.x, a.y); }
+  drag.raf = requestAnimationFrame(autoScroll);
+}
+
+function endDrag(drop) {
+  const a = drag.active;
+  drag.active = null;
+  cancelAnimationFrame(drag.raf);
+  a.ghost?.remove();
+  $('.plan-preview')?.remove();
+  document.body.classList.remove('is-dragging');
+  temp.suppressClick = true; // le relâchement ne doit pas compter comme un « toucher »
+  setTimeout(() => { temp.suppressClick = false; }, 350);
+  const tg = drop ? a.target : null;
+  if (a.kind === 'new' && tg?.col) { createPlan(a.id, tg.day, tg.start, a.dur); return; }
+  if (a.kind === 'move' && tg?.tray) {
+    const old = { ...a.plan };
+    state.plans = state.plans.filter((x) => x.id !== a.plan.id);
+    save(); render();
+    toast('Retirée du planning', { label: 'Annuler', fn: () => { state.plans.push(old); save(); render(); } });
+    return;
+  }
+  if ((a.kind === 'move' || a.kind === 'resize') && tg?.col) {
+    Object.assign(a.plan, { start: dateAt(tg.day, tg.start), end: dateAt(tg.day, tg.end) });
+    save(); buzz();
+  }
+  render();
+}
+
+/* ----- Fiches : créneau planifié, créneau vide, événement fixe ----- */
+
+function openPlanSheet(id) {
+  const p = state.plans.find((x) => x.id === id);
+  const t = getTask(p?.taskId);
+  if (!p || !t) return;
+  const d = new Date(p.start);
+  const day = ymd(d);
+  const running = state.active?.taskId === t.id;
+  openSheet(`<form class="sheet-body" data-form="plan" data-id="${id}">
+    ${head('Créneau planifié')}
+    <button type="button" class="plan-task" data-action="open-task" data-id="${t.id}" style="--c:${colorOf(t.projectId)}">
+      <span class="dot"></span><span class="plan-task-name">${t.starred ? '★ ' : ''}${esc(t.title)}<small>${esc(pathLabel(t.projectId, t.subprojectId))}</small></span>${ICON.right}
+    </button>
+    <label class="field"><span>Jour</span><input type="date" name="date" value="${day}" required></label>
+    <div class="row2">
+      <label class="field"><span>Début</span><input type="time" name="start" value="${hhmm(minOfDay(p.start, day))}" step="300" required></label>
+      <label class="field"><span>Fin</span><input type="time" name="end" value="${hhmm(minOfDay(p.end, day) % DAY_MIN)}" step="300" required></label>
+    </div>
+    <div class="sheet-actions">
+      ${t.done ? '' : `<button type="button" class="btn ${running ? 'stop' : 'primary'} grow" data-action="toggle-timer" data-id="${t.id}">${running ? `${ICON.stop} Arrêter` : `${ICON.play} Lancer le chrono`}</button>`}
+      <button type="button" class="btn grow" data-action="toggle-done" data-id="${t.id}">${t.done ? 'Rouvrir' : `${ICON.check} Terminée`}</button>
+    </div>
+    <button type="button" class="btn ghost danger wide" data-action="delete-plan" data-id="${id}">${ICON.trash} Retirer du planning</button>
+  </form>`);
+}
+
+function commitPlanForm(form) {
+  const p = state.plans.find((x) => x.id === form.dataset.id);
+  const day = form.elements.date.value;
+  if (!p || !day) return;
+  const s = toMin(form.elements.start.value);
+  let e = toMin(form.elements.end.value);
+  if (e <= s) e = e === 0 ? DAY_MIN : Math.min(DAY_MIN, s + PLAN_DUR); // fin avant le début : on corrige
+  Object.assign(p, { start: dateAt(day, s), end: dateAt(day, e) });
+  form.elements.end.value = hhmm(e % DAY_MIN);
+  save(); render();
+}
+
+function openSlotSheet(day, min) {
+  const d = parseYmd(day);
+  const tasks = trayTasks(0, 0);
+  openSheet(`<div class="sheet-body">
+    ${head(`${cap(fmt(d, { weekday: 'long', day: 'numeric', month: 'short' }))} · ${minLabel(min)}`)}
+    ${tasks.length ? `<p class="hint">Quelle tâche faire à ce moment-là ?</p>
+      <div class="card pick-list">${tasks.map(({ t }) => `<button type="button" class="pick" data-action="plan-here" data-id="${t.id}" data-day="${day}" data-min="${min}" style="--c:${colorOf(t.projectId)}">
+        <span class="dot"></span><span class="pick-title">${t.starred ? '★ ' : ''}${esc(t.title)}<small>${esc(pathLabel(t.projectId, t.subprojectId))}</small></span>${ICON.plus}</button>`).join('')}</div>`
+      : '<p class="hint">Aucune tâche à faire pour l’instant.</p>'}
+    <button type="button" class="btn wide" style="margin-top:12px" data-action="new-event" data-day="${day}" data-min="${min}">${ICON.plus} Événement fixe à cette heure (travail, cours…)</button>
+  </div>`);
+}
+
+function openEventSheet(id, preset = {}) {
+  const found = state.events.find((x) => x.id === id);
+  const iso = preset.day ? String(((parseYmd(preset.day).getDay() + 6) % 7) + 1) : '';
+  const ev = found || { title: '', color: EVENT_COLORS[0], days: iso || '12345', date: '', start: preset.min ?? 480, end: Math.min(DAY_MIN - 5, (preset.min ?? 480) + (preset.min != null ? 120 : 540)) };
+  const once = !!ev.date;
+  openSheet(`<form class="sheet-body" data-form="event" data-id="${found ? id : ''}" autocomplete="off">
+    ${head(found ? 'Événement fixe' : 'Nouvel événement fixe')}
+    <p class="hint" style="margin-top:0">Un créneau qui n’est pas une tâche (travail, cours, sport…). Il s’affiche en fond du planning pour caler tes tâches autour.</p>
+    <label class="field"><span>Nom</span><input class="big" name="title" value="${esc(ev.title)}" placeholder="Ex. Travail" maxlength="60" required${found ? '' : ' autofocus'}></label>
+    <div class="seg2">
+      <label><input type="radio" name="repeat" value="weekly"${once ? '' : ' checked'}><span>Chaque semaine</span></label>
+      <label><input type="radio" name="repeat" value="once"${once ? ' checked' : ''}><span>Une seule fois</span></label>
+    </div>
+    <div class="field when-weekly"><span>Jours</span><div class="daypick">${'LMMJVSD'.split('').map((l, i) => `<label><input type="checkbox" name="day" value="${i + 1}"${String(ev.days || '').includes(String(i + 1)) ? ' checked' : ''}><span>${l}</span></label>`).join('')}</div></div>
+    <label class="field when-once"><span>Date</span><input type="date" name="date" value="${esc(ev.date || preset.day || ymd(new Date()))}"></label>
+    <div class="row2">
+      <label class="field"><span>Début</span><input type="time" name="start" value="${hhmm(ev.start)}" step="300" required></label>
+      <label class="field"><span>Fin</span><input type="time" name="end" value="${hhmm(ev.end)}" step="300" required></label>
+    </div>
+    <div class="field"><span>Couleur</span><div class="swatches">${EVENT_COLORS.map((c) => `<label class="swatch" style="--c:${c}"><input type="radio" name="color" value="${c}"${c === (ev.color || EVENT_COLORS[0]) ? ' checked' : ''}><i></i></label>`).join('')}</div></div>
+    <div class="sheet-actions">
+      ${found ? `<button type="button" class="btn ghost danger" data-action="delete-event" data-id="${id}">${ICON.trash} Supprimer</button>` : ''}
+      <button class="btn primary grow">${found ? 'Enregistrer' : 'Ajouter au planning'}</button>
+    </div>
+  </form>`);
+}
+
+function saveEvent(form) {
+  const fd = new FormData(form);
+  const title = String(fd.get('title') || '').trim();
+  if (!title) return;
+  const start = toMin(fd.get('start'));
+  let end = toMin(fd.get('end'));
+  if (end === 0) end = DAY_MIN;
+  if (end <= start) { toast('L’heure de fin doit être après le début'); return; }
+  const once = fd.get('repeat') === 'once';
+  const days = fd.getAll('day').join('');
+  if (!once && !days) { toast('Choisis au moins un jour'); return; }
+  let ev = state.events.find((x) => x.id === form.dataset.id);
+  if (!ev) { ev = { id: uid() }; state.events.push(ev); }
+  Object.assign(ev, { title, color: String(fd.get('color') || EVENT_COLORS[0]), start, end, days: once ? '' : days, date: once ? String(fd.get('date') || ymd(new Date())) : '' });
+  save(); closeSheet(); render();
+  toast(once ? 'Événement ajouté' : 'Événement ajouté chaque semaine');
+}
+
+sheet.addEventListener('change', (e) => {
+  const form = e.target.closest('form[data-form="plan"]');
+  if (form) commitPlanForm(form);
+});
+
+// Toucher un créneau, un bloc ou un événement pendant qu'une tâche est « en main » : on la place là.
+function placeHere(el, e) {
+  const col = el.closest('.cal-col');
+  if (!temp.placing || !col) return false;
+  const id = temp.placing;
+  temp.placing = null;
+  document.body.classList.remove('placing');
+  createPlan(id, col.dataset.day, slotAt(col, e.clientY));
+  return true;
+}
+
+// Avant le reste : un relâchement de glisser-déposer ne doit pas déclencher d'action.
+document.addEventListener('click', (e) => {
+  if (temp.suppressClick && e.target.closest('.cal, .tray')) { e.preventDefault(); e.stopPropagation(); }
+}, true);
+
+setInterval(() => {
+  const line = $('.now-line');
+  if (line && !drag.active) line.style.top = `${(((new Date().getHours() * 60 + new Date().getMinutes()) / DAY_MIN) * 100).toFixed(3)}%`;
+}, 60e3);
+
+new ResizeObserver(() => document.documentElement.style.setProperty('--top-h', `${$('.top').offsetHeight}px`)).observe($('.top'));
+
 /* ---------- Actions ---------- */
 
 const actions = {
-  tab(el) { state.ui.tab = el.dataset.value; temp.openProject = null; writeLocal(); render(); window.scrollTo(0, 0); },
+  'plan-view'(el) { state.ui.planView = el.dataset.value; writeLocal(); render(); scrollPlanToHour(); },
+  'plan-day'(el) {
+    // En semaine : toucher un jour l'ouvre en vue Jour. En vue Jour : change de jour.
+    Object.assign(state.ui, { planDate: el.dataset.value, planView: 'day' });
+    writeLocal(); render();
+  },
+  'plan-move'(el) {
+    const d = parseYmd(state.ui.planDate || ymd(new Date()));
+    const step = (state.ui.planView === 'day' ? 1 : 7) * Number(el.dataset.value);
+    state.ui.planDate = ymd(new Date(d.getFullYear(), d.getMonth(), d.getDate() + step));
+    writeLocal(); render();
+  },
+  'plan-today'() { state.ui.planDate = ymd(new Date()); writeLocal(); render(); scrollPlanToHour(); },
+  'pick-tray'(el) {
+    const id = el.dataset.dragTask;
+    temp.placing = temp.placing === id ? null : id;
+    document.body.classList.toggle('placing', !!temp.placing);
+    render();
+  },
+  'cancel-placing'() { temp.placing = null; document.body.classList.remove('placing'); render(); },
+  slot(el, e) {
+    if (placeHere(el, e)) return;
+    openSlotSheet(el.dataset.day, slotAt(el, e.clientY));
+  },
+  'open-plan'(el, e) { if (!placeHere(el, e)) openPlanSheet(el.dataset.id); },
+  'open-event'(el, e) { if (!placeHere(el, e)) openEventSheet(el.dataset.id); },
+  'plan-here'(el) { closeSheet(); createPlan(el.dataset.id, el.dataset.day, Number(el.dataset.min)); },
+  'new-event'(el) {
+    openEventSheet(null, el.dataset.day ? { day: el.dataset.day, min: Number(el.dataset.min) } : {});
+  },
+  'delete-plan'(el) {
+    const old = state.plans.find((x) => x.id === el.dataset.id);
+    if (!old) return;
+    state.plans = state.plans.filter((x) => x !== old);
+    save(); closeSheet(); render();
+    toast('Retirée du planning', { label: 'Annuler', fn: () => { state.plans.push(old); save(); render(); } });
+  },
+  async 'delete-event'(el) {
+    const ev = state.events.find((x) => x.id === el.dataset.id);
+    if (!ev) return;
+    const ok = await ask({ title: `Supprimer « ${ev.title} » ?`, text: ev.date ? 'Cet événement sera retiré du planning.' : 'Il sera retiré de toutes les semaines.', ok: 'Supprimer', danger: true });
+    if (!ok) return;
+    state.events = state.events.filter((x) => x !== ev);
+    save(); closeSheet(); render();
+  },
+  tab(el) {
+    state.ui.tab = el.dataset.value;
+    Object.assign(temp, { openProject: null, placing: null });
+    writeLocal(); render(); window.scrollTo(0, 0);
+    if (state.ui.tab === 'plan') scrollPlanToHour();
+  },
   'go-stats'() { Object.assign(state.ui, { tab: 'stats', period: 'day', offset: 0 }); writeLocal(); render(); window.scrollTo(0, 0); },
   filter(el) { Object.assign(state.ui, { filter: el.dataset.value, subfilter: 'all' }); writeLocal(); render(); },
   subfilter(el) { state.ui.subfilter = el.dataset.value; writeLocal(); render(); },
 
   'toggle-timer'(el) {
     const id = el.dataset.id;
-    const inSheet = !!el.closest('#sheet');
+    const inSheet = !!el.closest('form[data-form="task"]');
+    if (el.closest('form[data-form="plan"]')) closeSheet(); // depuis un créneau du planning : on referme
     const f = taskFormOpen();
     if (f?.dataset.id) commitTaskForm(f);
     const done = state.active?.taskId === id ? stopTimer() : startTimer(id);
@@ -1720,6 +2248,7 @@ const actions = {
     if (!ok) return;
     if (state.active?.taskId === t.id) finishActive();
     state.tasks = state.tasks.filter((x) => x !== t);
+    dropOrphanPlans();
     save(); closeSheet(); render(); toast('Tâche supprimée');
   },
   'toggle-done-list'() { state.ui.showDone = !state.ui.showDone; writeLocal(); render(); },
@@ -1728,6 +2257,7 @@ const actions = {
     const ok = await ask({ title: `Effacer ${n} tâche(s) terminée(s) ?`, text: 'Le temps passé reste dans les statistiques.', ok: 'Effacer', danger: true });
     if (!ok) return;
     state.tasks = state.tasks.filter((t) => !t.done);
+    dropOrphanPlans();
     save(); render();
   },
   'close-sheet'() { closeSheet(); },

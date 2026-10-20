@@ -13,6 +13,7 @@ Todo avec chronomètre par tâche, projets et sous-projets. Application web inst
 - **Synchro entre appareils** (facultative) : mêmes tâches, projets, temps et chrono en cours sur le téléphone et l’ordinateur.
 - **Deux profils (Romain / Rebecca)** : choix à l’ouverture de l’app ; chacun a ses tâches, projets, chronos et stats. Un seul code de synchro pour le foyer, chaque profil a son propre espace chiffré.
 - **Tâches prioritaires** : l’étoile ★ fait passer une tâche en tête de liste.
+- **Planning** (vue semaine ou jour) : glisser-déposer les tâches dans la grille (appui long puis glisser au doigt), ou toucher une tâche puis un créneau, ou toucher un créneau vide puis choisir la tâche. Les blocs se déplacent, s’allongent (bord du bas) et se retirent en les déposant sur le bandeau. Événements fixes récurrents (travail, cours…) affichés en fond pour caler les tâches autour.
 - **Page projet** : tâches rangées par sous-projet, ajout direct, transformation d’un projet en sous-projet.
 
 Les données sont enregistrées sur l’appareil (localStorage). Sans synchro, rien n’est envoyé sur internet.
