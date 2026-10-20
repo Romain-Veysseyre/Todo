@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 const LONG_SESSION = 4 * 3600e3; // au-delà : on propose de corriger (chrono oublié)
