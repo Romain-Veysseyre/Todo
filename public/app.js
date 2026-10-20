@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.3.0';
+const VERSION = '2.4.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -876,6 +876,7 @@ function closeSheet() {
 
 sheet.addEventListener('close', () => {
   if (sheet.open) return; // une autre fiche s'est déjà rouverte entre-temps
+  $$('.plan-preview.range').forEach((x) => x.remove());
   const f = $('form[data-form="task"]', sheet);
   if (f?.dataset.id) { commitTaskForm(f); render(); }
   sheet.innerHTML = '';
@@ -2233,10 +2234,12 @@ document.addEventListener('pointerdown', (e) => {
   if (e.pointerType === 'mouse' && e.button !== 0) return;
   const chip = e.target.closest('[data-drag-task]');
   const block = e.target.closest('.plan-block');
-  if (!chip && !block) return;
-  const kind = chip ? 'new' : e.target.closest('.plan-resize') ? 'resize' : 'move';
-  drag.pending = { kind, el: chip || block, id: chip ? chip.dataset.dragTask : block.dataset.id, type: e.pointerType, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY };
-  if (e.pointerType !== 'mouse') drag.pending.timer = setTimeout(beginDrag, 260); // appui long
+  // Plage vide (ou événement fixe) : glisser pour dessiner un créneau
+  const col = !chip && !block && !temp.placing ? e.target.closest('.cal-col') : null;
+  if (!chip && !block && !col) return;
+  const kind = chip ? 'new' : block ? (e.target.closest('.plan-resize') ? 'resize' : 'move') : 'range';
+  drag.pending = { kind, el: chip || block || col, id: chip ? chip.dataset.dragTask : block?.dataset.id, type: e.pointerType, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY };
+  if (e.pointerType !== 'mouse') drag.pending.timer = setTimeout(beginDrag, kind === 'range' ? 350 : 260); // appui long
   else e.preventDefault(); // pas de sélection de texte à la souris
 });
 
@@ -2246,7 +2249,7 @@ window.addEventListener('pointermove', (e) => {
   if (!p) return;
   Object.assign(p, { x: e.clientX, y: e.clientY });
   const dist = Math.hypot(e.clientX - p.x0, e.clientY - p.y0);
-  if (p.type === 'mouse' && dist > 5) beginDrag();
+  if (p.type === 'mouse' && (p.kind === 'range' ? Math.abs(e.clientY - p.y0) > 10 : dist > 5)) beginDrag();
   else if (p.type !== 'mouse' && dist > 10) cancelPending(); // il fait défiler la page
 });
 
@@ -2267,7 +2270,13 @@ function beginDrag() {
   clearTimeout(p.timer);
   drag.pending = null;
   const a = { ...p, dur: PLAN_DUR, grab: 0 };
-  if (p.kind === 'new') {
+  if (p.kind === 'range') {
+    const r = p.el.getBoundingClientRect();
+    const at = VIEW_START + ((p.y0 - r.top) / r.height) * VIEW_SPAN;
+    Object.assign(a, { col: p.el, day: p.el.dataset.day, color: 'var(--accent)' });
+    a.anchor = Math.max(VIEW_START, Math.min(DAY_MIN - SNAP, Math.floor(at / SNAP) * SNAP));
+    document.body.classList.add('ranging');
+  } else if (p.kind === 'new') {
     const t = getTask(p.id);
     if (!t) return;
     a.color = colorOf(t.projectId);
@@ -2300,6 +2309,12 @@ function beginDrag() {
 
 function dropTarget(x, y) {
   const a = drag.active;
+  if (a.kind === 'range') { // créneau dessiné : de l'appui jusqu'au doigt, dans la même colonne
+    const r = a.col.getBoundingClientRect();
+    const c = Math.max(VIEW_START, Math.min(DAY_MIN, Math.round((VIEW_START + ((y - r.top) / r.height) * VIEW_SPAN) / SNAP) * SNAP));
+    const [start, end] = c >= a.anchor + SNAP ? [a.anchor, c] : c <= a.anchor ? [c, a.anchor + SNAP] : [a.anchor, a.anchor + SNAP];
+    return { col: a.col, day: a.day, start, end };
+  }
   const inside = (el) => { const r = el?.getBoundingClientRect(); return r && r.width && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom; };
   // Bloc déposé sur la zone « retirer » (ou sur la barre latérale fixe) : on le retire du planning.
   // (sur téléphone, le volet s'efface pendant le glisser : on n'en tient pas compte)
@@ -2338,9 +2353,12 @@ function moveDrag(x, y) {
     target.col.appendChild(pv);
   }
   pv.style.setProperty('--c', a.color);
+  pv.classList.toggle('range', a.kind === 'range');
   pv.style.top = `${posPct(target.start)}%`;
   pv.style.height = `${((target.end - target.start) / VIEW_SPAN) * 100}%`;
-  pv.textContent = `${minLabel(target.start)}–${minLabel(target.end)}`;
+  pv.textContent = a.kind === 'range'
+    ? `${minLabel(target.start)} – ${minLabel(target.end)} · ${fmtDur((target.end - target.start) * 60e3)}`
+    : `${minLabel(target.start)}–${minLabel(target.end)}`;
 }
 
 // Près du haut ou du bas de l'écran, la grille défile toute seule.
@@ -2361,11 +2379,15 @@ function endDrag(drop) {
   drag.active = null;
   cancelAnimationFrame(drag.raf);
   a.ghost?.remove();
-  $('.plan-preview')?.remove();
-  document.body.classList.remove('is-dragging', 'drag-move', 'drop-hover');
+  if (a.kind !== 'range') $('.plan-preview')?.remove();
+  document.body.classList.remove('is-dragging', 'drag-move', 'drop-hover', 'ranging');
   temp.suppressClick = true; // le relâchement ne doit pas compter comme un « toucher »
   setTimeout(() => { temp.suppressClick = false; }, 350);
   const tg = drop ? a.target : null;
+  if (a.kind === 'range') { // le créneau dessiné reste affiché pendant que la fiche est ouverte
+    if (tg?.col) { buzz(); openSlotSheet(tg.day, tg.start, undefined, tg.end - tg.start); } else $('.plan-preview')?.remove();
+    return;
+  }
   if (a.kind === 'new' && tg?.col) { createPlan(a.id, tg.day, tg.start, a.dur); return; }
   if (a.kind === 'move' && tg?.tray) {
     const old = { ...a.plan };
@@ -2422,14 +2444,16 @@ function commitPlanForm(form) {
 
 // Fiche d'un créneau vide : créer une tâche à cette heure, ou y placer une tâche existante.
 // maxDur : place disponible (créneau libre de « Aujourd'hui »), pour proposer la bonne durée.
-function openSlotSheet(day, min, maxDur = DAY_MIN - min) {
+// dur : durée dessinée dans la grille (proposée et choisie d'office).
+function openSlotSheet(day, min, maxDur = DAY_MIN - min, dur = 0) {
   const d = parseYmd(day);
   const tasks = trayTasks(0, 0);
   const def = newTaskDefaults();
-  const durs = [30, 60, 90, 120].filter((x) => x <= Math.max(30, maxDur));
-  const pick = durs.includes(PLAN_DUR) ? PLAN_DUR : durs[durs.length - 1];
+  let durs = [30, 60, 90, 120].filter((x) => x <= Math.max(30, maxDur));
+  if (dur && !durs.includes(dur)) durs = [...durs, dur].sort((a, b) => a - b);
+  const pick = dur || (durs.includes(PLAN_DUR) ? PLAN_DUR : durs[durs.length - 1]);
   openSheet(`<div class="sheet-body">
-    ${head(`${cap(fmt(d, { weekday: 'long', day: 'numeric', month: 'short' }))} · ${minLabel(min)}`)}
+    ${head(`${cap(fmt(d, { weekday: 'long', day: 'numeric', month: 'short' }))} · ${minLabel(min)}${dur ? ` → ${minLabel(min + dur)}` : ''}`)}
     <form class="slot-new" data-form="task" data-slot-day="${day}" data-slot-min="${min}" autocomplete="off">
       <label class="field"><span>Nouvelle tâche à ${minLabel(min)}</span>${emojiField(`<input class="big" name="title" placeholder="Ex. Appeler le garage" maxlength="200" required enterkeyhint="done"${matchMedia('(pointer: fine)').matches ? ' autofocus' : ''}>`)}</label>
       ${pickFields(def.projectId, def.subprojectId)}
