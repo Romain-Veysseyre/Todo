@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '1.9.0';
+const VERSION = '1.9.1';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -2094,8 +2094,8 @@ document.addEventListener('touchend', (e) => {
     const { dx } = gest;
     gest.mode = null;
     swipeShift(0);
-    // Balayer vers la droite → semaine suivante ; vers la gauche → semaine précédente.
-    if (Math.abs(dx) > 60) changePeriod(dx > 0 ? 1 : -1, dx > 0 ? 'left' : 'right');
+    // Sens habituel (comme Calendrier sur iPhone) : vers la gauche → semaine suivante ; vers la droite → précédente.
+    if (Math.abs(dx) > 60) changePeriod(dx < 0 ? 1 : -1, dx < 0 ? 'right' : 'left');
     return;
   }
   gest.mode = null;
