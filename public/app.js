@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '1.7.2';
+const VERSION = '1.8.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -1885,7 +1885,7 @@ function viewPlan() {
 
   const tray = trayTasks(weekStart, weekEnd);
   const placing = getTask(temp.placing);
-  const sideOpen = ui.planSide !== false;
+  const dockOpen = !!ui.dockOpen; // téléphone : bandeau du bas agrandi
 
   // Catégories de la barre : ★ Favoris d'abord, puis Tout, puis chaque projet qui a des tâches à faire.
   const starredN = tray.filter((x) => x.t.starred).length;
@@ -1907,9 +1907,21 @@ function viewPlan() {
       <i class="side-dot"></i><span class="side-row-title">${esc(t.title)}</span>
       ${t.starred && cat !== 'star' ? `<span class="side-star">${ICON.star}</span>` : ''}${planned ? '<em title="Déjà planifiée cette semaine">✓</em>' : ''}</button>`;
 
-  const side = `<aside class="side${sideOpen ? ' open' : ''}" aria-label="Tâches à planifier">
-      <div class="side-head"><b>À planifier</b><small>${tray.length}</small>
-        <button type="button" class="icon-btn side-close" data-action="side-toggle" aria-label="Masquer la liste">${ICON.right}</button></div>
+  // Téléphone (bandeau réduit) : une ligne de pastilles qui défile au doigt.
+  const chip = ({ t, planned }) => `<button type="button" class="strip-task${planned ? ' planned' : ''}${temp.placing === t.id ? ' on' : ''}" data-action="pick-tray" data-drag-task="${t.id}" style="--c:${colorOf(t.projectId)}">
+      ${t.starred && cat !== 'star' ? ICON.star : ''}<span>${esc(t.title)}</span>${planned ? '<em>✓</em>' : ''}</button>`;
+  const curCat = cats.find((c) => c.key === cat);
+  const strip = `<div class="side-strip">
+      <button type="button" class="strip-cat${temp.catMenu ? ' open' : ''}" data-action="cat-menu" aria-haspopup="menu"${curCat.color ? ` style="--c:${curCat.color}"` : ''}>
+        ${curCat.color ? '<i></i>' : ''}<span>${esc(curCat.label)}</span><small>${curCat.n}</small>${ICON.down}</button>
+      ${list.map(chip).join('')}
+    </div>
+    ${temp.catMenu ? `<div class="cat-menu" role="menu">${cats.map((c) => `<button type="button" role="menuitemradio" aria-checked="${c.key === cat}" class="proj-opt${c.key === cat ? ' on' : ''}" data-action="side-cat" data-value="${c.key}" style="--c:${c.color || 'var(--accent)'}">
+        ${c.color ? '<i></i>' : ''}<span>${esc(c.label)}</span><small>${c.n}</small></button>`).join('')}</div>` : ''}`;
+
+  const side = `<aside class="side${dockOpen ? ' open' : ''}" aria-label="Tâches à planifier">
+      <button type="button" class="dock-grab" data-action="dock-toggle" aria-label="${dockOpen ? 'Réduire la liste' : 'Agrandir la liste'}"><span></span></button>
+      <div class="side-head"><b>À planifier</b><small>${tray.length}</small></div>
       ${tray.length ? `<div class="side-cats">
         ${cats.filter((c) => c.key === 'star' || c.key === 'all').map((c) => `<button type="button" class="side-cat${c.key === cat ? ' on' : ''}" data-action="side-cat" data-value="${c.key}">${esc(c.label)}<small>${c.n}</small></button>`).join('')}
         <div class="proj-pick">
@@ -1920,12 +1932,13 @@ function viewPlan() {
         </div>
       </div>
       <div class="side-list">${list.map(row).join('')}</div>
-      <p class="side-hint">Glisse une tâche dans le planning, ou touche-la puis touche un créneau.</p>`
+      <p class="side-hint">Glisse une tâche dans le planning, ou touche-la puis touche un créneau.</p>
+      ${strip}`
         : '<p class="side-empty">Aucune tâche à faire. Ajoute-en dans l’onglet Tâches.</p>'}
     </aside>`;
   const floating = placing
     ? `<div class="place-bar"><span>Touche un créneau pour placer <b>« ${esc(placing.title)} »</b></span><button type="button" class="btn small" data-action="cancel-placing">Annuler</button></div>`
-    : `<button type="button" class="side-handle${sideOpen ? '' : ' show'}" data-action="side-toggle">${ICON.list}<span>À planifier</span><b>${tray.length}</b></button>`;
+    : '';
 
   return `<div class="plan-bar">
       <div class="seg-mini" role="group" aria-label="Affichage">
@@ -1983,14 +1996,28 @@ function slotAt(col, y) {
   return Math.max(VIEW_START, Math.min(DAY_MIN - 30, Math.floor(m / 30) * 30));
 }
 
-// Barre latérale : fixe à droite sur grand écran, volet qui glisse depuis la droite sur téléphone.
+// « À planifier » : barre fixe à droite sur grand écran, bandeau en bas (réduit ou agrandi) sur téléphone.
 const sideDocked = () => matchMedia('(min-width: 760px)').matches;
 function closeSideOnPhone() {
-  if (sideDocked() || state.ui.planSide === false) return;
-  state.ui.planSide = false;
+  temp.catMenu = false;
+  if (sideDocked() || !state.ui.dockOpen) return;
+  state.ui.dockOpen = false;
   writeLocal();
   $('.side')?.classList.remove('open');
 }
+
+// Poignée du bandeau : glisser vers le haut pour l'agrandir, vers le bas pour le réduire.
+document.addEventListener('pointerdown', (e) => { if (e.target.closest('.dock-grab')) temp.grabY = e.clientY; });
+window.addEventListener('pointerup', (e) => {
+  if (temp.grabY == null) return;
+  const dy = e.clientY - temp.grabY;
+  temp.grabY = null;
+  if (Math.abs(dy) < 25) return; // simple toucher : géré par le clic
+  state.ui.dockOpen = dy < 0;
+  temp.skipGrabClick = true;
+  setTimeout(() => { temp.skipGrabClick = false; }, 350);
+  writeLocal(); render();
+});
 // Bas de la zone où l'on peut déposer (au-dessus de la barre d'onglets ou de la zone « retirer »).
 function gridBottom() {
   const rm = $('.drop-remove');
@@ -2382,7 +2409,7 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault(); // ne pas valider le formulaire
     $('.emoji-grid button', e.target.closest('.emoji-panel'))?.click();
   }
-  if (e.key === 'Escape' && temp.projMenu) { temp.projMenu = false; render(); }
+  if (e.key === 'Escape' && (temp.projMenu || temp.catMenu)) { Object.assign(temp, { projMenu: false, catMenu: false }); render(); }
 });
 
 /* ---------- Ordre des projets (glisser la poignée ⋮⋮) ---------- */
@@ -2463,8 +2490,20 @@ const actions = {
     document.body.classList.toggle('placing', !!temp.placing);
     render();
   },
-  'side-toggle'() { state.ui.planSide = state.ui.planSide === false; writeLocal(); render(); },
-  'side-cat'(el) { state.ui.sideCat = el.dataset.value; temp.projMenu = false; writeLocal(); render(); $('.side-list')?.scrollTo(0, 0); },
+  'dock-toggle'() {
+    if (temp.skipGrabClick) return;
+    state.ui.dockOpen = !state.ui.dockOpen;
+    temp.catMenu = false;
+    writeLocal(); render();
+  },
+  'cat-menu'() { temp.catMenu = !temp.catMenu; render(); },
+  'side-cat'(el) {
+    Object.assign(temp, { projMenu: false, catMenu: false });
+    state.ui.sideCat = el.dataset.value;
+    writeLocal(); render();
+    $('.side-list')?.scrollTo(0, 0);
+    $('.side-strip')?.scrollTo(0, 0);
+  },
   'proj-menu'() { temp.projMenu = !temp.projMenu; render(); },
   emoji(el) { toggleEmojiPanel(el.closest('.emoji-field')); },
   'emoji-tab'(el) { const panel = el.closest('.emoji-panel'); $('.emoji-search', panel).value = ''; fillEmojiPanel(panel, el.dataset.value); },
@@ -2703,6 +2742,7 @@ const actions = {
 
 document.addEventListener('click', (e) => {
   if (temp.projMenu && !e.target.closest('.proj-pick')) { temp.projMenu = false; $('.proj-menu')?.remove(); $('.side-proj')?.classList.remove('open'); }
+  if (temp.catMenu && !e.target.closest('.strip-cat, .cat-menu')) { temp.catMenu = false; $('.cat-menu')?.remove(); $('.strip-cat')?.classList.remove('open'); }
   const el = e.target.closest('[data-action]');
   if (!el || el.disabled) return;
   const fn = actions[el.dataset.action];
