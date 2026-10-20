@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.5.0';
+const VERSION = '2.6.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -325,15 +325,13 @@ function finishTimer(taskId) {
   return s;
 }
 
-// Lancer une tâche arrête les chronos en cours, sauf en parallèle. Renvoie les sessions enregistrées.
-function startTimer(taskId, parallel = false) {
-  if (timerOf(taskId)) return [];
-  const done = parallel ? [] : state.timers.map((a) => finishTimer(a.taskId)).filter(Boolean);
+// Lancer une tâche ne coupe pas les autres chronos : ils tournent en parallèle.
+function startTimer(taskId) {
+  if (timerOf(taskId)) return;
   state.timers.unshift({ taskId, start: now() });
   const t = getTask(taskId);
   if (t?.done) { t.done = false; t.doneAt = null; }
   save(); render(); buzz(); persistStorage();
-  return done;
 }
 
 function stopTimer(taskId) {
@@ -347,30 +345,6 @@ function afterTimer(done, reopenTaskId) {
   const long = [].concat(done || []).find((s) => s.end - s.start > LONG_SESSION);
   if (long) openSessionSheet(long.id, { warn: true, back: reopenTaskId });
   else if (reopenTaskId) openTaskSheet(reopenTaskId);
-}
-
-// Lance le chrono d'une tâche à la place des chronos en cours ; le message permet de les garder.
-function switchTimer(taskId, reopenTaskId = null, lead = '') {
-  const prev = state.timers.filter((a) => a.taskId !== taskId);
-  const done = startTimer(taskId);
-  afterTimer(done, reopenTaskId);
-  if (!prev.length || sheet.open) return false; // fiche ouverte : elle a son bouton « Lancer en parallèle »
-  const what = prev.length > 1 ? `${prev.length} chronos arrêtés` : `« ${getTask(prev[0].taskId)?.title || 'Tâche'} » arrêté`;
-  toast(`${lead}${what}`, { label: prev.length > 1 ? 'Tout garder' : 'Garder les deux', fn: () => resumeTimers(prev) });
-  return true;
-}
-
-// « Garder les deux » : les chronos arrêtés reprennent comme s'ils ne s'étaient pas arrêtés.
-function resumeTimers(list) {
-  for (const a of list) {
-    if (timerOf(a.taskId)) continue;
-    state.sessions = state.sessions.filter((x) => x.id !== timerSessionId(a));
-    // 1 ms plus tard : nouvelle clé, car l'arrêt a peut-être déjà été envoyé aux autres appareils
-    state.timers.push({ taskId: a.taskId, start: a.start + 1 });
-  }
-  state.timers.sort((x, y) => y.start - x.start);
-  save(); render(); buzz();
-  toast(`${state.timers.length} chronos en parallèle`);
 }
 
 /* ---------- Rendu ---------- */
@@ -1028,7 +1002,6 @@ function openTaskSheet(id, preset) {
   const t = isNew ? { ...newTaskDefaults(), ...preset } : getTask(id);
   if (!t) return;
   const running = !isNew && !!timerOf(id);
-  const others = isNew ? [] : runningTimers().filter((a) => a.taskId !== id);
   const sessions = isNew ? [] : state.sessions.filter((s) => s.taskId === id).sort((x, y) => y.start - x.start);
   const total = sessions.reduce((n, s) => n + (s.end - s.start), 0);
 
@@ -1042,10 +1015,6 @@ function openTaskSheet(id, preset) {
           <div><small>Temps passé</small>${liveDur(total, sinceOf(id))}</div>
           <button type="button" class="btn ${running ? 'stop' : 'primary'}" data-action="toggle-timer" data-id="${id}">${running ? `${ICON.stop} Arrêter` : `${ICON.play} Lancer`}</button>
         </div>
-        ${!running && others.length ? `<div class="par-row">
-          <span><span class="pulse"></span>${others.length > 1 ? `${others.length} chronos en cours` : `« ${esc(getTask(others[0].taskId)?.title || 'Tâche')} » en cours`}<small>« Lancer » ${others.length > 1 ? 'les arrête' : 'l’arrête'}</small></span>
-          <button type="button" class="btn small" data-action="start-parallel" data-id="${id}">${ICON.plus} En parallèle</button>
-        </div>` : ''}
         ${sessions.length ? `<ul class="sessions">${sessions.slice(0, 40).map((s) => `<li><button type="button" data-action="open-session" data-id="${s.id}" data-back="${id}">
           <span>${fmt(new Date(s.start), { weekday: 'short', day: 'numeric', month: 'short' })} · ${hm(new Date(s.start))}–${hm(new Date(s.end))}</span><b>${fmtDur(s.end - s.start)}</b></button></li>`).join('')}</ul>`
           : '<p class="hint">Aucune session pour l’instant.</p>'}
@@ -1108,26 +1077,30 @@ function commitTaskForm(form) {
 function createTask(form, start) {
   const v = readTaskForm(form);
   if (!v.title) return;
+  // Quand : créneau touché dans l'agenda, ou bloc « Planifier dans l'agenda » de la fiche
+  const slotDay = form.dataset.slotDay;
+  const pp = form.querySelector('.pp[data-on="1"]');
+  const pv = pp && ppValues(pp);
+  const when = slotDay ? whenValues($('.when', form), slotDay) : pv && pv.day && (pv.hasTime || pv.when.multi) ? pv.when : null;
+  if (when && whenInvalid($('.when', form), when)) return;
   const t = { id: uid(), ...v, done: false, doneAt: null, createdAt: now() };
   state.tasks.push(t);
   Object.assign(state.ui, { lastProjectId: t.projectId || '', lastSubId: t.subprojectId || '' });
   if (state.ui.filter !== 'all' && state.ui.filter !== (t.projectId || 'none')) Object.assign(state.ui, { filter: 'all', subfilter: 'all' });
   closeSheet();
   persistStorage();
-  const slotDay = form.dataset.slotDay;
-  if (slotDay) { // créée depuis un créneau vide de l'agenda : planifiée à cette heure
-    createPlan(t.id, slotDay, Number(form.dataset.slotMin), Number(new FormData(form).get('dur')) || PLAN_DUR);
+  if (slotDay) { // créée depuis un créneau de l'agenda : planifiée à cette heure (ou en série, ou sur plusieurs jours)
+    const made = planWith(t.id, slotDay, Number(form.dataset.slotMin), when);
+    if (form.dataset.event) eventConverted(form.dataset.event, t, made);
     return;
   }
-  // créneau choisi dans le bloc « Planifier dans l'agenda »
-  const pp = form.querySelector('.pp[data-on="1"]');
-  const pv = pp && ppValues(pp);
   let planned = '';
-  if (pv && pv.day && pv.hasTime) {
-    state.plans.push({ id: uid(), taskId: t.id, start: dateAt(pv.day, pv.min), end: dateAt(pv.day, Math.min(DAY_MIN, pv.min + pv.dur)) });
-    planned = ` · planifiée ${dayWord(pv.day).toLowerCase()} ${minLabel(pv.min)}`;
+  if (when) {
+    const made = addPlans(t.id, pv.day, pv.min, when);
+    const msg = whenDone(when, pv.day, pv.min, made.length);
+    planned = ` · ${msg.charAt(0).toLowerCase()}${msg.slice(1)}`;
   }
-  if (start) { if (!switchTimer(t.id, null, 'Chrono lancé · ')) toast(`C’est parti, chrono lancé${planned}`); }
+  if (start) { startTimer(t.id); toast(`C’est parti, chrono lancé${planned}`); }
   else { save(); render(); toast(`Tâche ajoutée${planned}`); }
 }
 
@@ -1260,7 +1233,6 @@ sheet.addEventListener('submit', (e) => {
     else createTask(form, e.submitter?.value === 'start');
   } else if (form.dataset.form === 'project') saveProject(form);
   else if (form.dataset.form === 'session') saveSession(form);
-  else if (form.dataset.form === 'event') saveEvent(form);
   else if (form.dataset.form === 'clean') {
     const ids = new Set(new FormData(form).getAll('drop'));
     if (!ids.size) { closeSheet(); return; }
@@ -1916,11 +1888,16 @@ function eventsOn(d) {
   return state.events.filter((ev) => (ev.date ? ev.date === key : String(ev.days || '').includes(iso)));
 }
 
+// Créneaux à heure fixe d'un jour (les tâches sur plusieurs jours sont à part : spansOn).
 function plansOn(day) {
   const a = dateAt(day, 0);
   const b = dateAt(day, DAY_MIN);
-  return state.plans.filter((p) => p.end > a && p.start < b && getTask(p.taskId));
+  return state.plans.filter((p) => !p.allDay && p.end > a && p.start < b && getTask(p.taskId));
 }
+
+// Tâches sur plusieurs jours (journées entières, ex. un voyage) qui touchent la période [a, b[.
+const spansIn = (a, b) => state.plans.filter((p) => p.allDay && p.end > a && p.start < b && getTask(p.taskId));
+const spansOn = (day) => spansIn(dateAt(day, 0), dateAt(day, DAY_MIN));
 
 // Range les blocs qui se chevauchent côte à côte.
 function pack(items) {
@@ -1967,6 +1944,13 @@ function nextPlanOf(taskId) {
 }
 
 function planLabel(p) {
+  if (p.allDay) {
+    const first = ymd(new Date(p.start));
+    const last = ymd(new Date(p.end - 1));
+    const short = (day) => fmt(parseYmd(day), { weekday: 'short', day: 'numeric' });
+    if (p.start <= now()) return `Jusqu’au ${short(last)}`;
+    return first === last ? `${dayWord(first)} · journée` : `${short(first)} → ${short(last)}`;
+  }
   if (p.start <= now()) return 'En ce moment';
   const d = new Date(p.start);
   const diff = Math.round((startOfDay(d) - startOfDay(new Date())) / 864e5);
@@ -1990,7 +1974,7 @@ function viewPlan() {
 
   const heads = (isDay ? week : shown).map((d) => {
     const key = ymd(d);
-    const n = plansOn(key).length;
+    const n = plansOn(key).length + spansOn(key).length;
     return `<button type="button" class="cal-day${key === today ? ' today' : ''}${isDay && key === ymd(anchor) ? ' on' : ''}" data-action="plan-day" data-value="${key}">
       <small>${esc(fmt(d, { weekday: 'short' }).replace('.', ''))}</small><b>${d.getDate()}</b><i>${n ? '•'.repeat(Math.min(n, 3)) : ''}</i></button>`;
   }).join('');
@@ -2008,12 +1992,29 @@ function viewPlan() {
         const t = getTask(it.p.taskId);
         const running = !!timerOf(t.id);
         return `<div class="plan-block${t.done || it.p.done ? ' done' : ''}${running ? ' running' : ''}" data-action="open-plan" data-id="${it.p.id}" style="${boxStyle(it)};--c:${colorOf(t.projectId)}">
-          <b>${t.starred ? '★ ' : ''}${esc(t.title)}</b><span>${shortLabel(it.s0)}–${shortLabel(it.e)}</span>
+          <b>${t.starred ? '★ ' : ''}${esc(t.title)}</b><span>${it.p.series ? '↻ ' : ''}${shortLabel(it.s0)}–${shortLabel(it.e)}</span>
           <i class="plan-resize" aria-hidden="true"></i></div>`;
       }).join('')}
       ${key === today && nowMin >= VIEW_START ? `<div class="now-line" style="top:${posPct(nowMin)}%"></div>` : ''}
     </div>`;
   }).join('');
+
+  // Tâches sur plusieurs jours : une barre au-dessus des heures, sur tous leurs jours.
+  const dayIdx = (t) => Math.round((startOfDay(new Date(t)) - shown[0]) / 864e5);
+  const rowEnds = [];
+  const bars = spansIn(+shown[0], dateAt(ymd(shown[shown.length - 1]), DAY_MIN))
+    .sort((a, b) => a.start - b.start || b.end - a.end)
+    .map((p) => {
+      const s = dayIdx(p.start);
+      const e = dayIdx(p.end - 1);
+      const a = Math.max(0, s);
+      const b = Math.min(shown.length - 1, e);
+      let row = rowEnds.findIndex((end) => end < a);
+      if (row < 0) { row = rowEnds.length; rowEnds.push(b); } else rowEnds[row] = b;
+      const t = getTask(p.taskId);
+      return `<button type="button" class="span-bar${planDone(p) ? ' done' : ''}${s < a ? ' cut-l' : ''}${e > b ? ' cut-r' : ''}" data-action="open-plan" data-id="${p.id}" style="grid-column:${a + 1} / ${b + 2};grid-row:${row + 1};--c:${colorOf(t.projectId)}">${t.starred ? '★ ' : ''}${esc(t.title)}</button>`;
+    }).join('');
+  const lane = bars ? `<div class="cal-spans"><div class="cal-gutter"></div><div class="spans-grid" style="--n:${shown.length}">${bars}</div></div>` : '';
 
   const tray = trayTasks(weekStart, weekEnd);
   const placing = getTask(temp.placing);
@@ -2085,11 +2086,11 @@ function viewPlan() {
         <button type="button" class="plan-range" data-action="plan-today">${range}</button>
         <button type="button" class="icon-btn" data-action="plan-move" data-value="1" aria-label="Suivant">${ICON.right}</button>
       </div>
-      <button type="button" class="btn small plan-ev" data-action="new-event" title="Horaires fixes : travail, cours, sport…">${ICON.plus} Événement</button>
     </div>
+    ${state.events.length ? '<p class="ev-note">🔁 Les événements fixes (rayés) deviennent des tâches : touche-en un pour le transformer.</p>' : ''}
     <div class="plan-layout">
     <div class="cal${isDay ? ' is-day' : ''}${slide ? ` slide-from-${slide}` : ''}"${zoom ? ` style="--hour:${zoom}px"` : ''}>
-      <div class="cal-head"><div class="cal-gutter"></div><div class="cal-days" style="--n:7">${heads}</div></div>
+      <div class="cal-head"><div class="cal-gutter"></div><div class="cal-days" style="--n:7">${heads}</div>${lane}</div>
       <div class="cal-body">
         <div class="cal-hours">${[...Array(17)].map((_, i) => `<span style="top:${posPct((i + 7) * 60)}%">${i + 7}h</span>`).join('')}</div>
         <div class="cal-cols" style="--n:${shown.length}">${cols}</div>
@@ -2123,6 +2124,152 @@ function createPlan(taskId, day, startMin, dur = PLAN_DUR) {
   });
   return p;
 }
+
+/* ----- Quand : durée, plusieurs jours, répétition chaque semaine ----- */
+
+const isoDay = (day) => String(((parseYmd(day).getDay() + 6) % 7) + 1); // « 1 » = lundi
+const addDays = (day, n) => { const d = parseYmd(day); d.setDate(d.getDate() + n); return ymd(d); };
+const dShort = (day) => fmt(parseYmd(day), { weekday: 'short', day: 'numeric', month: 'short' });
+const DAY_SHORT = ['lun.', 'mar.', 'mer.', 'jeu.', 'ven.', 'sam.', 'dim.'];
+
+// « 135 » → « lun., mer. et ven. »
+function daysWord(days) {
+  if (days === '1234567') return 'tous les jours';
+  if (days === '12345') return 'du lundi au vendredi';
+  const names = [...days].map((c) => DAY_SHORT[c - 1]);
+  return names.length > 1 ? `${names.slice(0, -1).join(', ')} et ${names[names.length - 1]}` : names[0] || '';
+}
+
+// Jours d'une série : les jours cochés, à partir de « day » et pendant N semaines.
+function seriesDays(day, days, weeks) {
+  const out = [];
+  for (let i = 0; i < weeks * 7; i++) { const d = addDays(day, i); if (days.includes(isoDay(d))) out.push(d); }
+  return out;
+}
+
+// Durée (ou « Plusieurs jours ») puis répétition : fiche d'un créneau et bloc « Planifier » d'une tâche.
+function whenFields(day, durs, pick, { days = isoDay(day), weekly = false, auto = true } = {}) {
+  return `<div class="when" data-day="${day}" data-auto="${auto ? 1 : 0}">
+    <div class="field"><span>Durée</span><div class="dur-pick">${durs.map((x) => `<label><input type="radio" name="dur" value="${x}"${x === pick ? ' checked' : ''}><span>${fmtDur(x * 60e3)}</span></label>`).join('')}
+      <label class="multi"><input type="radio" name="dur" value="days"><span>📅 Plusieurs jours (voyage…)</span></label></div></div>
+    <label class="field when-days"><span>Jusqu’au (inclus)</span><input type="date" name="span_to" min="${day}" value="${addDays(day, 2)}"></label>
+    <div class="field rep"><span>Répéter</span>
+      <div class="seg2">
+        <label><input type="radio" name="rep" value="once"${weekly ? '' : ' checked'}><span>Une seule fois</span></label>
+        <label><input type="radio" name="rep" value="weekly"${weekly ? ' checked' : ''}><span>↻ Chaque semaine</span></label>
+      </div>
+      <div class="rep-detail">
+        <div class="daypick">${'LMMJVSD'.split('').map((l, i) => `<label><input type="checkbox" name="rep_day" value="${i + 1}"${days.includes(String(i + 1)) ? ' checked' : ''}><span>${l}</span></label>`).join('')}</div>
+        <div class="rep-weeks"><span>Pendant</span>
+          <button type="button" class="step" data-action="rep-step" data-value="-1" aria-label="Une semaine de moins">−</button>
+          <input type="number" name="rep_weeks" value="4" min="1" max="52" inputmode="numeric" aria-label="Nombre de semaines">
+          <button type="button" class="step" data-action="rep-step" data-value="1" aria-label="Une semaine de plus">+</button>
+          <span class="rep-unit">semaines</span></div>
+      </div>
+    </div>
+    <p class="when-sum"></p>
+  </div>`;
+}
+
+function whenValues(box, day) {
+  const durV = box.querySelector('[name="dur"]:checked')?.value;
+  const multi = durV === 'days';
+  const weekly = !multi && box.querySelector('[name="rep"]:checked')?.value === 'weekly';
+  const days = [...box.querySelectorAll('[name="rep_day"]:checked')].map((x) => x.value).join('');
+  const weeks = Math.max(1, Math.min(52, Math.round(Number(box.querySelector('[name="rep_weeks"]').value) || 1)));
+  const to = box.querySelector('[name="span_to"]').value;
+  return {
+    dur: Number(durV) || PLAN_DUR, multi, weekly, days, weeks, to: to && to >= day ? to : day,
+    dates: weekly ? seriesDays(day, days, weeks) : [day],
+  };
+}
+
+// Résumé sous les réglages (nombre de créneaux, dates), mis à jour à chaque changement.
+function whenRefresh(box, day = box?.dataset.day) {
+  if (!box || !day) return;
+  box.dataset.day = day;
+  if (box.dataset.auto === '1') for (const c of box.querySelectorAll('[name="rep_day"]')) c.checked = c.value === isoDay(day);
+  const to = box.querySelector('[name="span_to"]');
+  to.min = day;
+  if (to.dataset.auto !== '0' || !to.value || to.value < day) to.value = addDays(day, 2); // 3 jours par défaut
+  const w = whenValues(box, day);
+  box.querySelector('.rep-unit').textContent = w.weeks > 1 ? 'semaines' : 'semaine';
+  const sum = box.querySelector('.when-sum');
+  const n = Math.round((parseYmd(w.to) - parseYmd(day)) / 864e5) + 1;
+  sum.classList.toggle('warn', w.weekly && !w.dates.length);
+  sum.textContent = w.multi
+    ? (n > 1 ? `${n} jours · du ${dShort(day)} au ${dShort(w.to)}` : `Toute la journée · ${dShort(day)}`)
+    : w.weekly
+      ? (w.dates.length ? `↻ ${w.dates.length} créneau${w.dates.length > 1 ? 'x' : ''} · ${daysWord(w.days)} · jusqu’au ${dShort(w.dates[w.dates.length - 1])}` : 'Choisis au moins un jour')
+      : '';
+}
+
+// Série sans aucun jour coché : on le signale (une fiche ouverte cache les messages du bas).
+function whenInvalid(box, w) {
+  if (!w.weekly || w.dates.length) return false;
+  const sum = box.querySelector('.when-sum');
+  sum.classList.remove('shake');
+  void sum.offsetWidth;
+  sum.classList.add('shake');
+  return true;
+}
+
+// Crée les créneaux d'une tâche : un seul, un par jour coché pendant N semaines, ou plusieurs jours d'affilée.
+function addPlans(taskId, day, min, w) {
+  let made;
+  if (w.multi) {
+    made = [{ id: uid(), taskId, allDay: true, start: dateAt(day, 0), end: dateAt(w.to, DAY_MIN) }];
+  } else {
+    const s = Math.max(0, Math.min(DAY_MIN - SNAP, min));
+    const series = w.weekly && w.dates.length > 1 ? uid() : '';
+    made = w.dates.map((d) => ({ id: uid(), taskId, start: dateAt(d, s), end: dateAt(d, Math.min(DAY_MIN, s + w.dur)), ...(series ? { series } : {}) }));
+  }
+  state.plans.push(...made);
+  return made;
+}
+
+const whenDone = (w, day, min, n) => (w.multi
+  ? (w.to === day ? `Planifiée ${dShort(day)} · toute la journée` : `Planifiée du ${dShort(day)} au ${dShort(w.to)}`)
+  : w.weekly ? `${n} créneau${n > 1 ? 'x planifiés' : ' planifié'} · ${daysWord(w.days)}`
+    : `Planifiée ${fmt(parseYmd(day), { weekday: 'short', day: 'numeric' })} · ${minLabel(min)}`);
+
+// Planifie puis propose « Annuler ».
+function planWith(taskId, day, min, w) {
+  const made = addPlans(taskId, day, min, w);
+  save(); render(); buzz();
+  const ids = new Set(made.map((p) => p.id));
+  toast(whenDone(w, day, min, made.length), { label: 'Annuler', fn: () => { state.plans = state.plans.filter((p) => !ids.has(p.id)); save(); render(); } });
+  return made;
+}
+
+// Un événement fixe devenu tâche disparaît du planning (« Annuler » remet tout comme avant).
+function eventConverted(evId, t, made) {
+  const ev = state.events.find((x) => x.id === evId);
+  if (!ev) return;
+  state.events = state.events.filter((x) => x !== ev);
+  save(); render();
+  const ids = new Set(made.map((p) => p.id));
+  toast(`« ${t.title} » est maintenant une tâche`, {
+    label: 'Annuler',
+    fn: () => {
+      state.tasks = state.tasks.filter((x) => x !== t);
+      state.plans = state.plans.filter((p) => !ids.has(p.id));
+      state.events.push(ev);
+      save(); render();
+    },
+  });
+}
+
+// Jours ou date de fin choisis à la main : on ne les cale plus sur le jour du créneau.
+// (sur « input », avant le rafraîchissement du bloc « Planifier » qui écoute aussi cet événement)
+sheet.addEventListener('input', (e) => {
+  const box = e.target.closest('.when');
+  if (!box) return;
+  if (e.target.name === 'rep_day') box.dataset.auto = '0';
+  if (e.target.name === 'span_to') e.target.dataset.auto = '0';
+  if (e.target.name === 'rep_weeks') whenRefresh(box);
+});
+sheet.addEventListener('change', (e) => { const box = e.target.closest('.when'); if (box) whenRefresh(box); });
 
 // Créneau touché dans une colonne : minute de la journée (arrondie à la demi-heure).
 function slotAt(col, y) {
@@ -2173,7 +2320,7 @@ function setHour(px, focalY) {
 }
 
 function swipeShift(dx) {
-  for (const el of $$('.cal-cols, .cal-days')) el.style.transform = dx ? `translateX(${dx}px)` : '';
+  for (const el of $$('.cal-cols, .cal-days, .spans-grid')) el.style.transform = dx ? `translateX(${dx}px)` : '';
   $('.cal')?.classList.toggle('swiping', !!dx);
 }
 
@@ -2466,24 +2613,38 @@ function openPlanSheet(id) {
   const p = state.plans.find((x) => x.id === id);
   const t = getTask(p?.taskId);
   if (!p || !t) return;
-  const d = new Date(p.start);
-  const day = ymd(d);
+  const day = ymd(new Date(p.start));
   const running = !!timerOf(t.id);
+  const series = p.series ? state.plans.filter((x) => x.series === p.series).sort((a, b) => a.start - b.start) : [];
+  const after = series.filter((x) => x.start > p.start);
+  const fields = p.allDay
+    ? `<div class="row2">
+        <label class="field"><span>Du</span><input type="date" name="date" value="${day}" required></label>
+        <label class="field"><span>Au (inclus)</span><input type="date" name="to" value="${ymd(new Date(p.end - 1))}" min="${day}" required></label>
+      </div>`
+    : `<label class="field"><span>Jour</span><input type="date" name="date" value="${day}" required></label>
+      <div class="row2">
+        <label class="field"><span>Début</span><input type="time" name="start" value="${hhmm(minOfDay(p.start, day))}" step="300" required></label>
+        <label class="field"><span>Fin</span><input type="time" name="end" value="${hhmm(minOfDay(p.end, day) % DAY_MIN)}" step="300" required></label>
+      </div>`;
+  const weekdays = [...new Set(series.map((x) => isoDay(ymd(new Date(x.start)))))].sort().join('');
+  const rep = series.length > 1 ? `<div class="series-box">
+      <span>↻ ${esc(cap(daysWord(weekdays)))} · ${series.length} créneaux, jusqu’au ${esc(dShort(ymd(new Date(series[series.length - 1].start))))}</span>
+      ${after.length ? `<button type="button" class="btn small" data-action="series-apply" data-id="${id}">Mettre cet horaire aux ${after.length} suivants</button>` : ''}
+    </div>` : '';
   openSheet(`<form class="sheet-body" data-form="plan" data-id="${id}">
-    ${head('Créneau planifié')}
+    ${head(p.allDay ? 'Sur plusieurs jours' : series.length > 1 ? 'Créneau régulier' : 'Créneau planifié')}
     <button type="button" class="plan-task" data-action="open-task" data-id="${t.id}" style="--c:${colorOf(t.projectId)}">
       <span class="dot"></span><span class="plan-task-name">${t.starred ? '★ ' : ''}${esc(t.title)}<small>${esc(pathLabel(t.projectId, t.subprojectId))}</small></span>${ICON.right}
     </button>
-    <label class="field"><span>Jour</span><input type="date" name="date" value="${day}" required></label>
-    <div class="row2">
-      <label class="field"><span>Début</span><input type="time" name="start" value="${hhmm(minOfDay(p.start, day))}" step="300" required></label>
-      <label class="field"><span>Fin</span><input type="time" name="end" value="${hhmm(minOfDay(p.end, day) % DAY_MIN)}" step="300" required></label>
-    </div>
+    ${fields}
+    ${rep}
     <div class="sheet-actions">
       ${t.done ? '' : `<button type="button" class="btn ${running ? 'stop' : 'primary'} grow" data-action="toggle-timer" data-id="${t.id}">${running ? `${ICON.stop} Arrêter` : `${ICON.play} Lancer le chrono`}</button>`}
       <button type="button" class="btn grow" data-action="toggle-done" data-id="${t.id}">${t.done ? 'Rouvrir' : `${ICON.check} Terminée`}</button>
     </div>
-    <button type="button" class="btn ghost danger wide" data-action="delete-plan" data-id="${id}">${ICON.trash} Retirer du planning</button>
+    <button type="button" class="btn ghost danger wide" data-action="delete-plan" data-id="${id}">${ICON.trash} ${after.length ? 'Retirer ce créneau' : 'Retirer du planning'}</button>
+    ${after.length ? `<button type="button" class="btn ghost danger wide" data-action="delete-series" data-id="${id}">${ICON.trash} Retirer celui-ci et les ${after.length} suivants</button>` : ''}
   </form>`);
 }
 
@@ -2491,6 +2652,14 @@ function commitPlanForm(form) {
   const p = state.plans.find((x) => x.id === form.dataset.id);
   const day = form.elements.date.value;
   if (!p || !day) return;
+  if (p.allDay) { // du … au … (inclus)
+    let to = form.elements.to.value;
+    if (!to || to < day) { to = day; form.elements.to.value = day; }
+    form.elements.to.min = day;
+    Object.assign(p, { start: dateAt(day, 0), end: dateAt(to, DAY_MIN) });
+    save(); render();
+    return;
+  }
   const s = toMin(form.elements.start.value);
   let e = toMin(form.elements.end.value);
   if (e <= s) e = e === 0 ? DAY_MIN : Math.min(DAY_MIN, s + PLAN_DUR); // fin avant le début : on corrige
@@ -2502,72 +2671,40 @@ function commitPlanForm(form) {
 // Fiche d'un créneau vide : créer une tâche à cette heure, ou y placer une tâche existante.
 // maxDur : place disponible (créneau libre de « Aujourd'hui »), pour proposer la bonne durée.
 // dur : durée dessinée dans la grille (proposée et choisie d'office).
-function openSlotSheet(day, min, maxDur = DAY_MIN - min, dur = 0) {
+// conv : événement fixe à transformer en tâche (nom, jours et horaire repris).
+function openSlotSheet(day, min, maxDur = DAY_MIN - min, dur = 0, conv = null) {
   const d = parseYmd(day);
-  const tasks = trayTasks(0, 0);
+  const tasks = conv ? [] : trayTasks(0, 0);
   const def = newTaskDefaults();
   let durs = [30, 60, 90, 120].filter((x) => x <= Math.max(30, maxDur));
   if (dur && !durs.includes(dur)) durs = [...durs, dur].sort((a, b) => a - b);
   const pick = dur || (durs.includes(PLAN_DUR) ? PLAN_DUR : durs[durs.length - 1]);
   openSheet(`<div class="sheet-body">
-    ${head(`${cap(fmt(d, { weekday: 'long', day: 'numeric', month: 'short' }))} · ${minLabel(min)}${dur ? ` → ${minLabel(min + dur)}` : ''}`)}
-    <form class="slot-new" data-form="task" data-slot-day="${day}" data-slot-min="${min}" autocomplete="off">
-      <label class="field"><span>Nouvelle tâche à ${minLabel(min)}</span>${emojiField(`<input class="big" name="title" placeholder="Ex. Appeler le garage" maxlength="200" required enterkeyhint="done"${matchMedia('(pointer: fine)').matches ? ' autofocus' : ''}>`)}</label>
+    ${head(conv ? 'Transformer en tâche' : `${cap(fmt(d, { weekday: 'long', day: 'numeric', month: 'short' }))} · ${minLabel(min)}${dur ? ` → ${minLabel(min + dur)}` : ''}`)}
+    ${conv ? `<p class="hint" style="margin-top:0">« ${esc(conv.title)} » (${minLabel(min)} → ${minLabel(min + dur)}) devient une tâche : tu pourras la chronométrer et la valider dans « Ma journée ».</p>` : ''}
+    <form class="slot-new" data-form="task" data-slot-day="${day}" data-slot-min="${min}"${conv ? ` data-event="${conv.id}"` : ''} autocomplete="off">
+      <label class="field"><span>${conv ? 'Tâche' : `Nouvelle tâche à ${minLabel(min)}`}</span>${emojiField(`<input class="big" name="title" value="${esc(conv?.title || '')}" placeholder="Ex. Appeler le garage" maxlength="200" required enterkeyhint="done"${!conv && matchMedia('(pointer: fine)').matches ? ' autofocus' : ''}>`)}</label>
       ${pickFields(def.projectId, def.subprojectId)}
-      <div class="field"><span>Durée</span><div class="dur-pick">${durs.map((x) => `<label><input type="radio" name="dur" value="${x}"${x === pick ? ' checked' : ''}><span>${fmtDur(x * 60e3)}</span></label>`).join('')}</div></div>
-      <button class="btn primary wide">${ICON.plus} Créer et planifier à ${minLabel(min)}</button>
+      ${whenFields(day, durs, pick, conv ? { days: conv.days, weekly: conv.weekly, auto: false } : {})}
+      <button class="btn primary wide">${conv ? '🔁 Transformer en tâche' : `${ICON.plus} Créer et planifier`}</button>
     </form>
     ${tasks.length ? `<p class="hint slot-or">Ou placer une tâche existante :</p>
       <div class="card pick-list">${tasks.map(({ t }) => `<button type="button" class="pick" data-action="plan-here" data-id="${t.id}" data-day="${day}" data-min="${min}" style="--c:${colorOf(t.projectId)}">
         <span class="dot"></span><span class="pick-title">${t.starred ? '★ ' : ''}${esc(t.title)}<small>${esc(pathLabel(t.projectId, t.subprojectId))}</small></span>${ICON.plus}</button>`).join('')}</div>`
       : ''}
-    <button type="button" class="btn wide" style="margin-top:12px" data-action="new-event" data-day="${day}" data-min="${min}">${ICON.plus} Événement fixe à cette heure</button>
+    ${conv ? `<button type="button" class="btn ghost danger wide" style="margin-top:12px" data-action="delete-event" data-id="${conv.id}">${ICON.trash} Supprimer l’événement</button>` : ''}
   </div>`);
+  whenRefresh($('#sheet .when'));
 }
 
-function openEventSheet(id, preset = {}) {
-  const found = state.events.find((x) => x.id === id);
-  const iso = preset.day ? String(((parseYmd(preset.day).getDay() + 6) % 7) + 1) : '';
-  const ev = found || { title: '', color: EVENT_COLORS[0], days: iso || '12345', date: '', start: preset.min ?? 480, end: Math.min(DAY_MIN - 5, (preset.min ?? 480) + (preset.min != null ? 120 : 540)) };
-  const once = !!ev.date;
-  openSheet(`<form class="sheet-body" data-form="event" data-id="${found ? id : ''}" autocomplete="off">
-    ${head(found ? 'Événement fixe' : 'Nouvel événement fixe')}
-    <p class="hint" style="margin-top:0">Un créneau qui n’est pas une tâche (travail, cours, sport…). Il s’affiche en fond du planning pour caler tes tâches autour.</p>
-    <label class="field"><span>Nom</span>${emojiField(`<input class="big" name="title" value="${esc(ev.title)}" placeholder="Ex. Travail" maxlength="60" required${found ? '' : ' autofocus'}>`)}</label>
-    <div class="seg2">
-      <label><input type="radio" name="repeat" value="weekly"${once ? '' : ' checked'}><span>Chaque semaine</span></label>
-      <label><input type="radio" name="repeat" value="once"${once ? ' checked' : ''}><span>Une seule fois</span></label>
-    </div>
-    <div class="field when-weekly"><span>Jours</span><div class="daypick">${'LMMJVSD'.split('').map((l, i) => `<label><input type="checkbox" name="day" value="${i + 1}"${String(ev.days || '').includes(String(i + 1)) ? ' checked' : ''}><span>${l}</span></label>`).join('')}</div></div>
-    <label class="field when-once"><span>Date</span><input type="date" name="date" value="${esc(ev.date || preset.day || ymd(new Date()))}"></label>
-    <div class="row2">
-      <label class="field"><span>Début</span><input type="time" name="start" value="${hhmm(ev.start)}" step="300" required></label>
-      <label class="field"><span>Fin</span><input type="time" name="end" value="${hhmm(ev.end)}" step="300" required></label>
-    </div>
-    <div class="field"><span>Couleur</span><div class="swatches">${EVENT_COLORS.map((c) => `<label class="swatch" style="--c:${c}"><input type="radio" name="color" value="${c}"${c === (ev.color || EVENT_COLORS[0]) ? ' checked' : ''}><i></i></label>`).join('')}</div></div>
-    <div class="sheet-actions">
-      ${found ? `<button type="button" class="btn ghost danger" data-action="delete-event" data-id="${id}">${ICON.trash} Supprimer</button>` : ''}
-      <button class="btn primary grow">${found ? 'Enregistrer' : 'Ajouter au planning'}</button>
-    </div>
-  </form>`);
-}
-
-function saveEvent(form) {
-  const fd = new FormData(form);
-  const title = String(fd.get('title') || '').trim();
-  if (!title) return;
-  const start = toMin(fd.get('start'));
-  let end = toMin(fd.get('end'));
-  if (end === 0) end = DAY_MIN;
-  if (end <= start) { toast('L’heure de fin doit être après le début'); return; }
-  const once = fd.get('repeat') === 'once';
-  const days = fd.getAll('day').join('');
-  if (!once && !days) { toast('Choisis au moins un jour'); return; }
-  let ev = state.events.find((x) => x.id === form.dataset.id);
-  if (!ev) { ev = { id: uid() }; state.events.push(ev); }
-  Object.assign(ev, { title, color: String(fd.get('color') || EVENT_COLORS[0]), start, end, days: once ? '' : days, date: once ? String(fd.get('date') || ymd(new Date())) : '' });
-  save(); closeSheet(); render();
-  toast(once ? 'Événement ajouté' : 'Événement ajouté chaque semaine');
+// Les événements fixes deviennent des tâches : on reprend leur nom, leurs jours et leur horaire.
+function openEventSheet(id) {
+  const ev = state.events.find((x) => x.id === id);
+  if (!ev) return;
+  const today = ymd(new Date());
+  const day = ev.date || (ev.end > nowMin() ? today : addDays(today, 1));
+  const dur = Math.max(SNAP, Math.min(ev.end, DAY_MIN) - ev.start);
+  openSlotSheet(day, ev.start, DAY_MIN - ev.start, dur, { id: ev.id, title: ev.title, days: ev.date ? isoDay(day) : String(ev.days || isoDay(day)), weekly: !ev.date });
 }
 
 sheet.addEventListener('change', (e) => {
@@ -2800,7 +2937,8 @@ function todayModel() {
   const d1 = dateAt(day, DAY_MIN);
   const items = dayAgenda(day);
   const blocks = items.filter((i) => i.kind === 'plan');
-  const plannedIds = new Set(blocks.map((i) => i.t.id));
+  const spans = spansOn(day).filter((p) => !planDone(p)).map((p) => ({ p, t: getTask(p.taskId) }));
+  const plannedIds = new Set([...blocks, ...spans].map((i) => i.t.id));
   const due = state.tasks
     .filter((t) => !t.done && t.deadline && t.deadline <= day && !plannedIds.has(t.id))
     .sort((a, b) => !!b.starred - !!a.starred || cmpDeadline(a, b) || a.createdAt - b.createdAt);
@@ -2810,11 +2948,12 @@ function todayModel() {
   const extraDone = state.tasks.filter((t) => t.done && t.doneAt >= d0 && t.doneAt < d1 && !plannedIds.has(t.id));
   const total = blocks.length + due.length + extraDone.length;
   const doneN = blocks.filter((i) => planDone(i.p)).length + extraDone.length;
-  return { day, d0, d1, items, blocks, due, prio, extraDone, total, doneN };
+  return { day, d0, d1, items, blocks, spans, due, prio, extraDone, total, doneN };
 }
 
 // Bloc de tâche à valider (agenda, « à faire aujourd'hui », « terminé »).
-function todayCard({ t, p, dur, done, totals }) {
+// note : texte à la place de la durée (tâche sur plusieurs jours : « Jour 2 sur 3 »).
+function todayCard({ t, p, dur, done, totals, note = '' }) {
   const running = !!timerOf(t.id);
   const kind = p ? 'plan' : 'task';
   const id = p ? p.id : t.id;
@@ -2828,13 +2967,13 @@ function todayCard({ t, p, dur, done, totals }) {
         <div class="day-title">${t.starred ? `<span class="day-star">${ICON.star}</span>` : ''}${esc(t.title)}</div>
         <div class="day-meta">
           ${t.projectId ? `<span class="tag"><i></i>${esc(pathLabel(t.projectId, t.subprojectId))}</span>` : ''}
-          ${p ? `<span>${fmtDur(dur * 60e3)}</span>` : ''}
+          ${p ? `<span>${note ? esc(note) : `${p.series ? '↻ ' : ''}${fmtDur(dur * 60e3)}`}</span>` : ''}
           ${late && late.cls === 'late' ? `<span class="due late">${esc(late.text)}</span>` : ''}
           ${spent || running ? `<span class="spent">${ICON.clock}${liveDur(spent, sinceOf(t.id))}</span>` : ''}
         </div>
       </div>
       ${done ? '' : `${p ? '' : `<button type="button" class="mini-btn" data-action="today-fit" data-id="${t.id}" title="Caler dans le prochain créneau libre" aria-label="Caler dans le prochain créneau libre">${ICON.cal}</button>`}
-      <button type="button" class="mini-btn later-btn" data-action="today-later" data-kind="${kind}" data-id="${id}" title="Reporter à demain" aria-label="Reporter à demain">↷</button>
+      ${note ? '' : `<button type="button" class="mini-btn later-btn" data-action="today-later" data-kind="${kind}" data-id="${id}" title="Reporter à demain" aria-label="Reporter à demain">↷</button>`}
       <button type="button" class="play" data-action="toggle-timer" data-id="${t.id}" aria-label="${running ? 'Arrêter' : 'Lancer le chrono'}">${running ? ICON.stop : ICON.play}</button>`}
     </div>
   </div>`;
@@ -2931,6 +3070,16 @@ function viewToday() {
     ${rows.length ? `<ol class="agenda">${agenda}</ol>`
       : `<div class="card empty-day"><b>Plus de créneau aujourd’hui</b><span>La suite se prépare dans le planning.</span></div>`}`;
 
+  const spanNote = (p) => {
+    const first = ymd(new Date(p.start));
+    const last = ymd(new Date(p.end - 1));
+    const n = Math.round((parseYmd(last) - parseYmd(first)) / 864e5) + 1;
+    const k = Math.round((parseYmd(m.day) - parseYmd(first)) / 864e5) + 1;
+    return n > 1 ? `Jour ${k} sur ${n} · jusqu’au ${fmt(parseYmd(last), { weekday: 'short', day: 'numeric' })}` : 'Toute la journée';
+  };
+  const spansHtml = m.spans.length ? `<div class="section-title"><span>Sur plusieurs jours</span></div>
+    <div class="list">${m.spans.map(({ p, t }) => todayCard({ t, p, totals, note: spanNote(p) })).join('')}</div>` : '';
+
   const dueHtml = m.due.length ? `<div class="section-title"><span>À faire aujourd’hui · ${m.due.length}</span>${m.due.length > 1 && nextFreeSlot(m.day) ? `<button type="button" data-action="today-fit-all">✨ Tout caler</button>` : ''}</div>
     <div class="list">${m.due.map((t) => todayCard({ t, totals })).join('')}</div>` : '';
 
@@ -2953,7 +3102,7 @@ function viewToday() {
 
   const tm = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
   const tk = ymd(tm);
-  const tPlans = plansOn(tk).length;
+  const tPlans = plansOn(tk).length + spansOn(tk).length;
   const tDue = state.tasks.filter((t) => !t.done && t.deadline === tk).length;
   const tEv = eventsOn(tm).length;
   const tomorrow = `<button type="button" class="card tomorrow" data-action="go-day" data-value="${tk}">
@@ -2966,7 +3115,7 @@ function viewToday() {
     ? `<div class="swipe-hint"><span>👆 Balaie une tâche <b>vers la droite</b> pour la valider, <b>vers la gauche</b> pour la reporter à demain.</span><button type="button" class="icon-btn" data-action="hide-swipe-hint" aria-label="Masquer l’astuce">${ICON.close}</button></div>`
     : '';
 
-  return `${installHint()}${hero}${nowCard}${hint}${agendaHtml}${dueHtml}${prioHtml}${doneHtml}${tomorrow}`;
+  return `${installHint()}${hero}${nowCard}${hint}${spansHtml}${agendaHtml}${dueHtml}${prioHtml}${doneHtml}${tomorrow}`;
 }
 
 /* ----- Valider, reporter, caler ----- */
@@ -3043,7 +3192,7 @@ function postponeToday(kind, id) {
     const shift = (v) => { const d = new Date(v); d.setDate(d.getDate() + 1); return +d; };
     Object.assign(p, { start: shift(p.start), end: shift(p.end) });
     save(); render();
-    toast(`Reporté à demain ${minLabel(minOfDay(p.start, ymd(new Date(p.start))))}`, { label: 'Annuler', fn: () => { Object.assign(p, old); save(); render(); } });
+    toast(p.allDay ? 'Décalé d’un jour' : `Reporté à demain ${minLabel(minOfDay(p.start, ymd(new Date(p.start))))}`, { label: 'Annuler', fn: () => { Object.assign(p, old); save(); render(); } });
   } else {
     const t = getTask(id);
     if (!t) return;
@@ -3145,12 +3294,15 @@ const dayWord = (day) => {
 // Bloc « Planifier dans l'agenda » de la fiche d'une tâche (taskId : tâche existante).
 function ppSection(taskId) {
   const upcoming = taskId ? state.plans.filter((p) => p.taskId === taskId && !p.done && p.end > now()).sort((a, b) => a.start - b.start) : [];
+  const seen = new Set(); // une série n'affiche que son prochain créneau
   return `<section class="pp" data-on="0">
     <div class="pp-head"><span>${ICON.cal} ${taskId ? 'Créneaux dans l’agenda' : 'Planifier dans l’agenda'}</span>
       <button type="button" class="pp-off" data-action="pp-off" aria-label="Ne pas planifier">${ICON.close}</button></div>
-    ${upcoming.length ? `<div class="pp-list">${upcoming.map((p) => {
+    ${upcoming.length ? `<div class="pp-list">${upcoming.filter((p) => !p.series || (!seen.has(p.series) && seen.add(p.series))).map((p) => {
       const d = new Date(p.start);
-      return `<span class="pp-plan"><button type="button" data-action="open-plan" data-id="${p.id}">${dayWord(ymd(d))} · ${minLabel(d.getHours() * 60 + d.getMinutes())}–${hm(new Date(p.end)).replace(':', 'h')}</button>
+      const left = p.series ? upcoming.filter((x) => x.series === p.series).length : 0;
+      const label = p.allDay ? planLabel(p) : `${dayWord(ymd(d))} · ${minLabel(d.getHours() * 60 + d.getMinutes())}–${hm(new Date(p.end)).replace(':', 'h')}`;
+      return `<span class="pp-plan"><button type="button" data-action="open-plan" data-id="${p.id}">${label}${left > 1 ? ` · ↻ ${left}` : ''}</button>
         <button type="button" class="pp-x" data-action="pp-remove" data-id="${p.id}" data-task="${taskId}" aria-label="Retirer ce créneau">${ICON.close}</button></span>`;
     }).join('')}</div>` : ''}
     <div class="pp-sugg">${slotSuggestions().map((s) => `<button type="button" class="pp-chip" data-action="pp-pick" data-day="${s.day}" data-min="${s.min}">
@@ -3159,21 +3311,24 @@ function ppSection(taskId) {
     <div class="pp-detail">
       <div class="row2">
         <label class="field"><span>Jour</span><input type="date" name="plan_date"></label>
-        <label class="field"><span>Début</span><input type="time" name="plan_time" step="300"></label>
+        <label class="field pp-time"><span>Début</span><input type="time" name="plan_time" step="300"></label>
       </div>
-      <div class="dur-pick">${[30, 60, 90, 120].map((x) => `<label><input type="radio" name="dur" value="${x}"${x === PLAN_DUR ? ' checked' : ''}><span>${fmtDur(x * 60e3)}</span></label>`).join('')}</div>
+      ${whenFields(ymd(new Date()), [30, 60, 90, 120], PLAN_DUR)}
       <div class="pp-bar"></div>
       ${taskId ? `<button type="button" class="btn primary wide pp-add" data-action="pp-add" data-id="${taskId}">${ICON.plus} Ajouter ce créneau</button>` : ''}
     </div>
   </section>`;
 }
 
-const ppValues = (pp) => ({
-  day: pp.querySelector('[name="plan_date"]').value,
-  min: toMin(pp.querySelector('[name="plan_time"]').value),
-  hasTime: !!pp.querySelector('[name="plan_time"]').value,
-  dur: Number(pp.querySelector('[name="dur"]:checked')?.value) || PLAN_DUR,
-});
+function ppValues(pp) {
+  const day = pp.querySelector('[name="plan_date"]').value;
+  const when = whenValues(pp.querySelector('.when'), day || ymd(new Date()));
+  return {
+    day, when, dur: when.dur,
+    min: toMin(pp.querySelector('[name="plan_time"]').value),
+    hasTime: !!pp.querySelector('[name="plan_time"]').value,
+  };
+}
 
 // Frise du jour choisi (6h → 24h) : occupé en couleur, créneau choisi entouré, alerte s'il chevauche.
 function ppBar(pp) {
@@ -3197,7 +3352,9 @@ function ppBar(pp) {
 // Met à jour la frise, la suggestion surlignée et le libellé du bouton « Créer ».
 function ppRefresh(pp) {
   const v = ppValues(pp);
-  pp.querySelector('.pp-bar').innerHTML = ppBar(pp);
+  whenRefresh(pp.querySelector('.when'), v.day || ymd(new Date()));
+  pp.classList.toggle('multi', v.when.multi); // plusieurs jours : pas d'heure ni de frise
+  pp.querySelector('.pp-bar').innerHTML = v.when.multi ? '' : ppBar(pp);
   let matched = false;
   for (const c of pp.querySelectorAll('.pp-chip[data-day]')) {
     const on = pp.dataset.on === '1' && c.dataset.day === v.day && Number(c.dataset.min) === v.min && v.hasTime;
@@ -3266,13 +3423,38 @@ const actions = {
   },
   'open-plan'(el, e) { if (!placeHere(el, e)) openPlanSheet(el.dataset.id); },
   'open-event'(el, e) { if (!placeHere(el, e)) openEventSheet(el.dataset.id); },
-  'plan-here'(el) {
-    const dur = Number($('#sheet input[name="dur"]:checked')?.value) || PLAN_DUR;
+  'plan-here'(el) { // même durée / répétition que celles réglées pour une nouvelle tâche
+    const box = $('#sheet .when');
+    const w = whenValues(box, el.dataset.day);
+    if (whenInvalid(box, w)) return;
     closeSheet();
-    createPlan(el.dataset.id, el.dataset.day, Number(el.dataset.min), dur);
+    planWith(el.dataset.id, el.dataset.day, Number(el.dataset.min), w);
   },
-  'new-event'(el) {
-    openEventSheet(null, el.dataset.day ? { day: el.dataset.day, min: Number(el.dataset.min) } : {});
+  'rep-step'(el) {
+    const input = el.closest('.when').querySelector('[name="rep_weeks"]');
+    input.value = Math.max(1, Math.min(52, (Number(input.value) || 1) + Number(el.dataset.value)));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  },
+  'series-apply'(el) { // l'horaire de ce créneau pour toute la suite de la série
+    const p = state.plans.find((x) => x.id === el.dataset.id);
+    if (!p) return;
+    const day = ymd(new Date(p.start));
+    const s = minOfDay(p.start, day);
+    const e = minOfDay(p.end, day) || DAY_MIN;
+    const after = state.plans.filter((x) => x.series && x.series === p.series && x.start > p.start);
+    const old = after.map((x) => ({ x, start: x.start, end: x.end }));
+    for (const x of after) { const d = ymd(new Date(x.start)); Object.assign(x, { start: dateAt(d, s), end: dateAt(d, e) }); }
+    save(); closeSheet(); render();
+    toast(`${minLabel(s)} → ${minLabel(e)} pour les ${after.length} suivants`, { label: 'Annuler', fn: () => { old.forEach((o) => Object.assign(o.x, { start: o.start, end: o.end })); save(); render(); } });
+  },
+  'delete-series'(el) {
+    const p = state.plans.find((x) => x.id === el.dataset.id);
+    if (!p) return;
+    const gone = state.plans.filter((x) => x.series && x.series === p.series && x.start >= p.start);
+    const ids = new Set(gone.map((x) => x.id));
+    state.plans = state.plans.filter((x) => !ids.has(x.id));
+    save(); closeSheet(); render();
+    toast(`${gone.length} créneaux retirés`, { label: 'Annuler', fn: () => { state.plans.push(...gone); save(); render(); } });
   },
   'delete-plan'(el) {
     const old = state.plans.find((x) => x.id === el.dataset.id);
@@ -3306,14 +3488,7 @@ const actions = {
     const f = taskFormOpen();
     if (f?.dataset.id) commitTaskForm(f);
     if (timerOf(id)) afterTimer(stopTimer(id), inSheet ? id : null);
-    else switchTimer(id, inSheet ? id : null);
-  },
-  // Fiche d'une tâche : lancer son chrono sans arrêter ceux en cours.
-  'start-parallel'(el) {
-    const f = taskFormOpen();
-    if (f?.dataset.id) commitTaskForm(f);
-    startTimer(el.dataset.id, true);
-    openTaskSheet(el.dataset.id);
+    else { startTimer(id); if (inSheet) openTaskSheet(id); }
   },
   stop(el) { afterTimer(stopTimer(el.dataset.id), null); },
   'toggle-star'(el) {
@@ -3424,10 +3599,11 @@ const actions = {
   'pp-add'(el) {
     const pp = el.closest('.pp');
     const v = ppValues(pp);
-    if (!v.day || !v.hasTime) return;
+    if (!v.day || !(v.hasTime || v.when.multi) || whenInvalid(pp.querySelector('.when'), v.when)) return;
     const f = taskFormOpen();
     if (f?.dataset.id) commitTaskForm(f);
-    createPlan(el.dataset.id, v.day, v.min, v.dur);
+    addPlans(el.dataset.id, v.day, v.min, v.when);
+    save(); render(); buzz();
     openTaskSheet(el.dataset.id); // la fiche affiche le nouveau créneau
   },
   'pp-remove'(el) {

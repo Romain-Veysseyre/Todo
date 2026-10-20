@@ -433,7 +433,7 @@ body[data-tab="plan"] { padding-bottom: calc(var(--tabbar-h) + env(safe-area-ins
 .plan-range small { display: block; font-size: 12px; font-weight: 650; color: var(--accent); }
 
 .cal { margin: 0 -10px; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
-.cal-head { position: sticky; top: var(--top-h, 60px); z-index: 6; display: flex; background: var(--bg); padding: 4px 0 6px; }
+.cal-head { position: sticky; top: var(--top-h, 60px); z-index: 6; display: flex; flex-wrap: wrap; background: var(--bg); padding: 4px 0 6px; }
 .cal-gutter, .cal-hours { width: 32px; flex: none; }
 .cal-days, .cal-cols { flex: 1; min-width: 0; display: grid; grid-template-columns: repeat(var(--n), minmax(0, 1fr)); gap: 3px; }
 .cal-day { display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 3px 0 2px; border-radius: 12px; color: var(--muted); font-size: 11.5px; font-weight: 600; text-transform: capitalize; }
@@ -448,12 +448,12 @@ body[data-tab="plan"] { padding-bottom: calc(var(--tabbar-h) + env(safe-area-ins
 .cal.is-day { --hour: 60px; }
 /* gestes : la grille gère le pincement et le balayage horizontal (le défilement vertical reste normal) */
 .cal { touch-action: pan-y; }
-.cal-cols, .cal-days { transition: transform .2s ease; }
-.cal.swiping .cal-cols, .cal.swiping .cal-days { transition: none; }
+.cal-cols, .cal-days, .spans-grid { transition: transform .2s ease; }
+.cal.swiping .cal-cols, .cal.swiping .cal-days, .cal.swiping .spans-grid { transition: none; }
 @keyframes from-left { from { transform: translateX(-42px); } }
 @keyframes from-right { from { transform: translateX(42px); } }
-.cal.slide-from-left .cal-cols, .cal.slide-from-left .cal-days { animation: from-left .22s ease-out; }
-.cal.slide-from-right .cal-cols, .cal.slide-from-right .cal-days { animation: from-right .22s ease-out; }
+.cal.slide-from-left .cal-cols, .cal.slide-from-left .cal-days, .cal.slide-from-left .spans-grid { animation: from-left .22s ease-out; }
+.cal.slide-from-right .cal-cols, .cal.slide-from-right .cal-days, .cal.slide-from-right .spans-grid { animation: from-right .22s ease-out; }
 .cal-hours { position: relative; height: calc(18 * var(--hour)); } /* de 6h à 24h */
 .cal-hours span { position: absolute; right: 5px; transform: translateY(-50%); font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .cal-col {
@@ -670,8 +670,6 @@ body.drag-move.drop-hover .drop-remove { background: var(--late); color: #fff; }
 .daypick { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
 .daypick span { display: grid; place-items: center; height: 42px; border-radius: 12px; border: 1.5px solid var(--line); background: var(--card-2); font-weight: 750; cursor: pointer; }
 .daypick input:checked + span { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
-form[data-form="event"]:has(input[value="once"]:checked) .when-weekly,
-form[data-form="event"]:has(input[value="weekly"]:checked) .when-once { display: none; }
 
 /* Catégories sur une ligne : ★ Favoris · Tout · [Projets ▾] */
 .side-cats { flex-wrap: nowrap; }
@@ -995,8 +993,41 @@ body.ranging, body.ranging * { cursor: ns-resize !important; }
 .plan-preview.range { border-style: solid; border-width: 2px; background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); white-space: normal; line-height: 1.2; }
 .dur-pick { grid-template-columns: repeat(auto-fit, minmax(62px, 1fr)); }
 
-/* Fiche d'une tâche : un autre chrono tourne déjà */
-.par-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 2px 0 12px; padding: 8px 8px 8px 12px; border-radius: 12px; background: color-mix(in srgb, var(--run) 10%, transparent); }
-.par-row > span { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; min-width: 0; font-size: 13.5px; font-weight: 650; }
-.par-row small { flex-basis: 100%; padding-left: 16px; font-size: 12px; font-weight: 500; color: var(--muted); }
-.par-row .btn { flex: none; }
+/* Tâches sur plusieurs jours : barres au-dessus des heures */
+.cal-spans { flex-basis: 100%; display: flex; margin-top: 5px; }
+.spans-grid { flex: 1; min-width: 0; display: grid; grid-template-columns: repeat(var(--n), minmax(0, 1fr)); grid-auto-rows: 22px; gap: 3px; }
+.span-bar {
+  min-width: 0; padding: 0 7px; border-radius: 7px; background: var(--c); color: #fff; text-align: left;
+  font-size: 11.5px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  box-shadow: 0 1px 3px rgba(15, 15, 30, .2);
+}
+.span-bar.cut-l { border-top-left-radius: 0; border-bottom-left-radius: 0; }
+.span-bar.cut-r { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.span-bar.done { opacity: .45; text-decoration: line-through; }
+.ev-note { margin: 0 0 8px; padding: 8px 12px; border-radius: 12px; background: var(--accent-soft); color: var(--accent); font-size: 13.5px; font-weight: 650; }
+
+/* Durée, « Plusieurs jours » et répétition (fiche d'un créneau, bloc « Planifier ») */
+.dur-pick label.multi { grid-column: 1 / -1; }
+.when:not(:has([name="dur"][value="days"]:checked)) .when-days { display: none; }
+.when:has([name="dur"][value="days"]:checked) .rep { display: none; }
+.when:not(:has([name="rep"][value="weekly"]:checked)) .rep-detail { display: none; }
+.when .rep .seg2 { margin: 0; }
+.rep-detail { margin-top: 8px; }
+.rep-weeks { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 14.5px; font-weight: 650; }
+.when .rep-weeks input { width: 62px; min-height: 40px; padding: 0; text-align: center; font-size: 16px; font-weight: 750; background: var(--card); -moz-appearance: textfield; }
+.when .rep-weeks input::-webkit-inner-spin-button, .when .rep-weeks input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.rep-weeks .step { width: 40px; height: 40px; border-radius: 11px; border: 1.5px solid var(--line); background: var(--card); font-size: 20px; font-weight: 700; line-height: 1; }
+.rep-weeks .step:active { background: var(--accent-soft); }
+.when .daypick span { background: var(--card); }
+.when .daypick input:checked + span { background: var(--accent); }
+.when-sum { margin: 2px 0 12px; font-size: 13.5px; font-weight: 650; color: var(--accent); }
+.when-sum:empty { display: none; }
+.when-sum.warn { color: var(--warn); }
+.when-sum.shake { animation: shake .35s; }
+@keyframes shake { 25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
+.pp.multi .pp-time, .pp.multi .pp-bar { display: none; }
+.pp.multi .row2 { grid-template-columns: 1fr; }
+
+/* Créneau d'une série (fiche) */
+.series-box { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin: 4px 0 12px; padding: 10px 12px; border-radius: 12px; background: var(--accent-soft); color: var(--accent); font-size: 14px; font-weight: 650; }
+form[data-form="plan"] > .btn.wide + .btn.wide { margin-top: 6px; }
