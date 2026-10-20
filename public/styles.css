@@ -783,6 +783,9 @@ body.is-sorting, body.is-sorting * { cursor: grabbing !important; user-select: n
 .now-progress i { display: block; height: 100%; border-radius: 4px; background: var(--c); }
 .now-actions { display: flex; gap: 8px; margin-top: 12px; }
 .now-actions .btn span { font-variant-numeric: tabular-nums; }
+.now-actions .btn { min-width: 0; padding: 0 14px; }
+.now-actions .btn:first-child { flex: 1 1 auto; overflow: hidden; }
+.now-actions .btn:last-child { flex: 0 0 auto; }
 
 /* Programme (agenda vertical) */
 .agenda { position: relative; list-style: none; margin: 0; padding: 0; }
@@ -880,3 +883,21 @@ body.is-sorting, body.is-sorting * { cursor: grabbing !important; user-select: n
 .confetti { position: fixed; left: 50%; bottom: 32%; z-index: 90; pointer-events: none; }
 .confetti span { position: absolute; font-size: 24px; animation: burst 1.3s cubic-bezier(.15, .7, .3, 1) forwards; }
 @keyframes burst { to { transform: translate(var(--x), var(--y)) rotate(var(--r)); opacity: 0; } }
+
+/* Fiche d'un créneau vide : nouvelle tâche à cette heure */
+.slot-new { margin: 4px 0 6px; padding: 4px 14px 14px; border-radius: var(--radius); background: var(--card-2); border: 1px solid var(--line); }
+.slot-new .field input, .slot-new .field select { background: var(--card); }
+.slot-or { margin-top: 16px; }
+.dur-pick { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.dur-pick input { position: absolute; opacity: 0; pointer-events: none; }
+.dur-pick span { display: grid; place-items: center; height: 40px; border-radius: 11px; border: 1.5px solid var(--line); background: var(--card); font-weight: 700; font-size: 14px; cursor: pointer; }
+.dur-pick input:checked + span { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.gap-card { cursor: pointer; }
+.gap-card:hover { border-color: var(--accent); color: var(--accent); }
+.gap-card .btn { pointer-events: none; }
+
+/* les boutons pleine largeur peuvent passer sur deux lignes plutôt que de déborder */
+.btn.wide { white-space: normal; text-align: center; line-height: 1.25; padding-top: 8px; padding-bottom: 8px; }
+/* boutons radio / cases masqués : rester à l'intérieur de leur étiquette (pas de débordement horizontal) */
+.dur-pick label, .seg2 label, .daypick label, .swatch { position: relative; }
+.dur-pick input, .seg2 input, .daypick input, .swatch input { left: 0; top: 0; width: 1px; height: 1px; margin: 0; }

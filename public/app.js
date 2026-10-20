@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.0.0';
+const VERSION = '2.1.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -1017,6 +1017,11 @@ function createTask(form, start) {
   if (state.ui.filter !== 'all' && state.ui.filter !== (t.projectId || 'none')) Object.assign(state.ui, { filter: 'all', subfilter: 'all' });
   closeSheet();
   persistStorage();
+  const slotDay = form.dataset.slotDay;
+  if (slotDay) { // créée depuis un créneau vide de l'agenda : planifiée à cette heure
+    createPlan(t.id, slotDay, Number(form.dataset.slotMin), Number(new FormData(form).get('dur')) || PLAN_DUR);
+    return;
+  }
   if (start) { afterTimer(startTimer(t.id), null); toast('C’est parti, chrono lancé'); }
   else { save(); render(); toast('Tâche ajoutée'); }
 }
@@ -2353,16 +2358,30 @@ function commitPlanForm(form) {
   save(); render();
 }
 
-function openSlotSheet(day, min) {
+// Fiche d'un créneau vide : créer une tâche à cette heure, ou y placer une tâche existante.
+// maxDur : place disponible (créneau libre de « Aujourd'hui »), pour proposer la bonne durée.
+function openSlotSheet(day, min, maxDur = DAY_MIN - min) {
   const d = parseYmd(day);
   const tasks = trayTasks(0, 0);
+  const def = newTaskDefaults();
+  const durs = [30, 60, 90, 120].filter((x) => x <= Math.max(30, maxDur));
+  const pick = durs.includes(PLAN_DUR) ? PLAN_DUR : durs[durs.length - 1];
   openSheet(`<div class="sheet-body">
     ${head(`${cap(fmt(d, { weekday: 'long', day: 'numeric', month: 'short' }))} · ${minLabel(min)}`)}
-    ${tasks.length ? `<p class="hint">Quelle tâche faire à ce moment-là ?</p>
+    <form class="slot-new" data-form="task" data-slot-day="${day}" data-slot-min="${min}" data-pp="${def.projectId || ''}" autocomplete="off">
+      <label class="field"><span>Nouvelle tâche à ${minLabel(min)}</span>${emojiField(`<input class="big" name="title" placeholder="Ex. Appeler le garage" maxlength="200" required enterkeyhint="done"${matchMedia('(pointer: fine)').matches ? ' autofocus' : ''}>`)}</label>
+      <div class="row2">
+        <label class="field"><span>Projet</span><select name="projectId">${projectOptions(def.projectId)}</select></label>
+        <label class="field"><span>Sous-projet</span><select name="subprojectId"${def.projectId ? '' : ' disabled'}>${subOptions(def.projectId, def.subprojectId)}</select></label>
+      </div>
+      <div class="field"><span>Durée</span><div class="dur-pick">${durs.map((x) => `<label><input type="radio" name="dur" value="${x}"${x === pick ? ' checked' : ''}><span>${fmtDur(x * 60e3)}</span></label>`).join('')}</div></div>
+      <button class="btn primary wide">${ICON.plus} Créer et planifier à ${minLabel(min)}</button>
+    </form>
+    ${tasks.length ? `<p class="hint slot-or">Ou placer une tâche existante :</p>
       <div class="card pick-list">${tasks.map(({ t }) => `<button type="button" class="pick" data-action="plan-here" data-id="${t.id}" data-day="${day}" data-min="${min}" style="--c:${colorOf(t.projectId)}">
         <span class="dot"></span><span class="pick-title">${t.starred ? '★ ' : ''}${esc(t.title)}<small>${esc(pathLabel(t.projectId, t.subprojectId))}</small></span>${ICON.plus}</button>`).join('')}</div>`
-      : '<p class="hint">Aucune tâche à faire pour l’instant.</p>'}
-    <button type="button" class="btn wide" style="margin-top:12px" data-action="new-event" data-day="${day}" data-min="${min}">${ICON.plus} Événement fixe à cette heure (travail, cours…)</button>
+      : ''}
+    <button type="button" class="btn wide" style="margin-top:12px" data-action="new-event" data-day="${day}" data-min="${min}">${ICON.plus} Événement fixe à cette heure</button>
   </div>`);
 }
 
@@ -2737,7 +2756,7 @@ function viewToday() {
       <div class="now-meta">${esc(pathLabel(t.projectId, t.subprojectId))}${isNow ? ` · reste ${fmtDur((focus.e - nm) * 60e3)}` : busyEvent ? ` · après « ${esc(busyEvent.ev.title)} »` : ''}</div>
       ${isNow ? `<div class="now-progress"><i style="width:${Math.round(((nm - focus.s) / (focus.e - focus.s)) * 100)}%"></i></div>` : ''}
       <div class="now-actions">
-        <button type="button" class="btn ${running ? 'stop' : 'primary'} grow" data-action="toggle-timer" data-id="${t.id}">${running ? `${ICON.stop} <span data-tick="clock" data-base="0">${fmtClock(activeElapsed())}</span>` : `${ICON.play} ${isNow ? 'Lancer le chrono' : 'Commencer maintenant'}`}</button>
+        <button type="button" class="btn ${running ? 'stop' : 'primary'} grow" data-action="toggle-timer" data-id="${t.id}">${running ? `${ICON.stop} <span data-tick="clock" data-base="0">${fmtClock(activeElapsed())}</span>` : `${ICON.play} ${isNow ? 'Lancer le chrono' : 'Commencer'}`}</button>
         <button type="button" class="btn grow" data-action="today-done" data-kind="plan" data-id="${focus.p.id}">${ICON.check} Fait</button>
       </div>
     </section>`;
@@ -2754,9 +2773,9 @@ function viewToday() {
     const isCur = i.kind !== 'gap' && i.s <= nm && nm < i.e;
     if (!placed && (isCur || i.s > nm)) { placed = true; if (!isCur) html += nowRule; }
     if (i.kind === 'gap') {
-      return `${html}<li class="ag ag-gap"><time>${minLabel(i.s)}</time><div class="gap-card">
+      return `${html}<li class="ag ag-gap"><time>${minLabel(i.s)}</time><div class="gap-card" role="button" tabindex="0" data-action="gap-plan" data-min="${i.s}" data-max="${i.e - i.s}">
         <span><b>Libre</b> · ${fmtDur((i.e - i.s) * 60e3)}<small>${minLabel(i.s)} – ${minLabel(i.e)}</small></span>
-        <button type="button" class="btn small" data-action="gap-plan" data-min="${i.s}">${ICON.plus} Planifier</button></div></li>`;
+        <span class="btn small">${ICON.plus} Ajouter</span></div></li>`;
     }
     const past = i.e <= nm;
     if (i.kind === 'event') {
@@ -3003,7 +3022,11 @@ const actions = {
   },
   'open-plan'(el, e) { if (!placeHere(el, e)) openPlanSheet(el.dataset.id); },
   'open-event'(el, e) { if (!placeHere(el, e)) openEventSheet(el.dataset.id); },
-  'plan-here'(el) { closeSheet(); createPlan(el.dataset.id, el.dataset.day, Number(el.dataset.min)); },
+  'plan-here'(el) {
+    const dur = Number($('#sheet input[name="dur"]:checked')?.value) || PLAN_DUR;
+    closeSheet();
+    createPlan(el.dataset.id, el.dataset.day, Number(el.dataset.min), dur);
+  },
   'new-event'(el) {
     openEventSheet(null, el.dataset.day ? { day: el.dataset.day, min: Number(el.dataset.min) } : {});
   },
@@ -3113,7 +3136,7 @@ const actions = {
     save(); render(); buzz();
     toast('Ajoutée à ta journée', { label: 'Annuler', fn: () => { t.deadline = old; save(); render(); } });
   },
-  'gap-plan'(el) { openSlotSheet(ymd(new Date()), Number(el.dataset.min)); },
+  'gap-plan'(el) { openSlotSheet(ymd(new Date()), Number(el.dataset.min), Number(el.dataset.max) || undefined); },
   'go-day'(el) {
     Object.assign(state.ui, { tab: 'plan', planView: 'day', planDate: el.dataset.value });
     writeLocal(); render(); window.scrollTo(0, 0); scrollPlanToHour();
