@@ -11,6 +11,9 @@ Todo avec chronomètre par tâche, projets et sous-projets. Application web inst
 - **Stats** : jour, semaine, mois, trimestre et année scolaire (août → juillet), par projet, sous-projet et tâche.
 - **Sauvegarde** : export/import JSON, export du journal en CSV pour Excel.
 - **Synchro entre appareils** (facultative) : mêmes tâches, projets, temps et chrono en cours sur le téléphone et l’ordinateur.
+- **Deux profils (Romain / Rebecca)** : choix à l’ouverture de l’app ; chacun a ses tâches, projets, chronos et stats. Un seul code de synchro pour le foyer, chaque profil a son propre espace chiffré.
+- **Tâches prioritaires** : l’étoile ★ fait passer une tâche en tête de liste.
+- **Page projet** : tâches rangées par sous-projet, ajout direct, transformation d’un projet en sous-projet.
 
 Les données sont enregistrées sur l’appareil (localStorage). Sans synchro, rien n’est envoyé sur internet.
 

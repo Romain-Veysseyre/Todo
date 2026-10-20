@@ -6,9 +6,17 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
+// Chaque personne a ses propres tâches, projets, chronos et stats.
+// Romain garde l'emplacement d'origine des données (aucune migration nécessaire).
+const PROFILES = [
+  { id: 'romain', name: 'Romain', color: '#4f46e5' },
+  { id: 'rebecca', name: 'Rebecca', color: '#db2777' },
+];
+const getProfile = (id) => PROFILES.find((p) => p.id === id);
+const storeKey = (p) => (p === 'romain' ? STORE_KEY : `${STORE_KEY}:${p}`);
 const LONG_SESSION = 4 * 3600e3; // au-delà : on propose de corriger (chrono oublié)
 const MIN_SESSION = 3e3;         // en dessous : clic accidentel, ignoré
 const COLORS = ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ec4899', '#8b5cf6', '#ef4444', '#14b8a6', '#84cc16', '#64748b'];
@@ -33,6 +41,7 @@ const ICON = {
   clock: svg('<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>'),
   left: svg('<path d="M15 5l-7 7 7 7"/>'),
   right: svg('<path d="M9 5l7 7-7 7"/>'),
+  star: svg('<path d="M12 3.6l2.55 5.2 5.7.83-4.13 4.02.98 5.68L12 16.65l-5.1 2.68.98-5.68L3.75 9.63l5.7-.83z"/>'),
 };
 
 /* ---------- Données ---------- */
@@ -52,20 +61,26 @@ function blankState() {
       period: 'week', offset: 0, lastProjectId: '', lastSubId: '', lastBackup: 0, hideInstall: false,
       syncRev: '',       // version du serveur déjà fusionnée dans ces données
       syncDirty: false,  // modifications pas encore envoyées
+      pristine: false,   // projets de départ jamais modifiés (remplacés par ceux d'un autre appareil à la 1re synchro)
     },
   };
 }
 
-// Projets repris de la liste déroulante du fichier Excel.
-function seedState() {
+// Romain : projets repris de la liste déroulante du fichier Excel. Rebecca : quelques projets de départ.
+function seedState(p) {
   const s = blankState();
   const add = (name, subs = []) => {
-    const p = { id: uid(), name, color: COLORS[s.projects.length % COLORS.length], archived: false, createdAt: now() };
-    s.projects.push(p);
-    subs.forEach((n) => s.subprojects.push({ id: uid(), projectId: p.id, name: n }));
+    const pr = { id: uid(), name, color: COLORS[s.projects.length % COLORS.length], archived: false, createdAt: now() };
+    s.projects.push(pr);
+    subs.forEach((n) => s.subprojects.push({ id: uid(), projectId: pr.id, name: n }));
   };
-  add('Pro', ['Prépa cours', 'Correction', 'Prof principal']);
-  ['Admin', 'Agreg', 'Famille / Social', 'Couple', 'Vbarthe', 'CookOnce', 'DP', 'Opti Todo', 'Pause'].forEach((n) => add(n));
+  if (p === 'romain') {
+    add('Pro', ['Prépa cours', 'Correction', 'Prof principal']);
+    ['Admin', 'Agreg', 'Famille / Social', 'Couple', 'Vbarthe', 'CookOnce', 'DP', 'Opti Todo', 'Pause'].forEach((n) => add(n));
+  } else {
+    ['Pro', 'Perso', 'Maison', 'Famille / Social'].forEach((n) => add(n));
+  }
+  s.ui.pristine = true;
   return s;
 }
 
@@ -79,19 +94,25 @@ function normalize(data) {
   return s;
 }
 
-function load() {
+function load(p) {
   let raw = null;
   try {
-    raw = localStorage.getItem(STORE_KEY);
+    raw = localStorage.getItem(storeKey(p));
     if (raw) return normalize(JSON.parse(raw));
   } catch (e) {
     // Données illisibles : on les met de côté plutôt que de les écraser.
-    if (raw) try { localStorage.setItem(`${STORE_KEY}:backup-${now()}`, raw); } catch (_) { /* plein */ }
+    if (raw) try { localStorage.setItem(`${storeKey(p)}:backup-${now()}`, raw); } catch (_) { /* plein */ }
   }
-  return seedState();
+  return seedState(p);
 }
 
-let state = load();
+// Lecture sans créer de données (écran de choix du profil).
+function peek(p) {
+  try { const raw = localStorage.getItem(storeKey(p)); return raw ? normalize(JSON.parse(raw)) : null; } catch (e) { return null; }
+}
+
+let profile = null;       // personne choisie à l'ouverture de l'app
+let state = blankState(); // ses données (vide tant que personne n'est choisi)
 const temp = { statsOpen: new Set(), installEvt: null, showCode: false, keys: null, openProject: null, showProjectDone: false };
 
 /* ----- Suivi des modifications (pour la synchro) ----- */
@@ -145,13 +166,17 @@ function stamp() {
 
 // À appeler après chaque modification des données.
 function save() {
-  if (stamp() && syncConf.code) { state.ui.syncDirty = true; scheduleSync(); }
+  if (stamp()) {
+    state.ui.pristine = false;
+    if (syncConf.code) { state.ui.syncDirty = true; scheduleSync(); }
+  }
   writeLocal();
 }
 
 // Écrit sur l'appareil sans dater : suffit quand seul l'affichage change (onglet, filtres…).
 function writeLocal() {
-  try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { toast('Impossible d’enregistrer sur cet appareil'); }
+  if (!profile) return;
+  try { localStorage.setItem(storeKey(profile), JSON.stringify(state)); } catch (e) { toast('Impossible d’enregistrer sur cet appareil'); }
 }
 
 function persistStorage() {
@@ -301,7 +326,71 @@ function afterTimer(done, reopenTaskId) {
 
 /* ---------- Rendu ---------- */
 
+// Écran d'accueil : choix de la personne (Romain ou Rebecca).
+function renderProfiles() {
+  document.body.dataset.screen = 'profiles';
+  document.title = 'Chrono Todo';
+  const box = $('#profiles');
+  box.hidden = false;
+  box.innerHTML = `<div class="who">
+    <img class="who-logo" src="icons/icon-192.png" alt="">
+    <h1>Chrono Todo</h1>
+    <p>Qui utilise l’app ?</p>
+    <div class="who-list">${PROFILES.map((p) => {
+      const s = peek(p.id);
+      const open = s ? s.tasks.filter((t) => !t.done).length : 0;
+      const info = s?.active ? '⏱ chrono en cours' : open ? `${open} tâche${open > 1 ? 's' : ''} à faire` : 'Commencer';
+      return `<button type="button" class="who-btn" data-action="pick-profile" data-value="${p.id}" style="--c:${p.color}">
+        <span class="avatar">${esc(p.name.slice(0, 2))}</span>
+        <span class="who-name">${esc(p.name)}<small>${esc(info)}</small></span>${ICON.right}
+      </button>`;
+    }).join('')}</div>
+  </div>`;
+}
+
+function selectProfile(id) {
+  if (!getProfile(id)) return;
+  profile = id;
+  state = load(id);
+  snapshot();
+  Object.assign(temp, { openProject: null, keys: null });
+  temp.statsOpen.clear();
+  writeLocal();
+  render();
+  window.scrollTo(0, 0);
+  persistStorage();
+  syncNow();
+}
+
+// Retour à l'écran de choix : on envoie d'abord les dernières modifications du profil.
+async function leaveProfile() {
+  if (temp.leaving) return;
+  temp.leaving = true;
+  try {
+    const f = taskFormOpen();
+    if (f?.dataset.id) commitTaskForm(f);
+    closeSheet();
+    if (syncConf.code && state.ui.syncDirty) await syncNow();
+    if (syncing) await syncing.catch(() => {});
+    clearTimeout(syncTimer);
+    profile = null;
+    state = blankState();
+    snapshot();
+    temp.openProject = null;
+    render();
+  } finally {
+    temp.leaving = false;
+  }
+}
+
 function render() {
+  if (!profile) { renderProfiles(); return; }
+  document.body.dataset.screen = 'app';
+  $('#profiles').hidden = true;
+  const me = getProfile(profile);
+  const pill = $('#who');
+  pill.style.setProperty('--c', me.color);
+  pill.innerHTML = `<i></i>${esc(me.name)}`;
   const tab = state.ui.tab;
   const openP = tab === 'projects' ? getProject(temp.openProject) : null;
   if (!openP) temp.openProject = null;
@@ -382,7 +471,7 @@ function taskCard(t, totals, { tag = true } = {}) {
   const total = totals.get(t.id) || 0;
   const due = !t.done && dueInfo(t.deadline);
   const notes = (t.notes || '').split('\n').map((l) => l.replace(/^\s*[-•*]\s*/, '').trim()).filter(Boolean).join(' · ');
-  return `<article class="task${running ? ' running' : ''}${t.done ? ' done' : ''}" style="--c:${colorOf(t.projectId)}">
+  return `<article class="task${running ? ' running' : ''}${t.done ? ' done' : ''}${t.starred && !t.done ? ' starred' : ''}" style="--c:${colorOf(t.projectId)}">
     <button type="button" class="check" data-action="toggle-done" data-id="${t.id}" aria-label="${t.done ? 'Rouvrir' : 'Marquer comme faite'}">${ICON.check}</button>
     <div class="task-main" role="button" tabindex="0" data-action="open-task" data-id="${t.id}">
       <div class="task-title">${esc(t.title)}</div>
@@ -393,6 +482,7 @@ function taskCard(t, totals, { tag = true } = {}) {
         ${total || running ? `<span class="spent">${ICON.clock}<b${running ? ` data-tick="dur" data-base="${total}"` : ''}>${fmtDur(total + (running ? activeElapsed() : 0))}</b></span>` : ''}
       </div>
     </div>
+    ${t.done ? '' : `<button type="button" class="star${t.starred ? ' on' : ''}" data-action="toggle-star" data-id="${t.id}" aria-pressed="${!!t.starred}" aria-label="${t.starred ? 'Retirer des prioritaires' : 'Mettre en prioritaire'}">${ICON.star}</button>`}
     ${t.done ? '' : `<button type="button" class="play" data-action="toggle-timer" data-id="${t.id}" aria-label="${running ? 'Arrêter' : 'Lancer le chrono'}">${running ? ICON.stop : ICON.play}</button>`}
   </article>`;
 }
@@ -423,7 +513,7 @@ function viewTasks() {
 
   const match = (t) => (filter === 'all' || key(t) === filter) && (subfilter === 'all' || subKey(t) === subfilter);
   const act = state.active?.taskId;
-  const list = open.filter(match).sort((a, b) => (b.id === act) - (a.id === act) || cmpDeadline(a, b) || b.createdAt - a.createdAt);
+  const list = open.filter(match).sort((a, b) => !!b.starred - !!a.starred || (b.id === act) - (a.id === act) || cmpDeadline(a, b) || b.createdAt - a.createdAt);
   const done = state.tasks.filter((t) => t.done && match(t)).sort((a, b) => (b.doneAt || 0) - (a.doneAt || 0));
 
   let html = installHint() + summaryCard();
@@ -497,7 +587,7 @@ function viewProject(p) {
   const totals = taskTotals();
   const act = state.active?.taskId;
   const mine = state.tasks.filter((t) => t.projectId === p.id);
-  const open = mine.filter((t) => !t.done).sort((a, b) => (b.id === act) - (a.id === act) || cmpDeadline(a, b) || b.createdAt - a.createdAt);
+  const open = mine.filter((t) => !t.done).sort((a, b) => !!b.starred - !!a.starred || (b.id === act) - (a.id === act) || cmpDeadline(a, b) || b.createdAt - a.createdAt);
   const done = mine.filter((t) => t.done).sort((a, b) => (b.doneAt || 0) - (a.doneAt || 0));
   const subs = subsOf(p.id);
   let spent = 0;
@@ -806,7 +896,7 @@ function newTaskDefaults() {
   let subprojectId = null;
   if (fromFilter && getSub(ui.subfilter)?.projectId === projectId) subprojectId = ui.subfilter;
   else if (!fromFilter && getSub(ui.lastSubId)?.projectId === projectId) subprojectId = ui.lastSubId;
-  return { title: '', projectId, subprojectId, deadline: '', notes: '' };
+  return { title: '', projectId, subprojectId, deadline: '', notes: '', starred: false };
 }
 
 // preset : { projectId, subprojectId } pour une tâche créée depuis la page d'un projet.
@@ -842,6 +932,7 @@ function openTaskSheet(id, preset) {
   openSheet(`<form class="sheet-body" data-form="task" data-id="${id || ''}" data-pp="${t.projectId || ''}" autocomplete="off">
     ${head(isNew ? 'Nouvelle tâche' : 'Tâche')}
     <label class="field"><span>Tâche</span><input class="big" name="title" value="${esc(t.title)}" placeholder="Ex. Préparer le cours S2" maxlength="200" required enterkeyhint="done"${isNew ? ' autofocus' : ''}></label>
+    <label class="toggle star-toggle"><input type="checkbox" name="starred"${t.starred ? ' checked' : ''}> ${ICON.star} Prioritaire (affichée en premier)</label>
     <div class="row2">
       <label class="field"><span>Projet</span><select name="projectId">${projectOptions(t.projectId)}</select></label>
       <label class="field"><span>Sous-projet</span><select name="subprojectId"${t.projectId ? '' : ' disabled'}>${subOptions(t.projectId, t.subprojectId)}</select></label>
@@ -862,6 +953,7 @@ function readTaskForm(form) {
     subprojectId: projectId ? clean(fd.get('subprojectId')) : null,
     deadline: fd.get('deadline') || null,
     notes: String(fd.get('notes') || '').trim(),
+    starred: fd.get('starred') === 'on',
   };
 }
 
@@ -1058,6 +1150,10 @@ function openSettings() {
   temp.showCode = false;
   openSheet(`<div class="sheet-body">
     ${head('Réglages')}
+    <section class="set-group"><h3>Profil</h3>
+      <p class="hint">Tu utilises l’app en tant que <b>${esc(getProfile(profile)?.name)}</b>. Chaque profil a ses propres tâches, projets, chronos et stats.</p>
+      <button type="button" class="btn wide" data-action="switch-profile">Changer de profil</button>
+    </section>
     <section class="set-group"><h3>Application</h3>
       ${isStandalone() ? '<p class="hint">✓ L’app est installée sur cet appareil.</p>' : installHelp()}
     </section>
@@ -1069,7 +1165,7 @@ function openSettings() {
       <button type="button" class="btn wide" data-action="export-csv">Exporter le journal pour Excel (.csv)</button>
     </section>
     <section class="set-group"><h3>Zone sensible</h3>
-      <button type="button" class="btn wide danger" data-action="reset-all">${ICON.trash} Tout effacer</button>
+      <button type="button" class="btn wide danger" data-action="reset-all">${ICON.trash} Tout effacer (profil ${esc(getProfile(profile)?.name)})</button>
     </section>
     <p class="hint center">Chrono Todo · v${VERSION}</p>
   </div>`);
@@ -1094,7 +1190,7 @@ async function shareOrDownload(filename, content, mime) {
 
 async function exportJson() {
   const data = JSON.stringify({ ...state, app: 'chrono-todo', exportedAt: new Date().toISOString() });
-  if (await shareOrDownload(`chrono-todo-${ymd(new Date())}.json`, data, 'application/json')) {
+  if (await shareOrDownload(`chrono-todo-${profile}-${ymd(new Date())}.json`, data, 'application/json')) {
     state.ui.lastBackup = now();
     writeLocal(); closeSheet(); toast('Sauvegarde créée');
   }
@@ -1132,15 +1228,16 @@ function exportCsv() {
       ((s.end - s.start) / 3600e3).toFixed(2).replace('.', ','), fmtDur(s.end - s.start),
     ]);
   }
-  shareOrDownload(`chrono-todo-journal-${ymd(new Date())}.csv`, `﻿${rows.map((r) => r.map(cell).join(';')).join('\r\n')}`, 'text/csv');
+  shareOrDownload(`chrono-todo-journal-${profile}-${ymd(new Date())}.csv`, `﻿${rows.map((r) => r.map(cell).join(';')).join('\r\n')}`, 'text/csv');
 }
 
 async function resetAll() {
   const where = syncConf.code ? 'de cet appareil et de tes autres appareils synchronisés' : 'de cet appareil';
-  const ok = await ask({ title: 'Tout effacer ?', text: `Tâches, projets et temps seront supprimés ${where}. Fais une sauvegarde avant si besoin.`, ok: 'Tout effacer', danger: true });
+  const who = getProfile(profile)?.name;
+  const ok = await ask({ title: `Tout effacer pour ${who} ?`, text: `Les tâches, projets et temps de ${who} seront supprimés ${where}. L’autre profil n’est pas touché. Fais une sauvegarde avant si besoin.`, ok: 'Tout effacer', danger: true });
   if (!ok) return;
   const { deleted } = state;
-  state = seedState();
+  state = seedState(profile);
   state.deleted = deleted;
   save(); closeSheet(); render(); toast('Données effacées');
 }
@@ -1181,12 +1278,15 @@ function readCode(input) {
   return c.length === CODE_LEN && [...c].every((ch) => CODE_CHARS.includes(ch)) ? c : null;
 }
 
-async function syncKeys(code) {
-  if (temp.keys?.code === code) return temp.keys;
+// Un seul code pour le foyer ; chaque profil a son propre espace de stockage chiffré.
+// Romain garde l'identifiant d'origine (synchro déjà en place avant les profils).
+async function syncKeys(code, prof = profile) {
+  if (temp.keys?.code === code && temp.keys.prof === prof) return temp.keys;
+  const tag = prof === 'romain' ? '' : `:${prof}`;
   const hash = (s) => crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
-  const id = [...new Uint8Array(await hash(`chronotodo:id:${code}`))].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const id = [...new Uint8Array(await hash(`chronotodo:id:${code}${tag}`))].map((b) => b.toString(16).padStart(2, '0')).join('');
   const key = await crypto.subtle.importKey('raw', await hash(`chronotodo:key:${code}`), 'AES-GCM', false, ['encrypt', 'decrypt']);
-  return (temp.keys = { code, id, key });
+  return (temp.keys = { code, prof, id, key });
 }
 
 // Chiffrement AES-GCM (après compression gzip si le navigateur sait le faire).
@@ -1325,7 +1425,8 @@ async function api(method, id, { body, base, have } = {}) {
   const url = `api/sync/${id}${have ? `?have=${encodeURIComponent(have)}` : ''}`;
   let res;
   try {
-    res = await fetch(url, { method, body, cache: 'no-store', headers: base === undefined ? {} : { 'x-base-rev': base } });
+    const signal = AbortSignal.timeout ? AbortSignal.timeout(20000) : undefined; // réseau bloqué : on n'attend pas indéfiniment
+    res = await fetch(url, { method, body, signal, cache: 'no-store', headers: base === undefined ? {} : { 'x-base-rev': base } });
   } catch (e) {
     throw new SyncError('hors ligne', true);
   }
@@ -1344,7 +1445,7 @@ function scheduleSync(delay = SYNC_DELAY) {
 
 function syncNow() {
   clearTimeout(syncTimer);
-  if (!syncConf.code) return Promise.resolve();
+  if (!syncConf.code || !profile) return Promise.resolve();
   if (syncing) { syncAgain = true; return syncing; }
   if (editing()) { scheduleSync(3000); return Promise.resolve(); }
   syncing = (async () => {
@@ -1365,8 +1466,9 @@ function syncNow() {
 // Récupère les données des autres appareils, fusionne, puis envoie le résultat si besoin.
 async function syncOnce() {
   const { code } = syncConf;
+  const prof = profile;
   if (!crypto.subtle) throw new SyncError('connexion non sécurisée (https requis)');
-  const { id, key } = await syncKeys(code);
+  const { id, key } = await syncKeys(code, prof);
   for (let attempt = 0; attempt < 4; attempt++) {
     const res = await api('GET', id, { have: state.ui.syncRev });
     let rev = state.ui.syncRev;
@@ -1378,11 +1480,18 @@ async function syncOnce() {
       rev = '';
       remote = readDoc('{}');
     }
-    if (syncConf.code !== code) return false;        // synchro désactivée entre-temps
+    if (syncConf.code !== code || profile !== prof) return false; // synchro désactivée ou profil changé entre-temps
     if (editing()) { scheduleSync(3000); return false; }
 
     const ui = state.ui;
     let push = ui.syncDirty;
+    if (res.status === 200 && ui.pristine) {
+      // Profil jamais utilisé sur cet appareil : on reprend ses données telles qu'elles sont ailleurs
+      // (sans y ajouter les projets de départ).
+      for (const c of SYNCED) state[c] = [];
+      state.active = null;
+    }
+    if (remote) ui.pristine = false;
     if (remote) {
       const adopted = !ui.syncRev && adoptNames(remote); // première fusion : pas de projets en double
       const { changed, differs } = mergeRemote(remote);
@@ -1398,13 +1507,17 @@ async function syncOnce() {
     Object.assign(ui, { syncRev: rev, syncDirty: false });
     let sent = false;
     try {
-      const put = await api('PUT', id, { body: await seal(docText(state), key), base: rev });
+      const body = await seal(docText(state), key);
+      if (profile !== prof) return false;
+      const put = await api('PUT', id, { body, base: rev });
       if (put.status === 200) { state.ui.syncRev = (await put.json()).rev; sent = true; return true; }
       // 409 : un autre appareil vient d'envoyer ses données ; on refusionne et on réessaie.
       if (put.status !== 409) throw new SyncError(`erreur du serveur (${put.status})`);
     } finally {
-      if (!sent) state.ui.syncDirty = true;
-      writeLocal();
+      if (profile === prof) {
+        if (!sent) state.ui.syncDirty = true;
+        writeLocal();
+      }
     }
   }
   throw new SyncError('trop de modifications simultanées, nouvel essai bientôt');
@@ -1432,19 +1545,40 @@ async function joinSync() {
   const code = readCode(input);
   if (!code) { toast(`Code incomplet ou mal saisi (${CODE_LEN} caractères)`); return; }
 
-  let remote, rev;
+  let remote = null;
+  let rev = '';
   try {
     const { id, key } = await syncKeys(code);
     const res = await api('GET', id);
-    if (res.status === 404) { toast('Code inconnu : vérifie-le sur ton autre appareil'); return; }
-    rev = res.headers.get('x-rev') || '';
-    remote = readDoc(await unseal(await res.arrayBuffer(), key));
+    if (res.status === 404) {
+      // Ce profil n'a peut-être encore rien envoyé : le code est bon si l'autre profil a des données.
+      let known = false;
+      for (const p of PROFILES) {
+        if (p.id !== profile && (await api('GET', (await syncKeys(code, p.id)).id)).status !== 404) { known = true; break; }
+      }
+      if (!known) { toast('Code inconnu : vérifie-le sur ton autre appareil'); return; }
+    } else {
+      rev = res.headers.get('x-rev') || '';
+      remote = readDoc(await unseal(await res.arrayBuffer(), key));
+    }
   } catch (e) {
     toast(e.offline ? 'Pas de connexion internet' : `Synchro impossible : ${e.message}`);
     return;
   }
 
-  const fresh = !state.tasks.length && !state.sessions.length;
+  if (!remote) {
+    // Rien encore pour ce profil : on envoie simplement ses données actuelles.
+    syncConf = { code, last: 0, error: '' };
+    saveSyncConf();
+    Object.assign(state.ui, { syncRev: '', syncDirty: true, pristine: false });
+    writeLocal();
+    refreshSyncUi();
+    toast('Synchro activée ✓');
+    syncNow();
+    return;
+  }
+
+  const fresh = state.ui.pristine || (!state.tasks.length && !state.sessions.length);
   if (fresh) {
     // Appareil neuf : on reprend simplement les données de l'autre appareil.
     for (const c of SYNCED) state[c] = [];
@@ -1460,7 +1594,7 @@ async function joinSync() {
   }
   mergeRemote(remote);
   snapshot();
-  Object.assign(state.ui, { syncRev: rev, syncDirty: !fresh });
+  Object.assign(state.ui, { syncRev: rev, syncDirty: !fresh, pristine: false });
   writeLocal();
   syncConf = { code, last: now(), error: '' };
   saveSyncConf();
@@ -1473,7 +1607,7 @@ async function joinSync() {
 async function disableSync() {
   const ok = await ask({
     title: 'Désactiver la synchro ?',
-    text: 'Cet appareil ne sera plus synchronisé. Tes données restent ici et sur tes autres appareils.',
+    text: 'Cet appareil ne sera plus synchronisé, pour les deux profils. Les données restent ici et sur vos autres appareils.',
     ok: 'Désactiver',
   });
   if (!ok) return;
@@ -1503,7 +1637,7 @@ function syncStatus() {
 
 function syncSection() {
   if (!syncConf.code) {
-    return `<p class="hint">Retrouve tes tâches, tes projets et tes temps sur ton téléphone et ton ordinateur.</p>
+    return `<p class="hint">Retrouve tes tâches, tes projets et tes temps sur ton téléphone et ton ordinateur. Un seul code pour le foyer : Romain et Rebecca gardent chacun leurs données. Si la synchro est déjà activée sur un autre appareil, choisis <b>J’ai déjà un code</b>.</p>
       <button type="button" class="btn primary wide" data-action="sync-enable">Activer la synchro</button>
       <button type="button" class="btn wide" data-action="sync-join">J’ai déjà un code</button>`;
   }
@@ -1552,6 +1686,14 @@ const actions = {
     afterTimer(done, inSheet ? id : null);
   },
   stop() { afterTimer(stopTimer(), null); },
+  'toggle-star'(el) {
+    const t = getTask(el.dataset.id);
+    if (!t) return;
+    t.starred = !t.starred;
+    save(); render(); buzz();
+  },
+  'pick-profile'(el) { selectProfile(el.dataset.value); },
+  'switch-profile'() { leaveProfile(); },
 
   'toggle-done'(el) {
     const t = getTask(el.dataset.id);
@@ -1751,7 +1893,8 @@ setInterval(() => { if (!document.hidden) syncNow(); }, SYNC_EVERY);
 // Synchronise si l'app est ouverte dans deux onglets.
 window.addEventListener('storage', (e) => {
   if (e.key === SYNC_KEY) { syncConf = loadSyncConf(); refreshSyncUi(); return; }
-  if (e.key !== STORE_KEY || !e.newValue) return;
+  if (!profile) { if (e.key?.startsWith(STORE_KEY)) render(); return; }
+  if (e.key !== storeKey(profile) || !e.newValue) return;
   try { state = normalize(JSON.parse(e.newValue)); snapshot(); render(); } catch (_) { /* ignoré */ }
 });
 
