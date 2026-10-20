@@ -6,7 +6,7 @@ Todo avec chronomètre par tâche, projets et sous-projets. Application web inst
 
 - **Ma journée** (onglet « Aujourd’hui », page d’accueil) : progression du jour, temps chronométré par projet, carte « Maintenant / Ensuite », programme du jour (événements, créneaux, créneaux libres, ligne « maintenant »), tâches du jour et en retard en blocs à valider (✓ ou balayage vers la droite ; balayage vers la gauche = reporter à demain), « Caler » / « Tout caler » dans les créneaux libres, prioritaires à ajouter, récap des tâches faites, aperçu de demain.
 - **Tâches** : titre, projet, sous-projet, échéance, notes. Badges « En retard », « Aujourd’hui », « Demain ».
-- **Chrono** : bouton ▶ sur chaque tâche. Un seul chrono à la fois (lancer une tâche arrête la précédente). Il continue même si l’app est fermée. Au-delà de 4 h, l’app propose de corriger la durée (chrono oublié).
+- **Chrono** : bouton ▶ sur chaque tâche. Lancer une tâche arrête le chrono en cours, et le message « Garder les deux » le relance aussitôt comme s’il ne s’était pas arrêté : plusieurs chronos peuvent tourner en parallèle (un par tâche). Dans la fiche d’une tâche, « En parallèle » lance son chrono sans arrêter les autres. Le bandeau du haut affiche une ligne par chrono, chacune avec son bouton d’arrêt. Les chronos continuent même si l’app est fermée. Au-delà de 4 h, l’app propose de corriger la durée (chrono oublié).
 - **Journal** : chaque session est enregistrée, modifiable, et on peut ajouter du temps à la main.
 - **Projets / sous-projets** : couleurs, archivage (masqué mais gardé dans les stats).
 - **Stats** : jour, semaine, mois, trimestre et année scolaire (août → juillet), par projet, sous-projet et tâche.
@@ -34,7 +34,7 @@ Fonctionnement :
 - Le code ne quitte jamais les appareils. L’app en tire l’identifiant de stockage et la clé de chiffrement (AES-GCM) : le serveur ne reçoit que des données chiffrées, illisibles sans le code.
 - Synchro au démarrage, au retour au premier plan, au retour du réseau, toutes les 30 s quand l’app est ouverte et quelques secondes après chaque modification. Hors-ligne, l’app fonctionne normalement et envoie ses modifications dès que possible.
 - Fusion élément par élément (tâche, projet, sous-projet, session) : la version la plus récente gagne. Les suppressions sont propagées (marqueurs gardés 180 jours). Si la même tâche est modifiée sur les deux appareils avant qu’ils se synchronisent, c’est la modification la plus récente qui l’emporte pour toute la tâche.
-- Chrono : si deux chronos ont été lancés sur deux appareils sans connexion, le plus récent continue et l’autre est enregistré comme arrêté au démarrage du second.
+- Chronos : ceux lancés sur chaque appareil sont réunis, sauf ceux arrêtés ailleurs. Si la même tâche a été lancée sur deux appareils sans connexion, le chrono le plus récent continue et l’autre est enregistré comme arrêté au démarrage du second.
 - L’affichage (onglet, filtres, période des stats) reste propre à chaque appareil.
 
 Côté serveur, `worker.js` expose `GET`/`PUT /api/sync/<id>` et stocke le bloc chiffré dans Cloudflare KV (binding `SYNC`).

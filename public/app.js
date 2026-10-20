@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.4.0';
+const VERSION = '2.5.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -62,7 +62,7 @@ function blankState() {
     plans: [],       // créneaux du planning : { id, taskId, start, end }
     events: [],      // événements fixes : { id, title, color, start, end (minutes), days ('12345' = lun→ven) ou date }
     // (chaque élément a aussi updatedAt, ajouté par stamp() pour la synchro)
-    active: null,    // { taskId, start }
+    timers: [],      // chronos en cours : { taskId, start } (plusieurs en parallèle possible, un par tâche)
     deleted: {},     // id supprimé (ou "timer:…" pour un chrono arrêté) → date, pour la synchro
     ui: {
       tab: 'today', filter: 'all', subfilter: 'all', showDone: false,
@@ -96,7 +96,7 @@ function normalize(data) {
   if (!data || typeof data !== 'object' || !Array.isArray(data.tasks)) throw new Error('format');
   const s = blankState();
   for (const k of ['projects', 'subprojects', 'tasks', 'sessions', 'plans', 'events']) if (Array.isArray(data[k])) s[k] = data[k];
-  s.active = data.active && data.active.taskId && data.active.start ? data.active : null;
+  s.timers = timerList(data);
   if (data.deleted && typeof data.deleted === 'object') s.deleted = { ...data.deleted };
   Object.assign(s.ui, data.ui || {});
   return s;
@@ -127,6 +127,12 @@ const temp = { statsOpen: new Set(), installEvt: null, showCode: false, keys: nu
 
 const SYNCED = ['projects', 'subprojects', 'tasks', 'sessions', 'plans', 'events'];
 const timerKey = (a) => (a ? `timer:${a.taskId}@${a.start}` : '');
+// Chronos en cours d'un document (ancien format : un seul chrono, champ « active »).
+function timerList(d) {
+  const list = Array.isArray(d.timers) ? d.timers : d.active ? [d.active] : [];
+  return list.filter((a) => a && a.taskId && a.start).map((a) => ({ taskId: String(a.taskId), start: Number(a.start) }));
+}
+const timerKeys = (list) => list.map(timerKey).sort().join('|');
 // Id fixe pour la session d'un chrono : deux appareils qui l'enregistrent produisent la même session.
 const timerSessionId = (a) => `s${a.start.toString(36)}-${a.taskId}`;
 // Deux objets « plats » (valeurs simples) identiques ? On peut ignorer un champ.
@@ -144,7 +150,7 @@ let shadow; // contenu de chaque élément au dernier enregistrement, pour repé
 function snapshot() {
   const items = new Map();
   for (const c of SYNCED) for (const x of state[c]) items.set(x.id, withoutDate(x));
-  shadow = { items, timer: timerKey(state.active) };
+  shadow = { items, timers: new Set(state.timers.map(timerKey)) };
 }
 snapshot();
 
@@ -163,12 +169,10 @@ function stamp() {
   for (const id of shadow.items.keys()) {
     if (!seen.has(id)) { state.deleted[id] = t; shadow.items.delete(id); changed = true; }
   }
-  const timer = timerKey(state.active);
-  if (timer !== shadow.timer) {
-    if (shadow.timer) state.deleted[shadow.timer] = t; // chrono arrêté ou remplacé
-    shadow.timer = timer;
-    changed = true;
-  }
+  const timers = new Set(state.timers.map(timerKey));
+  for (const k of shadow.timers) if (!timers.has(k)) { state.deleted[k] = t; changed = true; } // chrono arrêté
+  for (const k of timers) if (!shadow.timers.has(k)) changed = true;
+  shadow.timers = timers;
   return changed;
 }
 
@@ -268,7 +272,12 @@ function fmtClock(ms) {
   return h ? `${h}:${mmss}` : mmss;
 }
 
-const activeElapsed = () => (state.active ? Math.max(0, now() - state.active.start) : 0);
+const timerOf = (taskId) => state.timers.find((a) => a.taskId === taskId);
+const sinceOf = (taskId) => { const a = timerOf(taskId); return a ? [a.start] : []; };
+const elapsedSince = (since) => since.reduce((n, x) => n + Math.max(0, now() - x), 0);
+// Attributs d'un compteur qui avance chaque seconde (tick) : base + temps écoulé depuis chaque début.
+const tickAttr = (kind, base, since) => (since.length ? ` data-tick="${kind}" data-base="${base}" data-since="${since.join(',')}"` : '');
+const liveDur = (base, since) => `<b${tickAttr('dur', base, since)}>${fmtDur(base + elapsedSince(since))}</b>`;
 const overlap = (s, a, b) => Math.max(0, Math.min(s.end, b) - Math.max(s.start, a));
 
 function taskTotals() {
@@ -280,10 +289,9 @@ function taskTotals() {
 // Sessions enregistrées + la session en cours (pour les stats).
 function allSessions() {
   const list = state.sessions.slice();
-  const a = state.active;
-  if (a) {
+  for (const a of state.timers) {
     const t = getTask(a.taskId);
-    list.push({ id: 'live', taskId: a.taskId, title: t?.title, projectId: t?.projectId, subprojectId: t?.subprojectId, start: a.start, end: now() });
+    list.push({ id: `live:${a.taskId}`, live: true, taskId: a.taskId, title: t?.title, projectId: t?.projectId, subprojectId: t?.subprojectId, start: a.start, end: now() });
   }
   return list;
 }
@@ -301,11 +309,11 @@ function dueInfo(deadline) {
 
 /* ---------- Chronomètre ---------- */
 
-// Arrête le chrono en cours et l'enregistre dans le journal. Renvoie la session créée.
-function finishActive() {
-  const a = state.active;
+// Arrête le chrono d'une tâche et l'enregistre dans le journal. Renvoie la session créée.
+function finishTimer(taskId) {
+  const a = timerOf(taskId);
   if (!a) return null;
-  state.active = null;
+  state.timers = state.timers.filter((x) => x !== a);
   const end = now();
   if (end - a.start < MIN_SESSION) return null;
   const t = getTask(a.taskId);
@@ -317,27 +325,52 @@ function finishActive() {
   return s;
 }
 
-// Un seul chrono à la fois : lancer une tâche arrête la précédente.
-function startTimer(taskId) {
-  if (state.active?.taskId === taskId) return null;
-  const done = finishActive();
-  state.active = { taskId, start: now() };
+// Lancer une tâche arrête les chronos en cours, sauf en parallèle. Renvoie les sessions enregistrées.
+function startTimer(taskId, parallel = false) {
+  if (timerOf(taskId)) return [];
+  const done = parallel ? [] : state.timers.map((a) => finishTimer(a.taskId)).filter(Boolean);
+  state.timers.unshift({ taskId, start: now() });
   const t = getTask(taskId);
   if (t?.done) { t.done = false; t.doneAt = null; }
   save(); render(); buzz(); persistStorage();
   return done;
 }
 
-function stopTimer() {
-  const done = finishActive();
+function stopTimer(taskId) {
+  const done = finishTimer(taskId);
   save(); render(); buzz();
   return done;
 }
 
-// Après un arrêt : si la session est très longue, on propose de la corriger.
+// Après un arrêt : si une session est très longue, on propose de la corriger.
 function afterTimer(done, reopenTaskId) {
-  if (done && done.end - done.start > LONG_SESSION) openSessionSheet(done.id, { warn: true, back: reopenTaskId });
+  const long = [].concat(done || []).find((s) => s.end - s.start > LONG_SESSION);
+  if (long) openSessionSheet(long.id, { warn: true, back: reopenTaskId });
   else if (reopenTaskId) openTaskSheet(reopenTaskId);
+}
+
+// Lance le chrono d'une tâche à la place des chronos en cours ; le message permet de les garder.
+function switchTimer(taskId, reopenTaskId = null, lead = '') {
+  const prev = state.timers.filter((a) => a.taskId !== taskId);
+  const done = startTimer(taskId);
+  afterTimer(done, reopenTaskId);
+  if (!prev.length || sheet.open) return false; // fiche ouverte : elle a son bouton « Lancer en parallèle »
+  const what = prev.length > 1 ? `${prev.length} chronos arrêtés` : `« ${getTask(prev[0].taskId)?.title || 'Tâche'} » arrêté`;
+  toast(`${lead}${what}`, { label: prev.length > 1 ? 'Tout garder' : 'Garder les deux', fn: () => resumeTimers(prev) });
+  return true;
+}
+
+// « Garder les deux » : les chronos arrêtés reprennent comme s'ils ne s'étaient pas arrêtés.
+function resumeTimers(list) {
+  for (const a of list) {
+    if (timerOf(a.taskId)) continue;
+    state.sessions = state.sessions.filter((x) => x.id !== timerSessionId(a));
+    // 1 ms plus tard : nouvelle clé, car l'arrêt a peut-être déjà été envoyé aux autres appareils
+    state.timers.push({ taskId: a.taskId, start: a.start + 1 });
+  }
+  state.timers.sort((x, y) => y.start - x.start);
+  save(); render(); buzz();
+  toast(`${state.timers.length} chronos en parallèle`);
 }
 
 /* ---------- Rendu ---------- */
@@ -355,7 +388,8 @@ function renderProfiles() {
     <div class="who-list">${PROFILES.map((p) => {
       const s = peek(p.id);
       const open = s ? s.tasks.filter((t) => !t.done).length : 0;
-      const info = s?.active ? '⏱ chrono en cours' : open ? `${open} tâche${open > 1 ? 's' : ''} à faire` : 'Commencer';
+      const n = s ? s.timers.length : 0;
+      const info = n ? `⏱ ${n > 1 ? `${n} chronos` : 'chrono'} en cours` : open ? `${open} tâche${open > 1 ? 's' : ''} à faire` : 'Commencer';
       return `<button type="button" class="who-btn" data-action="pick-profile" data-value="${p.id}" style="--c:${p.color}">
         <span class="avatar">${esc(p.name.slice(0, 2))}</span>
         <span class="who-name">${esc(p.name)}<small>${esc(info)}</small></span>${ICON.right}
@@ -433,31 +467,47 @@ function render() {
   tick();
 }
 
+// Chronos en cours, le plus récent d'abord.
+const runningTimers = () => state.timers.slice().sort((a, b) => b.start - a.start);
+
 function tick() {
-  const el = activeElapsed();
   for (const n of $$('[data-tick]')) {
-    const v = Number(n.dataset.base || 0) + el;
+    const since = (n.dataset.since || '').split(',').filter(Boolean).map(Number);
+    const v = Number(n.dataset.base || 0) + elapsedSince(since);
     n.textContent = n.dataset.tick === 'clock' ? fmtClock(v) : fmtDur(v);
   }
-  if (state.active) $('#banner').classList.toggle('long', el > LONG_SESSION);
-  document.title = state.active ? `${fmtClock(el)} · ${getTask(state.active.taskId)?.title || 'Chrono Todo'}` : 'Chrono Todo';
+  let long = false;
+  for (const r of $$('#banner .bn')) {
+    const l = now() - Number(r.dataset.start) > LONG_SESSION;
+    r.classList.toggle('long', l);
+    long ||= l;
+  }
+  $('#banner').classList.toggle('long', long);
+  const list = runningTimers();
+  const more = list.length > 1 ? ` +${list.length - 1}` : '';
+  document.title = list.length ? `${fmtClock(now() - list[0].start)} · ${getTask(list[0].taskId)?.title || 'Chrono Todo'}${more}` : 'Chrono Todo';
 }
 
+// Bandeau des chronos en cours : une ligne par chrono, chacune avec son bouton « Arrêter ».
 function renderBanner() {
   const el = $('#banner');
-  const a = state.active;
-  if (!a) { el.hidden = true; el.innerHTML = ''; return; }
-  const t = getTask(a.taskId);
-  const long = activeElapsed() > LONG_SESSION;
+  const list = runningTimers();
+  if (!list.length) { el.hidden = true; el.innerHTML = ''; return; }
   el.hidden = false;
-  el.classList.toggle('long', long);
-  el.innerHTML = `
-    <div class="banner-info" role="button" tabindex="0" data-action="open-task" data-id="${a.taskId}">
-      <div class="banner-label"><span class="pulse"></span>${long ? 'Chrono oublié ? Arrête pour corriger' : esc(t ? pathLabel(t.projectId, t.subprojectId) : 'En cours')}</div>
-      <div class="banner-title">${esc(t?.title || 'Tâche')}</div>
-    </div>
-    <div class="banner-time" data-tick="clock" data-base="0">${fmtClock(activeElapsed())}</div>
-    <button type="button" class="round-btn stop" data-action="stop" aria-label="Arrêter le chrono">${ICON.stop}</button>`;
+  el.classList.toggle('multi', list.length > 1);
+  el.innerHTML = list.map((a) => {
+    const t = getTask(a.taskId);
+    const long = now() - a.start > LONG_SESSION;
+    return `<div class="bn${long ? ' long' : ''}" data-start="${a.start}">
+      <div class="banner-info" role="button" tabindex="0" data-action="open-task" data-id="${a.taskId}">
+        <div class="banner-label"><span class="pulse"></span>${long ? 'Chrono oublié ? Arrête pour corriger' : esc(t ? pathLabel(t.projectId, t.subprojectId) : 'En cours')}</div>
+        <div class="banner-title">${esc(t?.title || 'Tâche')}</div>
+      </div>
+      <div class="banner-time"${tickAttr('clock', 0, [a.start])}>${fmtClock(now() - a.start)}</div>
+      <button type="button" class="round-btn stop" data-action="stop" data-id="${a.taskId}" aria-label="Arrêter le chrono de « ${esc(t?.title || 'Tâche')} »">${ICON.stop}</button>
+    </div>`;
+  }).join('');
+  el.classList.toggle('long', !!$('.bn.long', el));
 }
 
 /* ----- Onglet Tâches ----- */
@@ -475,13 +525,12 @@ function installHint() {
   </div>`;
 }
 
-// Temps du jour / de la semaine, avec la partie "en cours" ajoutée en direct par tick().
+// Temps du jour / de la semaine, avec la partie "en cours" (chaque chrono) ajoutée en direct par tick().
 function liveTotal(a, b) {
   let closed = 0;
   for (const s of state.sessions) closed += overlap(s, a, b);
-  const act = state.active;
-  if (!act) return { base: closed, live: false };
-  return { base: closed - Math.max(0, a - act.start), live: true };
+  for (const x of state.timers) closed -= Math.max(0, a - x.start); // partie d'avant la période
+  return { base: closed, since: state.timers.map((x) => x.start) };
 }
 
 function summaryCard() {
@@ -489,15 +538,14 @@ function summaryCard() {
   const day = +startOfDay(n);
   const week = +new Date(n.getFullYear(), n.getMonth(), n.getDate() - ((n.getDay() + 6) % 7));
   const end = day + 2 * 864e5;
-  const cell = (label, { base, live }) =>
-    `<div><small>${label}</small><b${live ? ` data-tick="dur" data-base="${base}"` : ''}>${fmtDur(base + (live ? activeElapsed() : 0))}</b></div>`;
+  const cell = (label, { base, since }) => `<div><small>${label}</small>${liveDur(base, since)}</div>`;
   return `<button type="button" class="card summary" data-action="go-stats">
     ${cell('Aujourd’hui', liveTotal(day, end))}${cell('Cette semaine', liveTotal(week, end))}
   </button>`;
 }
 
 function taskCard(t, totals, { tag = true } = {}) {
-  const running = state.active?.taskId === t.id;
+  const running = !!timerOf(t.id);
   const total = totals.get(t.id) || 0;
   const due = !t.done && dueInfo(t.deadline);
   const plan = !t.done && nextPlanOf(t.id);
@@ -511,7 +559,7 @@ function taskCard(t, totals, { tag = true } = {}) {
         ${tag && t.projectId ? `<span class="tag"><i></i>${esc(pathLabel(t.projectId, t.subprojectId))}</span>` : ''}
         ${due ? `<span class="due ${due.cls}">${esc(due.text)}</span>` : ''}
         ${plan ? `<span class="planned">${ICON.cal}${esc(planLabel(plan))}</span>` : ''}
-        ${total || running ? `<span class="spent">${ICON.clock}<b${running ? ` data-tick="dur" data-base="${total}"` : ''}>${fmtDur(total + (running ? activeElapsed() : 0))}</b></span>` : ''}
+        ${total || running ? `<span class="spent">${ICON.clock}${liveDur(total, sinceOf(t.id))}</span>` : ''}
       </div>
     </div>
     ${t.done ? '' : `<button type="button" class="star${t.starred ? ' on' : ''}" data-action="toggle-star" data-id="${t.id}" aria-pressed="${!!t.starred}" aria-label="${t.starred ? 'Retirer des prioritaires' : 'Mettre en prioritaire'}">${ICON.star}</button>`}
@@ -544,8 +592,7 @@ function viewTasks() {
   const subfilter = showSubChips && subCounts.has(ui.subfilter) ? ui.subfilter : 'all';
 
   const match = (t) => (filter === 'all' || key(t) === filter) && (subfilter === 'all' || subKey(t) === subfilter);
-  const act = state.active?.taskId;
-  const list = open.filter(match).sort((a, b) => !!b.starred - !!a.starred || (b.id === act) - (a.id === act) || cmpDeadline(a, b) || b.createdAt - a.createdAt);
+  const list = open.filter(match).sort((a, b) => !!b.starred - !!a.starred || !!timerOf(b.id) - !!timerOf(a.id) || cmpDeadline(a, b) || b.createdAt - a.createdAt);
   const done = state.tasks.filter((t) => t.done && match(t)).sort((a, b) => (b.doneAt || 0) - (a.doneAt || 0));
 
   let html = summaryCard();
@@ -621,14 +668,13 @@ function viewProjects() {
 // Page d'un projet : ses tâches rangées par sous-projet, avec un bouton « Ajouter » dans chaque groupe.
 function viewProject(p) {
   const totals = taskTotals();
-  const act = state.active?.taskId;
   const mine = state.tasks.filter((t) => t.projectId === p.id);
-  const open = mine.filter((t) => !t.done).sort((a, b) => !!b.starred - !!a.starred || (b.id === act) - (a.id === act) || cmpDeadline(a, b) || b.createdAt - a.createdAt);
+  const open = mine.filter((t) => !t.done).sort((a, b) => !!b.starred - !!a.starred || !!timerOf(b.id) - !!timerOf(a.id) || cmpDeadline(a, b) || b.createdAt - a.createdAt);
   const done = mine.filter((t) => t.done).sort((a, b) => (b.doneAt || 0) - (a.doneAt || 0));
   const subs = subsOf(p.id);
   let spent = 0;
   for (const s of state.sessions) if (s.projectId === p.id) spent += s.end - s.start;
-  const running = !!act && getTask(act)?.projectId === p.id;
+  const since = state.timers.filter((a) => getTask(a.taskId)?.projectId === p.id).map((a) => a.start);
 
   const section = (title, subId, list, always) => {
     if (!list.length && !always) return '';
@@ -643,7 +689,7 @@ function viewProject(p) {
     </div>
     ${p.archived ? '<p class="hint">Projet archivé : masqué des listes, gardé dans les stats.</p>' : ''}
     <div class="card summary proj-summary" style="--c:${p.color}">
-      <div><small>Temps passé</small><b${running ? ` data-tick="dur" data-base="${spent}"` : ''}>${fmtDur(spent + (running ? activeElapsed() : 0))}</b></div>
+      <div><small>Temps passé</small>${liveDur(spent, since)}</div>
       <div><small>À faire</small><b>${open.length}</b></div>
     </div>`;
   if (subs.length) {
@@ -710,7 +756,7 @@ function periodRange(kind, offset) {
     label = `Année ${sy}-${sy + 1}`;
     sub = 'août → juillet';
   } else {
-    const first = state.sessions.reduce((m, s) => Math.min(m, s.start), state.active ? state.active.start : now());
+    const first = state.sessions.reduce((m, s) => Math.min(m, s.start), Math.min(now(), ...state.timers.map((a) => a.start)));
     a = startOfDay(new Date(first)); b = new Date(Y, M, D + 1);
     label = 'Depuis le début';
     sub = `depuis le ${fmt(a, { day: 'numeric', month: 'long', year: 'numeric' })}`;
@@ -750,7 +796,7 @@ function buckets(kind, a, b) {
 }
 
 function sessRow(s) {
-  const live = s.id === 'live';
+  const live = !!s.live;
   const title = getTask(s.taskId)?.title || s.title || 'Tâche';
   const attrs = live ? `data-action="open-task" data-id="${s.taskId}"` : `data-action="open-session" data-id="${s.id}"`;
   return `<button type="button" class="sess${live ? ' live' : ''}" ${attrs} style="--c:${colorOf(s.projectId)}">
@@ -981,7 +1027,8 @@ function openTaskSheet(id, preset) {
   const isNew = !id;
   const t = isNew ? { ...newTaskDefaults(), ...preset } : getTask(id);
   if (!t) return;
-  const running = !isNew && state.active?.taskId === id;
+  const running = !isNew && !!timerOf(id);
+  const others = isNew ? [] : runningTimers().filter((a) => a.taskId !== id);
   const sessions = isNew ? [] : state.sessions.filter((s) => s.taskId === id).sort((x, y) => y.start - x.start);
   const total = sessions.reduce((n, s) => n + (s.end - s.start), 0);
 
@@ -992,9 +1039,13 @@ function openTaskSheet(id, preset) {
       </div>`
     : `<section class="time-box">
         <div class="time-head">
-          <div><small>Temps passé</small><b${running ? ` data-tick="dur" data-base="${total}"` : ''}>${fmtDur(total + (running ? activeElapsed() : 0))}</b></div>
+          <div><small>Temps passé</small>${liveDur(total, sinceOf(id))}</div>
           <button type="button" class="btn ${running ? 'stop' : 'primary'}" data-action="toggle-timer" data-id="${id}">${running ? `${ICON.stop} Arrêter` : `${ICON.play} Lancer`}</button>
         </div>
+        ${!running && others.length ? `<div class="par-row">
+          <span><span class="pulse"></span>${others.length > 1 ? `${others.length} chronos en cours` : `« ${esc(getTask(others[0].taskId)?.title || 'Tâche')} » en cours`}<small>« Lancer » ${others.length > 1 ? 'les arrête' : 'l’arrête'}</small></span>
+          <button type="button" class="btn small" data-action="start-parallel" data-id="${id}">${ICON.plus} En parallèle</button>
+        </div>` : ''}
         ${sessions.length ? `<ul class="sessions">${sessions.slice(0, 40).map((s) => `<li><button type="button" data-action="open-session" data-id="${s.id}" data-back="${id}">
           <span>${fmt(new Date(s.start), { weekday: 'short', day: 'numeric', month: 'short' })} · ${hm(new Date(s.start))}–${hm(new Date(s.end))}</span><b>${fmtDur(s.end - s.start)}</b></button></li>`).join('')}</ul>`
           : '<p class="hint">Aucune session pour l’instant.</p>'}
@@ -1076,7 +1127,7 @@ function createTask(form, start) {
     state.plans.push({ id: uid(), taskId: t.id, start: dateAt(pv.day, pv.min), end: dateAt(pv.day, Math.min(DAY_MIN, pv.min + pv.dur)) });
     planned = ` · planifiée ${dayWord(pv.day).toLowerCase()} ${minLabel(pv.min)}`;
   }
-  if (start) { afterTimer(startTimer(t.id), null); toast(`C’est parti, chrono lancé${planned}`); }
+  if (start) { if (!switchTimer(t.id, null, 'Chrono lancé · ')) toast(`C’est parti, chrono lancé${planned}`); }
   else { save(); render(); toast(`Tâche ajoutée${planned}`); }
 }
 
@@ -1407,13 +1458,14 @@ async function unseal(buf, key) {
 
 // Données envoyées : tout sauf l'affichage (onglet, filtres…), propre à chaque appareil.
 // L'ordre des listes est conservé (ordre des projets, des sous-projets).
-const docText = (d) => JSON.stringify({ v: 1, ...Object.fromEntries(SYNCED.map((c) => [c, d[c]])), active: d.active, deleted: d.deleted });
+// « active » (le chrono le plus récent) reste écrit pour les appareils pas encore à jour.
+const docText = (d) => JSON.stringify({ v: 1, ...Object.fromEntries(SYNCED.map((c) => [c, d[c]])), timers: d.timers, active: runningOf(d)[0] || null, deleted: d.deleted });
+const runningOf = (d) => d.timers.slice().sort((a, b) => b.start - a.start);
 
 function readDoc(text) {
   const d = JSON.parse(text);
-  const out = { active: null, deleted: {} };
+  const out = { timers: timerList(d), deleted: {} };
   for (const c of SYNCED) out[c] = Array.isArray(d[c]) ? d[c].filter((x) => x && typeof x.id === 'string') : [];
-  if (d.active?.taskId && d.active.start) out.active = { taskId: String(d.active.taskId), start: Number(d.active.start) };
   for (const [k, t] of Object.entries(d.deleted || {})) if (typeof t === 'number') out.deleted[k] = t;
   return out;
 }
@@ -1456,22 +1508,27 @@ function mergeRemote(remote) {
     state[c] = merged;
   }
 
-  const timer = timerKey(state.active);
-  state.active = mergeTimers(state.active, remote.active);
-  out.changed ||= timerKey(state.active) !== timer || !same(del, delBefore);
-  out.differs ||= timerKey(state.active) !== timerKey(remote.active) || !same(del, remote.deleted);
+  const timers = timerKeys(state.timers);
+  state.timers = mergeTimers(state.timers, remote.timers);
+  out.changed ||= timerKeys(state.timers) !== timers || !same(del, delBefore);
+  out.differs ||= timerKeys(state.timers) !== timerKeys(remote.timers) || !same(del, remote.deleted);
   return out;
 }
 
-// Un seul chrono à la fois. Si deux appareils en ont lancé un chacun sans connexion,
-// le plus récent continue et l'autre est enregistré comme arrêté à ce moment-là.
-function mergeTimers(a, b) {
+// Chronos des deux appareils, sauf ceux qui ont été arrêtés. Un seul chrono par tâche : si deux appareils
+// ont lancé la même tâche chacun sans connexion, le plus récent continue et l'autre est enregistré
+// comme arrêté à ce moment-là.
+function mergeTimers(mine, theirs) {
   const del = state.deleted;
-  const live = [a, b].filter((x) => x && !del[timerKey(x)]);
-  if (!live.length) return null;
-  live.sort((x, y) => y.start - x.start || (timerKey(x) < timerKey(y) ? 1 : -1));
-  const [win, lose] = live;
-  if (lose && timerKey(lose) !== timerKey(win)) {
+  const byTask = new Map();
+  for (const x of [...mine, ...theirs]) {
+    if (del[timerKey(x)]) continue;
+    const other = byTask.get(x.taskId);
+    if (!other) { byTask.set(x.taskId, x); continue; }
+    if (timerKey(other) === timerKey(x)) continue;
+    const xWins = x.start !== other.start ? x.start > other.start : timerKey(x) > timerKey(other);
+    const [win, lose] = xWins ? [x, other] : [other, x];
+    byTask.set(x.taskId, win);
     del[timerKey(lose)] = win.start;
     const id = timerSessionId(lose);
     if (win.start - lose.start >= MIN_SESSION && !del[id] && !state.sessions.some((s) => s.id === id)) {
@@ -1482,7 +1539,7 @@ function mergeTimers(a, b) {
       });
     }
   }
-  return { taskId: win.taskId, start: win.start };
+  return [...byTask.values()].map(({ taskId, start }) => ({ taskId, start })).sort((a, b) => b.start - a.start);
 }
 
 // Première fusion avec les autres appareils : les projets jamais utilisés de cet appareil
@@ -1602,7 +1659,7 @@ async function syncOnce(opts = {}) {
       // Profil jamais utilisé sur cet appareil : on reprend ses données telles qu'elles sont ailleurs
       // (sans y ajouter les projets de départ).
       for (const c of SYNCED) state[c] = [];
-      state.active = null;
+      state.timers = [];
     }
     if (remote) ui.pristine = false;
     if (remote) {
@@ -1703,7 +1760,7 @@ async function joinSync() {
   if (fresh) {
     // Appareil neuf : on reprend simplement les données de l'autre appareil.
     for (const c of SYNCED) state[c] = [];
-    Object.assign(state, { active: null, deleted: {} });
+    Object.assign(state, { timers: [], deleted: {} });
   } else {
     const ok = await ask({
       title: 'Regrouper les données ?',
@@ -1949,7 +2006,7 @@ function viewPlan() {
         <b>${esc(it.ev.title)}</b><span>${shortLabel(it.ev.start)}–${shortLabel(it.ev.end)}</span></div>`).join('')}
       ${pls.map((it) => {
         const t = getTask(it.p.taskId);
-        const running = state.active?.taskId === t.id;
+        const running = !!timerOf(t.id);
         return `<div class="plan-block${t.done || it.p.done ? ' done' : ''}${running ? ' running' : ''}" data-action="open-plan" data-id="${it.p.id}" style="${boxStyle(it)};--c:${colorOf(t.projectId)}">
           <b>${t.starred ? '★ ' : ''}${esc(t.title)}</b><span>${shortLabel(it.s0)}–${shortLabel(it.e)}</span>
           <i class="plan-resize" aria-hidden="true"></i></div>`;
@@ -2411,7 +2468,7 @@ function openPlanSheet(id) {
   if (!p || !t) return;
   const d = new Date(p.start);
   const day = ymd(d);
-  const running = state.active?.taskId === t.id;
+  const running = !!timerOf(t.id);
   openSheet(`<form class="sheet-body" data-form="plan" data-id="${id}">
     ${head('Créneau planifié')}
     <button type="button" class="plan-task" data-action="open-task" data-id="${t.id}" style="--c:${colorOf(t.projectId)}">
@@ -2758,7 +2815,7 @@ function todayModel() {
 
 // Bloc de tâche à valider (agenda, « à faire aujourd'hui », « terminé »).
 function todayCard({ t, p, dur, done, totals }) {
-  const running = state.active?.taskId === t.id;
+  const running = !!timerOf(t.id);
   const kind = p ? 'plan' : 'task';
   const id = p ? p.id : t.id;
   const late = !p && !done && dueInfo(t.deadline);
@@ -2773,7 +2830,7 @@ function todayCard({ t, p, dur, done, totals }) {
           ${t.projectId ? `<span class="tag"><i></i>${esc(pathLabel(t.projectId, t.subprojectId))}</span>` : ''}
           ${p ? `<span>${fmtDur(dur * 60e3)}</span>` : ''}
           ${late && late.cls === 'late' ? `<span class="due late">${esc(late.text)}</span>` : ''}
-          ${spent || running ? `<span class="spent">${ICON.clock}<b${running ? ` data-tick="dur" data-base="${spent}"` : ''}>${fmtDur(spent + (running ? activeElapsed() : 0))}</b></span>` : ''}
+          ${spent || running ? `<span class="spent">${ICON.clock}${liveDur(spent, sinceOf(t.id))}</span>` : ''}
         </div>
       </div>
       ${done ? '' : `${p ? '' : `<button type="button" class="mini-btn" data-action="today-fit" data-id="${t.id}" title="Caler dans le prochain créneau libre" aria-label="Caler dans le prochain créneau libre">${ICON.cal}</button>`}
@@ -2814,7 +2871,7 @@ function viewToday() {
       </div>
     </section>
     <div class="card today-time">
-      <div class="tt-head">${ICON.clock}<b${lt.live ? ` data-tick="dur" data-base="${lt.base}"` : ''}>${fmtDur(lt.base + (lt.live ? activeElapsed() : 0))}</b> chronométrées aujourd’hui</div>
+      <div class="tt-head">${ICON.clock}${liveDur(lt.base, lt.since)} chronométrées aujourd’hui</div>
       ${perSorted.length ? `<div class="mix">${perSorted.map(([k, ms]) => `<i style="flex:${ms} 0 0;background:${colorOf(k)}"></i>`).join('')}</div>
       <div class="mix-legend">${perSorted.slice(0, 3).map(([k, ms]) => `<span style="--c:${colorOf(k)}"><i></i>${esc(getProject(k)?.name || 'Sans projet')} · ${fmtDur(ms)}</span>`).join('')}</div>` : ''}
     </div>`;
@@ -2828,7 +2885,7 @@ function viewToday() {
   let nowCard = '';
   if (focus) {
     const t = focus.t;
-    const running = state.active?.taskId === t.id;
+    const running = !!timerOf(t.id);
     const isNow = focus === current;
     const label = isNow
       ? `Maintenant · ${minLabel(focus.s)}–${minLabel(focus.e)}`
@@ -2839,7 +2896,7 @@ function viewToday() {
       <div class="now-meta">${esc(pathLabel(t.projectId, t.subprojectId))}${isNow ? ` · reste ${fmtDur((focus.e - nm) * 60e3)}` : busyEvent ? ` · après « ${esc(busyEvent.ev.title)} »` : ''}</div>
       ${isNow ? `<div class="now-progress"><i style="width:${Math.round(((nm - focus.s) / (focus.e - focus.s)) * 100)}%"></i></div>` : ''}
       <div class="now-actions">
-        <button type="button" class="btn ${running ? 'stop' : 'primary'} grow" data-action="toggle-timer" data-id="${t.id}">${running ? `${ICON.stop} <span data-tick="clock" data-base="0">${fmtClock(activeElapsed())}</span>` : `${ICON.play} ${isNow ? 'Lancer le chrono' : 'Commencer'}`}</button>
+        <button type="button" class="btn ${running ? 'stop' : 'primary'} grow" data-action="toggle-timer" data-id="${t.id}">${running ? `${ICON.stop} <span${tickAttr('clock', 0, sinceOf(t.id))}>${fmtClock(elapsedSince(sinceOf(t.id)))}</span>` : `${ICON.play} ${isNow ? 'Lancer le chrono' : 'Commencer'}`}</button>
         <button type="button" class="btn grow" data-action="today-done" data-kind="plan" data-id="${focus.p.id}">${ICON.check} Fait</button>
       </div>
     </section>`;
@@ -2945,7 +3002,7 @@ function validateToday(kind, id) {
       return;
     }
     const prev = { pDone: !!p.done, tDone: t.done, tAt: t.doneAt };
-    const stopped = state.active?.taskId === t.id ? finishActive() : null;
+    const stopped = finishTimer(t.id);
     p.done = true;
     // Si la tâche a d'autres créneaux à venir, seul ce créneau est validé.
     const later = state.plans.filter((x) => x.taskId === t.id && x !== p && !x.done && x.start > now()).sort((a, b) => a.start - b.start)[0];
@@ -2958,7 +3015,7 @@ function validateToday(kind, id) {
     const t = getTask(id);
     if (!t) return;
     if (t.done) { t.done = false; t.doneAt = null; save(); render(); return; }
-    const stopped = state.active?.taskId === t.id ? finishActive() : null;
+    const stopped = finishTimer(t.id);
     t.done = true;
     t.doneAt = now();
     save(); render();
@@ -3248,10 +3305,17 @@ const actions = {
     if (el.closest('form[data-form="plan"]')) closeSheet(); // depuis un créneau du planning : on referme
     const f = taskFormOpen();
     if (f?.dataset.id) commitTaskForm(f);
-    const done = state.active?.taskId === id ? stopTimer() : startTimer(id);
-    afterTimer(done, inSheet ? id : null);
+    if (timerOf(id)) afterTimer(stopTimer(id), inSheet ? id : null);
+    else switchTimer(id, inSheet ? id : null);
   },
-  stop() { afterTimer(stopTimer(), null); },
+  // Fiche d'une tâche : lancer son chrono sans arrêter ceux en cours.
+  'start-parallel'(el) {
+    const f = taskFormOpen();
+    if (f?.dataset.id) commitTaskForm(f);
+    startTimer(el.dataset.id, true);
+    openTaskSheet(el.dataset.id);
+  },
+  stop(el) { afterTimer(stopTimer(el.dataset.id), null); },
   'toggle-star'(el) {
     const t = getTask(el.dataset.id);
     if (!t) return;
@@ -3266,7 +3330,7 @@ const actions = {
     if (!t) return;
     const inSheet = !!el.closest('#sheet');
     if (inSheet) closeSheet(); // enregistre aussi les modifications du formulaire
-    const done = !t.done && state.active?.taskId === t.id ? finishActive() : null;
+    const done = t.done ? null : finishTimer(t.id);
     t.done = !t.done;
     t.doneAt = t.done ? now() : null;
     save(); render(); buzz();
@@ -3428,7 +3492,7 @@ const actions = {
     if (!t) return;
     const ok = await ask({ title: 'Supprimer cette tâche ?', text: 'Le temps déjà passé reste comptabilisé dans les statistiques.', ok: 'Supprimer', danger: true });
     if (!ok) return;
-    if (state.active?.taskId === t.id) finishActive();
+    finishTimer(t.id);
     state.tasks = state.tasks.filter((x) => x !== t);
     dropOrphanPlans();
     save(); closeSheet(); render(); toast('Tâche supprimée');
@@ -3605,7 +3669,7 @@ document.addEventListener('keydown', (e) => {
 
 history.replaceState(null, '');
 render();
-setInterval(() => { if (state.active && !document.hidden) tick(); }, 1000);
+setInterval(() => { if (state.timers.length && !document.hidden) tick(); }, 1000);
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) { render(); syncNow(); }
   else if (state.ui.syncDirty) syncNow({ keepalive: true }); // envoie les dernières modifications avant que l'app passe en arrière-plan
