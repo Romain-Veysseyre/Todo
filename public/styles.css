@@ -1031,3 +1031,43 @@ body.ranging, body.ranging * { cursor: ns-resize !important; }
 /* Créneau d'une série (fiche) */
 .series-box { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin: 4px 0 12px; padding: 10px 12px; border-radius: 12px; background: var(--accent-soft); color: var(--accent); font-size: 14px; font-weight: 650; }
 form[data-form="plan"] > .btn.wide + .btn.wide { margin-top: 6px; }
+
+/* ---------- Suggestions à la création d'une tâche ---------- */
+.sug { display: flex; align-items: center; gap: 6px; min-height: 34px; margin: -6px 0 0; padding: 1px 0; overflow-x: auto; scrollbar-width: none; }
+.sug::-webkit-scrollbar { display: none; }
+.sug-hint { color: var(--muted); font-size: 13px; font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sug-lead { flex: none; color: var(--muted); font-size: 14px; font-weight: 700; }
+.sug-chip {
+  flex: none; max-width: 100%; height: 32px; display: inline-flex; align-items: center; gap: 6px; padding: 0 10px;
+  border-radius: 999px; border: 1.5px solid color-mix(in srgb, var(--c) 40%, var(--line)); background: color-mix(in srgb, var(--c) 8%, var(--card));
+  font-size: 13.5px; font-weight: 650; white-space: nowrap; animation: sug-in .16s ease-out;
+}
+.sug-chip i { width: 8px; height: 8px; border-radius: 50%; background: var(--c); flex: none; }
+.sug-chip span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.sug-chip small { flex: none; color: var(--muted); font-size: 12px; font-weight: 600; }
+.sug-chip svg { width: 14px; height: 14px; flex: none; margin-right: -2px; }
+.sug-chip.on { background: var(--c); border-color: var(--c); color: #fff; }
+.sug-chip.on i { background: #fff; }
+.sug-chip.on small { color: rgba(255, 255, 255, .85); }
+.sug-chip.title { font-weight: 600; }
+.sug-chip.title[style*="transparent"] i { border: 1.5px dashed var(--muted); }
+@keyframes sug-in { from { opacity: 0; transform: translateY(3px); } }
+@media (max-width: 480px) { .sug-chip ~ .sug-chip small { display: none; } }
+/* projet présélectionné par l'app */
+form[data-auto*="p"] .pick-field:first-child > span::after,
+form[data-auto*="s"] .pick-field:last-child > span::after { content: "✨ suggéré"; margin-left: 6px; color: var(--accent); }
+.pick-btn.flash { animation: sug-flash .9s ease-out; }
+@keyframes sug-flash { from { border-color: var(--accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 22%, transparent); } }
+/* titres déjà utilisés, sous le champ */
+.ac {
+  position: absolute; left: 0; right: 0; top: calc(100% + 6px); z-index: 35; padding: 5px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 16px 40px rgba(15, 15, 30, .2);
+  animation: menu-in .12s ease-out;
+}
+.ac-head { padding: 4px 10px 3px; font-size: 11.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.ac-row { width: 100%; min-height: 46px; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 1px; padding: 6px 10px; border-radius: 10px; text-align: left; }
+.ac-row:hover, .ac-row.on { background: var(--card-2); }
+.ac-title { max-width: 100%; font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ac-title b { color: var(--accent); font-weight: 750; }
+.ac-meta { display: flex; align-items: center; gap: 6px; max-width: 100%; font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ac-meta i { width: 8px; height: 8px; border-radius: 50%; background: var(--c); flex: none; }

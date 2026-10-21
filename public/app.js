@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.7.0';
+const VERSION = '2.8.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -1042,6 +1042,8 @@ function openTaskSheet(id, preset) {
     <label class="field"><span>Notes</span><textarea name="notes" rows="3" placeholder="Détails, étapes, liens…">${esc(t.notes || '')}</textarea></label>
     ${footer}
   </form>`);
+  // Création : suggestions de titre et de projet (depuis la page d'un projet, ce projet reste fixé).
+  if (isNew) suggestInit($('form', sheet), preset?.projectId ? { p: preset.projectId, s: preset.subprojectId || '' } : {});
 }
 
 function readTaskForm(form) {
@@ -2695,6 +2697,7 @@ function openSlotSheet(day, min, maxDur = DAY_MIN - min, dur = 0, conv = null) {
     ${conv ? `<button type="button" class="btn ghost danger wide" style="margin-top:12px" data-action="delete-event" data-id="${conv.id}">${ICON.trash} Supprimer l’événement</button>` : ''}
   </div>`);
   whenRefresh($('#sheet .when'));
+  suggestInit($('#sheet .slot-new'));
 }
 
 // Les événements fixes deviennent des tâches : on reprend leur nom, leurs jours et leur horaire.
@@ -2838,6 +2841,795 @@ document.addEventListener('keydown', (e) => {
     $('.emoji-grid button', e.target.closest('.emoji-panel'))?.click();
   }
   if (e.key === 'Escape' && (temp.projMenu || temp.catMenu)) { Object.assign(temp, { projMenu: false, catMenu: false }); render(); }
+});
+
+/* ---------- Suggestions à la création d'une tâche : titres déjà utilisés, projet et sous-projet probables ---------- */
+// Tout se calcule sur l'appareil, à partir des tâches et du journal : rien n'est envoyé ni enregistré en plus.
+// 1) L'historique passe d'abord : tâches et sessions passées dont le nom ressemble à celui qu'on tape.
+// 2) Puis le bon sens : un lexique relie des mots (footing, copies, impôts…) à des notions (course à pied,
+//    correction, administratif…), elles-mêmes reconnues dans les NOMS des projets et sous-projets de la personne.
+
+// Mots sans intérêt pour deviner un projet.
+const STOP_WORDS = new Set(('a au aux avec c ce ces cet cette chez d dans de des du elle elles en et eux il ils j je l la le les leur leurs '
+  + 'lui m ma mais me mes moi mon n ne nos notre nous on ou par pas pour qu que qui s sa se ses son sur ta te tes toi ton tu un une vos '
+  + 'votre vous y ca cela ceci plus tres bien faire fait refaire etre avoir aller va vais puis alors donc car si ni tout tous toute toutes '
+  + 'autre autres meme chaque entre vers sans sous apres avant pendant depuis jusqu ici encore deja aussi comme quand truc trucs chose '
+  + 'choses etc via').split(' '));
+// Mots qui finissent par s ou x au singulier : on ne leur retire pas ce « pluriel » (cours ≠ course).
+const KEEP_S = new Set(('cours temps fois mois prix choix repas corps bras bus dos pas avis colis tapis jus frais souris gaz permis paris '
+  + 'progres proces acces succes stress fitness tennis travaux').split(' '));
+// Familles de mots (sans accents ni pluriel) ramenées à un seul mot.
+const SAME_WORD = Object.fromEntries(Object.entries({
+  mail: 'email mel courriel gmail outlook',
+  correc: 'corriger corrige corrigee correction corr',
+  prepar: 'prepa prepare preparer preparee preparation prep',
+  appel: 'appeler rappeler rappel tel telephone telephoner phoner call',
+  rdv: 'rendez',
+  evalua: 'eval evaluer evaluation',
+  revis: 'reviser revision revoir',
+  achat: 'acheter achete',
+  ranger: 'rangement range',
+  paieme: 'payer paiement paye regler reglement',
+  banque: 'bancaire',
+  impot: 'fiscal fiscale taxe',
+  medeci: 'docteur medecin',
+  annive: 'anniv anniversaire',
+  velo: 'bike',
+  footin: 'footing jogging running run',
+  muscu: 'musculation',
+  philo: 'philosophie',
+  geo: 'geographie',
+  math: 'maths mathematique',
+  termin: 'tle term terminale',
+  '2nde': '2de seconde',
+  '1re': '1ere premiere',
+  '6e': '6eme sixieme',
+  '5e': '5eme cinquieme',
+  '4e': '4eme quatrieme',
+  '3e': '3eme troisieme',
+  diapo: 'diaporama',
+  classm: 'classer classement',
+}).flatMap(([k, list]) => list.split(' ').map((w) => [w, k])));
+
+// Texte comparable : minuscules, sans accents, emojis ni ponctuation.
+const plain = (s) => fold(s).replace(/œ/g, 'oe').replace(/æ/g, 'ae').replace(/[^a-z0-9]+/g, ' ').trim();
+const plainWords = (s) => { const p = plain(s); return p ? p.split(' ') : []; };
+const isUseful = (w) => w.length > 1 && !STOP_WORDS.has(w) && !/^\d+$/.test(w);
+
+// Forme de base d'un mot (sans pluriel, famille de mots ramenée à un mot) ; la clé (6 lettres) rapproche
+// en plus les mots de même racine, pour comparer avec l'historique (préparatifs / préparer).
+function wordBase(w) {
+  if (w.length > 3 && !KEEP_S.has(w)) {
+    if (w.endsWith('eaux')) w = w.slice(0, -1);
+    else if (w.endsWith('aux') && w.length > 5) w = `${w.slice(0, -3)}al`;
+    else if (/[sx]$/.test(w)) w = w.slice(0, -1);
+  }
+  return SAME_WORD[w] || w;
+}
+const wordKey = (w) => wordBase(w).slice(0, 6);
+
+// Notions de bon sens. p : notion parente (plus générale).
+// names : mots qui désignent la notion dans un NOM de projet ou de sous-projet.
+// s / m / f : mots du titre qui l'évoquent (fort, moyen, faible). « | » sépare les entrées, une entrée peut faire
+// plusieurs mots ; « =mot » : ce mot exactement (« =courses » ≠ « course »).
+// ctx : vocabulaire scolaire, pleinement pris en compte avec un indice scolaire (niveau, matière…) ;
+// hint : simple indice (niveaux, matières), jamais un projet à lui seul ; not : mots qui annulent la notion.
+const NOTIONS = [
+  { id: 'perso', names: 'perso|personnel|prive|vie perso|vie privee|quotidien' },
+  { id: 'travail', names: 'pro|travail|boulot|job|taf|work|bureau|professionnel|entreprise|agence|cabinet|societe',
+    s: 'teletravail|seminaire|compte rendu|ordre du jour|point hebdo|rdv client',
+    m: 'reunion|visio|teams|zoom|client|collegue|rapport|presentation|deadline|entretien|manager|chef|boss|devis|tableur|excel|powerpoint|formation',
+    f: 'mail|appel|dossier|projet|document|doc' },
+  { id: 'enseignement', p: 'travail', names: 'enseignement|ecole|lycee|college|education|professeur|classe|eleve|scolaire',
+    s: 'lycee|college|pronote|eleve|classe|proviseur|cpe|inspection|inspecteur|salle des profs|vie scolaire|cahier de textes|ent|education nationale',
+    m: 'prof|devoirs|programme|cantine|surveillance|sortie scolaire' },
+  { id: 'ecole', p: 'enseignement', hint: 1,
+    s: '6e|5e|4e|3e|2nde|1re|termin|bts|dgemc|hggsp|emc|ses|svt|snt|nsi|llce|hlp|histoire geo|hg|grand oral|bac|brevet|dnb|spe|specialite|bac blanc|enseignement scientifique',
+    m: 'histoire|geo|philo|francais|math|physique|chimie|anglais|espagnol|allemand|latin|eps|sciences|groupe|demi groupe' },
+  { id: 'prepa', p: 'enseignement', ctx: 1, names: 'prepa|preparation|cours|sequence|seance|lecon|pedagogie|preparer',
+    s: 'prepar|sequence|seance|diapo|td|tp|chapitre|progression|polycopie|poly|plan de cours|support de cours|cours',
+    m: 'lecon|fiche|activite|exercice|manuel|support|photocopie|document',
+    not: 'paie|salaire|avenir|valise|sport|vacances|voyage' },
+  { id: 'correction', p: 'enseignement', ctx: 1, names: 'correction|corriger|copie|evaluation|note|correc',
+    s: 'copie|correc|bareme|annotation|annoter|paquet de copies',
+    m: 'evalua|controle|ds|dm|interro|interrogation|note|noter|dissertation|dissert|commentaire|compo|composition|bac blanc|examen|partiel|epreuve',
+    not: 'frais|technique|cle|medical' },
+  { id: 'profprincipal', p: 'enseignement', names: 'prof principal|professeur principal|pp|vie de classe|suivi eleve|suivi des eleves',
+    s: 'conseil de classe|bulletin|appreciation|parcoursup|orientation|fiche avenir|delegue|heure de vie de classe|hvc|vie de classe|pp|convocation|reunion parents|rencontre parents|parents d eleves|reunion parents profs',
+    m: 'parent|conseil|stage|voeux|carnet|sanction|exclusion|absence|retard',
+    not: 'paie|salaire' },
+  { id: 'agreg', p: 'enseignement', names: 'agreg|agregation|capes|concours|prepa concours',
+    s: 'agreg|agregation|capes|concours|jury|annales|oral blanc',
+    m: 'lecon|ecrit|revis|dissertation|commentaire|memoire|bibliographie|biblio|fiche de lecture' },
+  { id: 'admin', p: 'perso', names: 'admin|administratif|administration|papiers|paperasse|demarches|gestion',
+    s: 'impot|declaration|caf|urssaf|ameli|secu|securite sociale|mutuelle|assurance|prefecture|passeport|cni|carte grise|carte d identite|attestation|justificatif|formulaire|resiliation|resilier|notaire|avocat|recommande|procuration|bulletin de paie|bulletin de salaire|fiche de paie|mairie|administratif|papiers|demarche|pole emploi|france travail|retraite|carte vitale|note de frais',
+    m: 'courrier|lettre|contrat|abonnement|signer|signature|scanner|imprimer|dossier|inscription|inscrire|renouveler|renouvellement|remboursement|facture|banque|virement' },
+  { id: 'argent', p: 'admin', names: 'argent|finance|budget|banque|compta|comptes|epargne|investissement|bourse|depenses',
+    s: 'virement|pret|credit|epargne|budget|compte bancaire|livret|placement|remboursement|rembourser|cheque|rib|paypal|loyer|salaire|paieme|depense|facture|banque',
+    m: 'frais|comptes|achat|prix|argent' },
+  { id: 'maison', p: 'perso', names: 'maison|logement|appart|appartement|domicile|foyer|menage|home|intendance|chez nous|travaux|interieur',
+    s: 'menage|aspirateur|serpilliere|poussiere|vaisselle|lessive|linge|repassage|etendre|poubelle|bricolage|bricoler|plombier|plomberie|electricien|jardin|jardinage|tondre|pelouse|arroser|plante|demenagement|demenager|travaux|meuble|ikea|chauffage|chaudiere|frigo|lave linge|lave vaisselle|salle de bain|ampoule',
+    m: 'ranger|nettoy|trier|reparer|reparation|peinture|deco|decoration|cle|cave|grenier|garage|colis|maison|tri' },
+  { id: 'courses', p: 'maison', names: '=courses|achats|approvisionnement|liste de courses',
+    s: '=courses|supermarche|drive|carrefour|leclerc|auchan|lidl|intermarche|monoprix|franprix|biocoop|super u|liste de courses|faire les courses|hypermarche',
+    m: 'achat|commande|commander|marche' },
+  { id: 'cuisine', p: 'maison', names: 'cuisine|repas|recette|batch|cook|food|menu|popote|cuisiner',
+    s: 'recette|cuisiner|batch|batch cooking|meal prep|gateau|patisserie|confiture|soupe|menu de la semaine|menus|cuisine',
+    m: 'repas|diner|dejeuner|menu|plat|four|gouter' },
+  { id: 'famille', p: 'perso', names: 'famille|family|proches|enfants|enfant',
+    s: 'maman|papa|mere|pere|frere|soeur|mamie|papi|papy|grand mere|grand pere|grands parents|enfant|fils|fille|neveu|niece|cousin|cousine|tante|oncle|bebe|belle mere|beau pere|belle famille|bapteme|famille|nounou|creche|baby sitting|garde d enfant',
+    m: 'parent|annive|cadeau|noel|fete des meres|fete des peres',
+    not: 'eleve|classe|conseil|pronote' },
+  { id: 'social', p: 'perso', names: 'social|sociale|amis|sorties|potes|copains|vie sociale',
+    s: 'amis|ami|copain|copine|pote|apero|soiree|resto|restaurant|boire un verre|invitation|inviter|pot de depart|bar',
+    m: 'sortie|verre|diner|annive|fete|week end|weekend|brunch' },
+  { id: 'couple', p: 'perso', names: 'couple|amour|nous deux|a deux|amoureux',
+    s: 'couple|amoureux|amoureuse|cherie|cheri|saint valentin|en amoureux|tete a tete|diner romantique|week end a deux|anniversaire de mariage' },
+  { id: 'sante', p: 'perso', names: 'sante|medical|soins|bien etre|forme',
+    s: 'medeci|generaliste|dentiste|kine|kinesitherapeute|osteo|osteopathe|ophtalmo|ophtalmologue|dermato|dermatologue|gyneco|gynecologue|pediatre|psy|psychologue|pharmacie|ordonnance|medicament|vaccin|prise de sang|analyses|radio|irm|echographie|hopital|urgences|orthodontiste|orthophoniste|podologue|sage femme|laboratoire',
+    m: 'rdv medical|bilan|sante|mutuelle|lunettes|lentilles|sommeil|regime' },
+  { id: 'sport', p: 'perso', names: 'sport|forme|fitness|activite physique|entrainement|muscu',
+    s: 'sport|muscu|salle de sport|gym|fitness|crossfit|abdos|gainage|pilates|stretching|etirement|entrainement|tennis|football|foot|basket|handball|rugby|badminton|squash|padel|ping pong|escalade|ski|surf|boxe|judo|karate|danse|zumba',
+    m: 'match|seance de sport|coach|=course|exercice physique' },
+  { id: 'running', p: 'sport', names: 'running|trail|footing|jogging|course a pied|cap|courir|marathon',
+    s: 'footin|trail|course a pied|courir|fractionne|marathon|semi marathon|10 km|vma|sortie longue|endurance fondamentale|cross',
+    m: '=course|cap|piste' },
+  { id: 'velo', p: 'sport', names: 'velo|cyclisme|vtt|bike', s: 'velo|vtt|cyclisme|home trainer|spinning|gravel|velotaf' },
+  { id: 'natation', p: 'sport', names: 'natation|piscine|nage', s: 'natation|piscine|nager|nage|brasse|crawl|longueurs|aquagym' },
+  { id: 'yoga', p: 'sport', names: 'yoga|meditation|zen|bien etre', s: 'yoga|meditation|mediter|relaxation|sophrologie|coherence cardiaque', m: 'respiration' },
+  { id: 'rando', p: 'sport', names: 'rando|randonnee|marche|montagne|plein air', s: 'rando|randonnee|trek|trekking|montagne', m: 'marche|balade|promenade' },
+  { id: 'loisirs', p: 'perso', names: 'loisirs|loisir|detente|fun|hobbies|hobby|culture|passions|passion',
+    s: 'film|cinema|serie|netflix|lecture|livre|roman|bd|manga|musique|concert|guitare|piano|batterie|chant|chorale|jeu video|console|switch|playstation|theatre|expo|exposition|musee|dessin|tricot|couture|crochet|spectacle|festival|podcast|jeu de societe',
+    m: 'jeu|sortie|peinture|photo' },
+  { id: 'voyage', p: 'loisirs', names: 'voyage|vacances|trip|escapade|week end|weekend',
+    s: 'voyage|vacances|valise|billet|train|avion|vol|hotel|airbnb|camping|road trip|sejour|itineraire|visa|gite|week end|weekend',
+    m: 'reserv|passeport|aeroport|gare|location' },
+  { id: 'dev', names: 'dev|code|appli|app|application|site|informatique|tech|logiciel|startup|side project|web',
+    s: 'code|coder|dev|developpement|developper|bug|debug|deployer|deploiement|github|git|commit|cloudflare|api|base de donnees|maquette|ux|ui|fonctionnalite|feature|serveur|prompt|claude|chatgpt|ia|appli|application|site web|landing page|beta',
+    m: 'test|design|site|app|version|mise a jour|ordinateur|ordi' },
+  { id: 'pause', names: 'pause|break|repos|detente|temps calme',
+    s: 'pause|sieste|break|recre|recreation|pause cafe|pause dejeuner',
+    m: 'cafe|dejeuner|repos|souffler' },
+  { id: 'animaux', p: 'maison', names: 'animaux|animal|chien|chat', s: 'chien|chat|veto|veterinaire|litiere|croquettes|toilettage|promener le chien|vermifuge' },
+  { id: 'voiture', p: 'maison', names: 'voiture|auto|vehicule|moto',
+    s: 'voiture|controle technique|vidange|pneus|garagiste|carrosserie|essence|carburant|plein d essence|parking|lavage voiture', m: 'garage|plein|moto' },
+];
+// Les emojis du sélecteur (et leurs mots-clés) rattachés aux notions : un emoji dans le titre est un indice fort.
+const EMOJI_NOTION = {
+  '💼': 'travail', '📚': 'prepa', '📝': 'correction', '🧑‍🏫': 'enseignement', '🎓': 'agreg', '🏫': 'enseignement', '📊': 'travail',
+  '🗂️': 'admin', '💻': 'dev', '🌐': 'dev', '📧': 'travail', '📞': 'travail', '🖨️': 'admin', '🤝': 'travail',
+  '🏠': 'maison', '🧹': 'maison', '🧺': 'maison', '🍳': 'cuisine', '🛒': 'courses', '🔧': 'maison', '🪴': 'maison', '🛏️': 'maison',
+  '🗑️': 'maison', '📦': 'maison', '🐶': 'animaux', '🐱': 'animaux', '🚗': 'voiture', '🧸': 'famille',
+  '❤️': 'couple', '👨‍👩‍👧': 'famille', '👶': 'famille', '🎂': 'famille', '🎁': 'famille', '👫': 'social', '💍': 'famille', '🥂': 'social',
+  '📸': 'loisirs', '🏖️': 'voyage', '✈️': 'voyage', '🚆': 'voyage', '🗺️': 'voyage', '✉️': 'admin',
+  '🏃': 'running', '🚴': 'velo', '🏊': 'natation', '🏋️': 'sport', '🧘': 'yoga', '⚽': 'sport', '🎾': 'sport', '🥾': 'rando',
+  '💊': 'sante', '🩺': 'sante', '🦷': 'sante', '😴': 'sante',
+  '💶': 'argent', '💳': 'argent', '🏦': 'argent', '🧾': 'argent', '📑': 'admin', '🖋️': 'admin', '🏛️': 'admin', '📬': 'admin',
+  '🛡️': 'admin', '🪪': 'admin', '⚖️': 'admin', '🧮': 'argent', '💰': 'argent',
+  '🎮': 'loisirs', '🎨': 'loisirs', '🎵': 'loisirs', '🎸': 'loisirs', '📖': 'loisirs', '🎬': 'loisirs', '📺': 'loisirs', '🎭': 'loisirs',
+  '🧩': 'loisirs', '☕': 'pause', '🧑‍🍳': 'cuisine', '🍕': 'social', '🍷': 'social',
+};
+const EMOJI_SKIP = new Set(['ecrire', 'lire', 'note', 'course', 'courses', 'salle']); // mots-clés d'emojis trop vagues ou ambigus
+const TEACH = new Set(['enseignement', 'ecole', 'prepa', 'correction', 'profprincipal', 'agreg']);
+const LEVEL = [1, 0.8, 0.6, 0.45, 0.35]; // une notion plus générale (parent, grand-parent…) compte moins
+
+let LEX = null;
+function lexicon() {
+  if (LEX) return LEX;
+  const L = { byId: new Map(), byBase: new Map(), byKey: new Map(), exact: new Map(), phrases: [], surfaces: new Map(), known: new Set() };
+  const push = (map, k, v) => (map.get(k) || map.set(k, []).get(k)).push(v);
+  const entries = (str) => (str || '').split('|').map((x) => x.trim()).filter(Boolean);
+  const addWord = (n, entry, w) => {
+    if (entry.includes(' ')) {
+      L.phrases.push({ text: ` ${entry} `, n, w, word: entry });
+      entry.split(' ').forEach((x) => L.known.add(wordBase(x)));
+      return;
+    }
+    if (entry.startsWith('=')) {
+      const e = entry.slice(1);
+      push(L.exact, e, { n, w });
+      push(L.surfaces, e, { n, w });
+      L.known.add(wordBase(e));
+      return;
+    }
+    const b = wordBase(entry);
+    push(L.byBase, b, { n, w });
+    if (b.length >= 6) push(L.byKey, b.slice(0, 6), { n, w });
+    push(L.surfaces, entry, { n, w });
+    L.known.add(b);
+  };
+  for (const d of NOTIONS) {
+    const n = {
+      id: d.id, parent: d.p || '', ctx: !!d.ctx, hint: !!d.hint, not: new Set(entries(d.not).map(wordBase)),
+      nameBases: new Set(), nameExact: new Set(), namePhrases: [], nameWords: [], strong: new Set(),
+    };
+    for (const e of entries(d.names)) {
+      if (e.includes(' ')) n.namePhrases.push(e);
+      else if (e.startsWith('=')) n.nameExact.add(e.slice(1));
+      else { n.nameBases.add(wordBase(e)); n.nameWords.push(e); }
+      e.replace('=', '').split(' ').forEach((x) => L.known.add(wordBase(x)));
+    }
+    L.byId.set(n.id, n);
+    for (const [f, w] of [['s', 1], ['m', 0.7], ['f', 0.45]]) {
+      for (const e of entries(d[f])) {
+        addWord(n.id, e, w);
+        if (w === 1 && !e.includes(' ')) n.strong.add(wordBase(e.replace('=', '')));
+      }
+    }
+  }
+  for (const cat of EMOJIS) {
+    for (const it of cat.items) {
+      const n = EMOJI_NOTION[it.e];
+      if (n) for (const x of plainWords(it.k)) if (isUseful(x) && !EMOJI_SKIP.has(x)) addWord(n, x, 0.5);
+    }
+  }
+  LEX = L;
+  return L;
+}
+
+// Distance d'une notion à l'un de ses ancêtres (0 : la même ; -1 : pas un ancêtre).
+function notionDist(a, b) {
+  const L = lexicon();
+  let d = 0;
+  for (let x = a; x; x = L.byId.get(x)?.parent, d++) if (x === b) return d;
+  return -1;
+}
+const related = (a, b) => notionDist(a, b) >= 0 || notionDist(b, a) >= 0;
+
+// Ce que désigne un nom de projet ou de sous-projet : notion → justesse (0 à 1), et ses notions principales.
+function nameNotions(name) {
+  const L = lexicon();
+  const ws = plainWords(name).filter(isUseful);
+  const pt = ` ${plain(name)} `;
+  const fit = new Map();
+  const own = new Map();
+  for (const n of L.byId.values()) {
+    let best = 0;
+    const hit = new Set();
+    for (const ph of n.namePhrases) if (pt.includes(` ${ph} `)) { best = 1; ph.split(' ').forEach((x) => hit.add(x)); }
+    for (const w of ws) {
+      const b = wordBase(w);
+      let m = 0;
+      if (n.nameExact.has(w) || n.nameBases.has(b)) m = 1;
+      else if (n.strong.has(b)) m = 0.8;
+      else if (n.nameWords.some((x) => x.length >= 4 && w.length >= x.length + 3 && w.startsWith(x))) m = 0.85; // « CookOnce » → cook (mais « course » n'est pas « cours »)
+      if (m) { best = Math.max(best, m); hit.add(w); }
+    }
+    if (best) own.set(n.id, { best, hit });
+  }
+  for (const [id, o] of own) {
+    // mots du nom expliqués par cette notion, ou par une autre sans rapport (« Famille / Social » : deux sujets)
+    const covered = new Set(o.hit);
+    for (const [id2, o2] of own) if (id2 !== id && !related(id, id2)) o2.hit.forEach((x) => covered.add(x));
+    const share = ws.length ? ws.filter((w) => covered.has(w)).length / ws.length : 1;
+    fit.set(id, o.best * (0.6 + 0.4 * share));
+  }
+  const max = Math.max(0, ...fit.values());
+  const focus = new Set([...fit].filter(([, v]) => v >= max * 0.95).map(([id]) => id));
+  return { ws, fit, focus };
+}
+
+// Justesse d'un nom pour une notion, réduite de moitié si le nom vise surtout autre chose de plus précis
+// (« Prof principal » n'est pas le bon endroit pour n'importe quelle tâche d'enseignement).
+function fitFor(N, n) {
+  const v = N.fit.get(n);
+  if (!v) return 0;
+  return [...N.focus].some((f) => notionDist(n, f) >= 0) ? v : v * 0.5;
+}
+
+// Découpage d'un titre, gardé en mémoire : il ne change pas d'une fiche à l'autre.
+const parsedTitles = new Map();
+function parseTitle(title) {
+  let p = parsedTitles.get(title);
+  if (!p) {
+    const ws = plainWords(title);
+    const wk = ws.map(wordKey);
+    const uw = [];
+    const uk = [];
+    ws.forEach((w, i) => { if (isUseful(w)) { uw.push(w); uk.push(wk[i]); } });
+    p = { plain: ws.join(' '), ws, wk, uw, uk, keys: [...new Set(uk)] };
+    parsedTitles.set(title, p);
+  }
+  return p;
+}
+
+// L'index n'est refait que si les données ont changé (empreinte des dates de modification).
+let sugCache = null;
+function suggestIndexCached() {
+  let h = 0;
+  for (const list of [state.tasks, state.sessions, state.projects, state.subprojects]) {
+    h = (h * 31 + list.length) | 0;
+    for (const x of list) h = (h * 31 + ((x.updatedAt || x.createdAt || x.end || 0) % 1e9)) | 0;
+  }
+  const key = `${profile}|${h}`;
+  if (sugCache?.key !== key) sugCache = { key, ix: suggestIndex() };
+  return sugCache.ix;
+}
+
+// Index de la personne : ses projets, et son historique pour comparer les titres.
+function suggestIndex() {
+  const node = (id, name) => ({ id, name, ...nameNotions(name) });
+  const projects = state.projects.filter((p) => !p.archived)
+    .map((p) => ({ ...node(p.id, p.name), subs: subsOf(p.id).map((s) => node(s.id, s.name)) }));
+  const byP = new Map(projects.map((P) => [P.id, P]));
+  const pairOk = (pid, sid) => {
+    const P = byP.get(pid);
+    return P ? { pid, sid: sid && P.subs.some((S) => S.id === sid) ? sid : '' } : null;
+  };
+  // Vocabulaire scolaire plus sûr pour quelqu'un qui a des projets d'enseignement.
+  const teacher = projects.some((P) => [P, ...P.subs].some((N) => [...N.fit].some(([id, v]) => TEACH.has(id) && v >= 0.8)));
+  const partners = PROFILES.filter((x) => x.id !== profile).map((x) => plain(x.name));
+
+  // Exemples : chaque tâche, puis les tâches supprimées dont il reste des sessions dans le journal.
+  const ex = [];
+  const add = (title, pid, sid, t, open) => {
+    const p = parseTitle(title);
+    ex.push({ title, plain: p.plain, ws: p.ws, wk: p.wk, uw: p.uw, uk: p.uk, keys: p.keys, pid: pid || '', sid: sid || '', t: t || 0, open });
+  };
+  for (const t of state.tasks) add(t.title, t.projectId, t.subprojectId, Math.max(t.updatedAt || 0, t.doneAt || 0, t.createdAt || 0), !t.done);
+  const ids = new Set(state.tasks.map((t) => t.id));
+  const gone = new Map();
+  for (const s of state.sessions) {
+    if (s.taskId && ids.has(s.taskId)) continue;
+    const k = s.taskId || `${plain(s.title || '')}|${s.projectId || ''}`;
+    if (!(gone.get(k)?.end >= s.end)) gone.set(k, s);
+  }
+  for (const s of gone.values()) add(s.title || '', s.projectId, s.subprojectId, s.end, false);
+
+  const df = new Map();
+  const inv = new Map();
+  const surf = new Map(); // mot tel qu'écrit → clé (pour compléter un mot en cours de frappe)
+  ex.forEach((e, i) => {
+    for (const k of e.keys) { df.set(k, (df.get(k) || 0) + 1); (inv.get(k) || inv.set(k, []).get(k)).push(i); }
+    e.uw.forEach((w, j) => surf.set(w, e.uk[j]));
+  });
+  const N = ex.length;
+  const idf = (k) => (df.has(k) ? Math.log(1 + N / df.get(k)) : 0.7); // un mot rare compte plus
+  for (const e of ex) e.idfSum = e.keys.reduce((n, k) => n + idf(k), 0) || 1;
+
+  // Titres déjà utilisés (regroupés), avec le projet / sous-projet le plus fréquent pour chacun.
+  const groups = new Map();
+  for (const e of ex) {
+    if (!e.plain) continue;
+    let g = groups.get(e.plain);
+    if (!g) groups.set(e.plain, g = { plain: e.plain, ws: e.ws, wk: e.wk, title: e.title, t: -1, n: 0, open: false, pairs: new Map() });
+    g.n++;
+    g.open ||= e.open;
+    if (e.t >= g.t) { g.t = e.t; g.title = e.title; }
+    const pair = pairOk(e.pid, e.sid) || { pid: '', sid: '' };
+    const pk = `${pair.pid}|${pair.sid}`;
+    const c = g.pairs.get(pk) || { ...pair, n: 0, t: 0 };
+    c.n++;
+    c.t = Math.max(c.t, e.t);
+    g.pairs.set(pk, c);
+  }
+  const titles = [...groups.values()].map((g) => {
+    const best = [...g.pairs.values()].sort((a, b) => b.n - a.n || b.t - a.t)[0];
+    return { ...g, pid: best.pid, sid: best.sid };
+  });
+  return { projects, byP, pairOk, teacher, partners, ex, inv, idf, surf, titles };
+}
+
+/* ----- 1) L'historique ----- */
+
+// Mots utiles du titre tapé ; le dernier, en cours de frappe, vaut aussi pour les mots qui le prolongent.
+function queryTokens(q, ix, partial) {
+  const ws = plainWords(q);
+  const toks = [];
+  ws.forEach((w, i) => {
+    if (!isUseful(w)) return;
+    const isLast = partial && i === ws.length - 1;
+    if (isLast && w.length < 3) return;
+    const keys = new Set([wordKey(w)]);
+    if (isLast) for (const [s, k] of ix.surf) if (s.startsWith(w)) keys.add(k);
+    toks.push({ keys, weight: Math.max(...[...keys].map(ix.idf)) });
+  });
+  return toks;
+}
+
+// Projets / sous-projets des tâches passées qui ressemblent au titre : mots communs (surtout les rares),
+// tâches fréquentes et récentes. Un titre identique compte beaucoup.
+function historyRank(q, ix, lock, partial) {
+  const toks = queryTokens(q, ix, partial);
+  if (!toks.length) return [];
+  const qPlain = plainWords(q).join(' ');
+  const total = toks.reduce((n, t) => n + t.weight, 0);
+  const found = new Map(); // exemple → { w : poids des mots tapés retrouvés, e : poids de ses propres mots retrouvés }
+  for (const t of toks) {
+    const seen = new Set();
+    for (const k of t.keys) {
+      for (const i of ix.inv.get(k) || []) {
+        if (seen.has(i)) continue;
+        seen.add(i);
+        const m = found.get(i) || { w: 0, e: 0 };
+        m.w += t.weight;
+        m.e += ix.idf(k);
+        found.set(i, m);
+      }
+    }
+  }
+  const pairs = new Map();
+  for (const [i, m] of found) {
+    const e = ix.ex[i];
+    if (lock.p && e.pid !== lock.p) continue;
+    const pair = ix.pairOk(e.pid, e.sid);
+    if (!pair) continue;
+    const same = e.plain === qPlain;
+    const sim = same ? 1.5 : (m.w / total) * (0.55 + 0.45 * Math.min(1, m.e / e.idfSum));
+    if (sim < 0.2) continue;
+    const recent = 0.6 + 0.4 * Math.exp(-(now() - e.t) / (90 * 864e5));
+    const k = `${pair.pid}|${pair.sid}`;
+    const c = pairs.get(k) || { ...pair, score: 0, n: 0, same: 0 };
+    c.score += sim * sim * recent;
+    if (sim >= 0.35) c.n++;
+    if (same) c.same++;
+    pairs.set(k, c);
+  }
+  return [...pairs.values()].sort((a, b) => b.score - a.score);
+}
+
+/* ----- 2) Le bon sens ----- */
+
+// Notions évoquées par le titre : notion → force (0 à 1), et le mot qui l'a évoquée.
+function titleNotions(q, ix, partial) {
+  const L = lexicon();
+  const pt = ` ${plain(q)} `;
+  const ws = plainWords(q);
+  const last = partial ? ws[ws.length - 1] || '' : '';
+  const hits = new Map();
+  const add = (n, w, word) => { const k = `${n}|${word}`; if (!(hits.get(k)?.w >= w)) hits.set(k, { n, w, word }); };
+  // Un mot pris dans une expression n'évoque rien d'autre (« sortie longue » n'est pas une sortie entre amis).
+  const used = new Set();
+  for (const ph of L.phrases) if (pt.includes(ph.text)) { add(ph.n, ph.w, ph.word); ph.word.split(' ').forEach((x) => used.add(x)); }
+  for (const w of ws) {
+    if (used.has(w)) continue;
+    for (const h of L.exact.get(w) || []) add(h.n, h.w, w);
+    if (!isUseful(w)) continue;
+    const b = wordBase(w);
+    const direct = L.byBase.get(b);
+    if (direct) direct.forEach((h) => add(h.n, h.w, w));
+    else if (b.length >= 6) (L.byKey.get(b.slice(0, 6)) || []).forEach((h) => add(h.n, h.w * 0.85, w));
+    // mot en cours de frappe : « footi » → footing
+    if (w === last && w.length >= 4 && !direct) {
+      for (const [s, list] of L.surfaces) if (s.length > w.length && s.startsWith(w)) list.forEach((h) => add(h.n, h.w * 0.75, w));
+    }
+  }
+  for (const [e, n] of Object.entries(EMOJI_NOTION)) if (q.includes(e)) add(n, 0.9, e);
+  for (const name of ix.partners) if (ws.includes(name)) add('couple', 1, name); // le prénom de l'autre profil
+  const list = [...hits.values()];
+  // Indice scolaire (niveau, matière…), ou au moins deux mots du métier : le vocabulaire scolaire compte pleinement.
+  const school = list.some((h) => h.n === 'ecole') || new Set(list.filter((h) => TEACH.has(h.n)).map((h) => h.word)).size >= 2;
+  if (school && ws.includes('t')) list.push({ n: 'ecole', w: 0.6, word: 't' }); // « T » = terminale, seulement dans ce cas
+  const ctxF = school ? 1 : ix.teacher ? 0.85 : 0.6;
+  const bases = new Set(ws.map(wordBase));
+  const raw = new Map();
+  const why = new Map();
+  const top = new Map();
+  for (const h of list) {
+    const n = L.byId.get(h.n);
+    if ([...n.not].some((x) => bases.has(x))) continue;
+    const w = h.w * (n.ctx ? ctxF : 1) * (n.hint && !ix.teacher ? 0.5 : 1); // niveaux, matières : l'école des enfants ?
+    raw.set(h.n, 1 - (1 - (raw.get(h.n) || 0)) * (1 - w));
+    if (w > (top.get(h.n) || 0)) { top.set(h.n, w); why.set(h.n, h.word); }
+  }
+  return { raw, why };
+}
+
+// Projets / sous-projets dont le NOM correspond aux notions du titre (ou est cité tel quel dans le titre).
+function logicRank(q, ix, lock, partial) {
+  const L = lexicon();
+  const { raw, why } = titleNotions(q, ix, partial);
+  const qws = plainWords(q).filter(isUseful);
+  const last = partial ? qws[qws.length - 1] : '';
+  const topics = [...raw].filter(([id]) => !L.byId.get(id).hint);
+  const contrib = (N) => {
+    let direct = 0;
+    let up = 0;
+    let best = 0;
+    let word = '';
+    for (const [t, st] of raw) {
+      // un autre sujet, sans rapport et nettement plus évoqué, rend celui-ci moins probable
+      const stronger = topics.some(([t2, s2]) => s2 >= st + 0.1 && !related(t, t2));
+      for (let n = t, d = 0; n; n = L.byId.get(n).parent, d++) {
+        const f = fitFor(N, n);
+        if (!f) continue;
+        const c = st * f * LEVEL[Math.min(d, LEVEL.length - 1)] * (stronger ? 0.7 : 1);
+        if (d === 0) direct = 1 - (1 - direct) * (1 - c); else up = Math.max(up, c);
+        if (c > best) { best = c; word = why.get(t); }
+        break; // la notion la plus précise que ce nom désigne
+      }
+    }
+    // Nom cité dans le titre (« Vbarthe », « Opti Todo ») : fort s'il s'agit d'un mot propre au projet.
+    for (const w of qws) {
+      for (const nw of N.ws) {
+        // mot courant (déjà pris en compte par les notions) : seulement tel quel, sans s'ajouter ;
+        // mot propre au projet : aussi au pluriel ou en cours de frappe, et il s'ajoute
+        const known = L.known.has(wordBase(nw));
+        const m = w === nw ? 1 : known || w.length < 3 ? 0 : wordBase(w) === wordBase(nw) ? 1 : w === last && nw.startsWith(w) ? 0.85 : 0;
+        if (!m) continue;
+        const v = m * (known ? 0.55 : 0.9);
+        direct = known ? Math.max(direct, v) : 1 - (1 - direct) * (1 - v);
+        if (v > best) { best = v; word = w; }
+      }
+    }
+    return { score: Math.max(direct, up), word };
+  };
+  const out = new Map();
+  const put = (c) => { const k = `${c.pid}|${c.sid}`; if (c.score > 0 && !(out.get(k)?.score >= c.score)) out.set(k, c); };
+  for (const P of ix.projects) {
+    if (lock.p && P.id !== lock.p) continue;
+    const pc = contrib(P);
+    if (!lock.p) put({ pid: P.id, sid: '', score: pc.score, own: pc.score, word: pc.word });
+    for (const S of P.subs) {
+      const sc = contrib(S);
+      if (sc.score) put({ pid: P.id, sid: S.id, score: 1 - (1 - sc.score) * (1 - 0.5 * pc.score), own: sc.score, word: sc.word });
+    }
+  }
+  // Un sous-projet bien désigné remplace son projet seul.
+  for (const c of [...out.values()]) {
+    const p = out.get(`${c.pid}|`);
+    if (c.sid && p && c.own >= 0.7 * p.score) out.delete(`${c.pid}|`);
+  }
+  return [...out.values()].sort((a, b) => b.score - a.score);
+}
+
+/* ----- Assemblage ----- */
+
+const H_SHOW = 0.3;  // historique : pastille
+const H_AUTO = 1.2;  // historique : présélection (≈ un même nom, ou 2 à 3 tâches très proches)
+const L_SHOW = 0.4;  // bon sens : pastille
+const L_AUTO = 0.75; // bon sens : présélection
+
+// Choix à présélectionner : l'historique s'il est net ; sinon le bon sens, s'il est net et ne contredit pas l'historique.
+function pickAuto(hist, logic) {
+  const h = hist[0];
+  const l = logic[0];
+  if (h) {
+    const total = hist.reduce((n, c) => n + c.score, 0);
+    if ((h.score >= H_AUTO || (h.n >= 3 && h.score >= 0.8)) && h.score / total >= 0.6) return h;
+    const byP = new Map();
+    for (const c of hist) byP.set(c.pid, (byP.get(c.pid) || 0) + c.score);
+    const [pid, ps] = [...byP].sort((a, b) => b[1] - a[1])[0];
+    if (ps >= H_AUTO && ps / total >= 0.7) return { pid, sid: '' }; // projet sûr, sous-projets partagés
+    if (l && l.score >= L_AUTO && l.pid === h.pid && (!h.sid || h.sid === l.sid)) return l;
+    return null;
+  }
+  if (!l || l.score < L_AUTO) return null;
+  const rival = logic.find((c) => c.pid !== l.pid);
+  if (rival && l.score - rival.score < 0.15) return null;
+  const twin = logic.find((c) => c !== l && c.pid === l.pid && c.sid && c.sid !== l.sid);
+  if (l.sid && twin && l.score - twin.score < 0.1) return { pid: l.pid, sid: '' };
+  return l;
+}
+
+// Titres déjà utilisés qui correspondent à ce qui est tapé (début de mot, dans n'importe quel ordre).
+function titleMatches(q, ix, lock) {
+  const qp = plainWords(q);
+  const qw = qp.filter((w) => !STOP_WORDS.has(w));
+  if (!qw.length || qw.join('').length < 3) return [];
+  const partial = !/\s$/.test(q);
+  const qPlain = qp.join(' ');
+  const out = [];
+  for (const g of ix.titles) {
+    if ((lock.p && g.pid !== lock.p) || (lock.s && g.sid !== lock.s) || g.plain === qPlain) continue;
+    let sc = 0;
+    for (let i = 0; i < qw.length; i++) {
+      const w = qw[i];
+      const k = wordKey(w);
+      const isLast = partial && i === qw.length - 1;
+      let best = 0;
+      g.ws.forEach((tw, j) => {
+        if (tw === w) best = 1;
+        else if (tw.startsWith(w) && (isLast || w.length >= 3)) best = Math.max(best, 0.8);
+        else if (w.length >= 4 && g.wk[j] === k) best = Math.max(best, 0.9);
+      });
+      if (!best) { sc = 0; break; }
+      sc += best;
+    }
+    if (!sc) continue;
+    if (g.plain.startsWith(qPlain)) sc += 1;
+    sc += Math.log2(1 + g.n) * 0.4 + 0.4 * Math.exp(-(now() - g.t) / (45 * 864e5));
+    out.push({ ...g, sc });
+  }
+  return out.sort((a, b) => b.sc - a.sc).slice(0, 3);
+}
+
+// Titre encore vide : les tâches qui reviennent souvent (sauf celles déjà en cours), pour les reprendre d'un toucher.
+function recentTitles(ix, lock) {
+  const w = (g) => g.n * (0.5 + Math.exp(-(now() - g.t) / (30 * 864e5)));
+  return ix.titles.filter((g) => g.n >= 2 && !g.open && (!lock.p || g.pid === lock.p) && (!lock.s || g.sid === lock.s))
+    .sort((a, b) => w(b) - w(a)).slice(0, 3);
+}
+
+function suggest(q, st) {
+  const { ix, lock } = st;
+  const res = { list: [], auto: null, titles: [], recent: [] };
+  if (!q.trim()) { res.recent = recentTitles(ix, lock); return res; }
+  if (plain(q).replace(/ /g, '').length < 3) return res; // une ou deux lettres : rien
+  res.titles = titleMatches(q, ix, lock);
+  if (lock.s) return res; // projet et sous-projet déjà fixés
+  const partial = !/[\s.,;:!?)]$/.test(q);
+  const keep = (c) => !lock.p || c.sid; // projet fixé : seul le sous-projet se propose
+  const hist = historyRank(q, ix, lock, partial).filter((c) => c.score >= H_SHOW && keep(c));
+  const logic = logicRank(q, ix, lock, partial).filter((c) => c.score >= L_SHOW && keep(c));
+  const list = hist.map((c) => ({
+    ...c, why: c.same ? `même nom${c.same > 1 ? ` ×${c.same}` : ''}` : `${c.n || 1} tâche${c.n > 1 ? 's' : ''} similaire${c.n > 1 ? 's' : ''}`,
+  }));
+  // le mot tel qu'il a été tapé (avec ses accents) pour expliquer la suggestion
+  const typed = new Map();
+  for (const tok of q.split(/[^\p{L}\p{N}]+/u)) { const p = plain(tok); if (p && !typed.has(p)) typed.set(p, tok.toLowerCase()); }
+  const pretty = (w) => w.split(' ').map((x) => typed.get(x) || x).join(' ');
+  for (const c of logic) {
+    if (list.some((h) => h.pid === c.pid && (h.sid === c.sid || !c.sid))) continue;
+    list.push({ ...c, why: `mot-clé « ${pretty(c.word)} »` });
+  }
+  res.list = list.slice(0, 3);
+  res.auto = pickAuto(hist, logic);
+  return res;
+}
+
+/* ----- Dans les fiches ----- */
+
+const sugForms = new WeakMap(); // fiche de création → état des suggestions
+
+// Branche les suggestions sur une fiche de création. lock : projet (et sous-projet) déjà fixés.
+function suggestInit(form, lock = {}) {
+  const input = form?.elements.title;
+  if (!input) return;
+  const st = {
+    ix: null, lock: { p: lock.p || '', s: lock.s || '' },
+    // default : projet par défaut ; auto : choisi par l'app ; manual : choisi à la main ; declined : suggestion refusée
+    mode: 'default', def: { pid: form.elements.projectId.value, sid: form.elements.subprojectId.value },
+    list: [], titles: [], recent: [], auto: null, sel: -1, timer: 0, row: '', ac: '',
+  };
+  sugForms.set(form, st);
+  const row = document.createElement('div');
+  row.className = 'sug';
+  row.setAttribute('aria-live', 'polite');
+  input.closest('label.field').insertAdjacentElement('afterend', row);
+  sugRender(form);
+  // L'index se prépare juste après l'affichage de la fiche (aussitôt prêt si les données n'ont pas changé).
+  setTimeout(() => {
+    if (!form.isConnected) return;
+    st.ix = suggestIndexCached();
+    suggestRefresh(form, document.activeElement === input && !!input.value.trim());
+  }, 20);
+}
+
+function suggestRefresh(form, showList) {
+  const st = sugForms.get(form);
+  if (!st || !st.ix || !form.isConnected) return;
+  Object.assign(st, suggest(form.elements.title.value, st));
+  if (st.mode === 'default' || st.mode === 'auto') {
+    if (st.auto) sugApply(form, st.auto, 'auto');
+    else if (st.mode === 'auto') sugApply(form, st.def, 'default'); // plus de suggestion nette : retour au choix par défaut
+  }
+  sugRender(form);
+  sugList(form, showList);
+}
+
+// Met ce projet / sous-projet dans la fiche.
+function sugApply(form, c, mode) {
+  const st = sugForms.get(form);
+  const el = form.elements;
+  const pid = st.lock.p || c.pid || '';
+  const sid = st.lock.s || (c.pid === pid ? c.sid || '' : '');
+  const changed = el.projectId.value !== pid || el.subprojectId.value !== sid;
+  el.projectId.value = pid;
+  el.subprojectId.value = sid;
+  st.mode = mode;
+  form.dataset.auto = mode !== 'auto' ? '' : st.lock.p ? 's' : sid ? 'ps' : 'p';
+  if (!changed) return;
+  pfRefresh(form);
+  if (mode === 'auto') {
+    for (const b of form.querySelectorAll('.pick-btn')) { b.classList.remove('flash'); void b.offsetWidth; b.classList.add('flash'); }
+  }
+}
+
+// Projet choisi à la main (menu) : il n'est plus jamais remplacé.
+function sugManual(form) {
+  const st = sugForms.get(form);
+  if (!st) return;
+  st.mode = 'manual';
+  form.dataset.auto = '';
+  sugRender(form);
+}
+
+// Pastilles sous le titre : projets suggérés, ou titres fréquents tant que le titre est vide.
+function sugRender(form) {
+  const st = sugForms.get(form);
+  const box = form.querySelector('.sug');
+  if (!st || !box) return;
+  const cur = { pid: form.elements.projectId.value, sid: form.elements.subprojectId.value };
+  const empty = !form.elements.title.value.trim();
+  let html = '';
+  if (st.list.length) {
+    html = st.list.map((c) => {
+      const P = getProject(c.pid);
+      const S = getSub(c.sid);
+      if (!P) return '';
+      const on = c.pid === cur.pid && (c.sid || '') === cur.sid;
+      const label = st.lock.p ? S?.name || '' : S ? `${P.name} › ${S.name}` : P.name;
+      const mark = on && st.mode === 'auto' ? ICON.close : on ? ICON.check : '';
+      return `<button type="button" class="sug-chip${on ? ' on' : ''}" data-action="sug-pick" data-p="${c.pid}" data-s="${c.sid || ''}" style="--c:${P.color}"
+        title="${esc(`${label} · ${c.why}`)}${on && st.mode === 'auto' ? ' · touche pour annuler' : ''}"><i></i><span>${esc(label)}</span><small>${esc(c.why)}</small>${mark}</button>`;
+    }).join('');
+  } else if (empty && st.recent.length) {
+    html = `<span class="sug-lead" title="Tâches fréquentes">↺</span>${st.recent.map((g, i) => `<button type="button" class="sug-chip title" data-action="sug-title" data-from="recent" data-i="${i}" style="--c:${colorOf(g.pid)}"><i></i><span>${esc(g.title)}</span></button>`).join('')}`;
+  } else if (empty && !st.lock.s) {
+    html = `<span class="sug-hint">✨ Le ${st.lock.p ? 'sous-projet' : 'projet'} se proposera d’après le nom</span>`;
+  }
+  if (html !== st.row) { st.row = html; box.innerHTML = html; }
+}
+
+// Liste des titres déjà utilisés, sous le champ (seulement pendant la frappe).
+function sugList(form, show) {
+  const st = sugForms.get(form);
+  const input = form.elements.title;
+  const field = input.closest('.emoji-field');
+  let ac = field.querySelector('.ac');
+  if (!show || !st.titles.length || document.activeElement !== input) {
+    ac?.remove();
+    st.sel = -1;
+    st.ac = '';
+    return;
+  }
+  const qw = plainWords(input.value).filter((w) => !STOP_WORDS.has(w));
+  const bold = (title) => title.split(/(\s+)/).map((part) => {
+    const words = plainWords(part);
+    return words.length && words.some((x) => qw.some((w) => x.startsWith(w))) ? `<b>${esc(part)}</b>` : esc(part);
+  }).join('');
+  const html = `<div class="ac-head">Déjà utilisées</div>${st.titles.map((g, i) => {
+    const P = getProject(g.pid);
+    const S = getSub(g.sid);
+    return `<button type="button" role="option" aria-selected="${i === st.sel}" class="ac-row${i === st.sel ? ' on' : ''}" data-action="sug-title" data-from="list" data-i="${i}">
+      <span class="ac-title">${bold(g.title)}</span>
+      <span class="ac-meta"><i style="--c:${P ? P.color : 'transparent'}"></i>${esc(P ? (S ? `${P.name} › ${S.name}` : P.name) : 'Sans projet')}${g.n > 1 ? ` · ${g.n} fois` : ''}</span></button>`;
+  }).join('')}`;
+  if (!ac) {
+    ac = document.createElement('div');
+    ac.className = 'ac';
+    ac.setAttribute('role', 'listbox');
+    field.appendChild(ac);
+  }
+  if (html !== st.ac) { st.ac = html; ac.innerHTML = html; }
+}
+
+sheet.addEventListener('input', (e) => {
+  const form = e.target.name === 'title' && e.target.form;
+  const st = form && sugForms.get(form);
+  if (!st) return;
+  st.sel = -1;
+  clearTimeout(st.timer);
+  st.timer = setTimeout(() => suggestRefresh(form, e.isTrusted), 90); // emoji ajouté par le sélecteur : pas de liste
+});
+sheet.addEventListener('focusin', (e) => {
+  const form = e.target.name === 'title' && e.target.form;
+  if (form && sugForms.has(form)) sugList(form, true);
+});
+sheet.addEventListener('focusout', (e) => {
+  const form = e.target.name === 'title' && e.target.form;
+  if (form && sugForms.has(form)) setTimeout(() => { if (document.activeElement !== e.target) sugList(form, false); }, 150);
+});
+// Toucher la liste ne retire pas le clavier.
+sheet.addEventListener('mousedown', (e) => { if (e.target.closest('.ac')) e.preventDefault(); });
+sheet.addEventListener('keydown', (e) => {
+  const form = e.target.name === 'title' && e.target.form;
+  const st = form && sugForms.get(form);
+  if (!st || !form.querySelector('.ac')) return;
+  const n = st.titles.length;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    st.sel = e.key === 'ArrowDown' ? (st.sel + 1 >= n ? -1 : st.sel + 1) : (st.sel - 1 < -1 ? n - 1 : st.sel - 1);
+    sugList(form, true);
+  } else if (e.key === 'Enter' && st.sel >= 0) {
+    e.preventDefault();
+    form.querySelector(`.ac-row[data-i="${st.sel}"]`)?.click();
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    e.stopPropagation();
+    sugList(form, false);
+  }
 });
 
 /* ---------- Ordre des projets (glisser la poignée ⋮⋮) ---------- */
@@ -3462,7 +4254,30 @@ const actions = {
     $('.side-strip')?.scrollTo(0, 0);
   },
   'proj-menu'() { temp.projMenu = !temp.projMenu; render(); },
-  emoji(el) { toggleEmojiPanel(el.closest('.emoji-field')); },
+  emoji(el) { el.closest('.emoji-field').querySelector('.ac')?.remove(); toggleEmojiPanel(el.closest('.emoji-field')); },
+  // Pastille de projet suggéré : la choisir ; toucher celle que l'app a présélectionnée la retire.
+  'sug-pick'(el) {
+    const form = el.closest('form');
+    const st = sugForms.get(form);
+    if (!st) return;
+    if (el.classList.contains('on')) {
+      if (st.mode === 'auto') sugApply(form, st.def, 'declined');
+    } else sugApply(form, { pid: el.dataset.p, sid: el.dataset.s }, 'manual');
+    sugRender(form);
+  },
+  // Titre déjà utilisé : reprend aussi son projet et son sous-projet.
+  'sug-title'(el) {
+    const form = el.closest('form');
+    const st = sugForms.get(form);
+    const g = st && (el.dataset.from === 'recent' ? st.recent : st.titles)[Number(el.dataset.i)];
+    if (!g) return;
+    const input = form.elements.title;
+    input.value = g.title;
+    if (!st.lock.s && st.ix.byP.has(g.pid) && (!st.lock.p || g.pid === st.lock.p)) sugApply(form, g, 'manual');
+    sugList(form, false);
+    suggestRefresh(form, false);
+    if (matchMedia('(pointer: fine)').matches) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+  },
   'emoji-tab'(el) { const panel = el.closest('.emoji-panel'); $('.emoji-search', panel).value = ''; fillEmojiPanel(panel, el.dataset.value); },
   'emoji-pick'(el) { pickEmoji(el); },
   'emoji-close'(el) { el.closest('.emoji-panel')?.remove(); },
@@ -3620,6 +4435,7 @@ const actions = {
       form.elements.subprojectId.value = val;
     }
     pfRefresh(form);
+    sugManual(form);
     if (form.dataset.id && form.isConnected) { commitTaskForm(form); render(); }
   },
   'clean-projects'() {
