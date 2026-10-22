@@ -150,14 +150,14 @@ body:not([data-tab="tasks"]):not([data-tab="today"]):not([data-in-project]) .fab
 /* ---------- Tâches ---------- */
 .list { display: flex; flex-direction: column; gap: 8px; }
 .task {
-  display: flex; align-items: center; gap: 10px;
+  position: relative; display: flex; align-items: center; gap: 10px;
   background: var(--card); border-radius: var(--radius);
   padding: 10px 10px 10px 12px; box-shadow: var(--shadow);
   border-left: 4px solid var(--c);
 }
 .task.running { background: color-mix(in srgb, var(--run-soft) 70%, var(--card)); }
 .check {
-  width: 28px; height: 28px; border-radius: 50%; flex: none;
+  position: relative; width: 28px; height: 28px; border-radius: 50%; flex: none;
   border: 2px solid color-mix(in srgb, var(--c) 55%, var(--line));
   display: grid; place-items: center; color: transparent;
 }
@@ -851,12 +851,8 @@ body.is-sorting, body.is-sorting * { cursor: grabbing !important; user-select: n
   transition: transform .22s cubic-bezier(.2, .8, .2, 1), opacity .2s;
 }
 .day-card.running { background: color-mix(in srgb, var(--run-soft) 70%, var(--card)); }
-.day-card.done .check, .day-card.validating .check { background: var(--c); border-color: var(--c); color: #fff; }
+.day-card.done .check { background: var(--c); border-color: var(--c); color: #fff; }
 .day-card.done .day-title { text-decoration: line-through; color: var(--muted); }
-.day-card.validating { animation: card-done .38s ease forwards; }
-.day-card.validating .check { animation: check-pop .35s ease; }
-@keyframes check-pop { 50% { transform: scale(1.3); } }
-@keyframes card-done { to { opacity: .5; transform: scale(.98); } }
 .day-main { flex: 1; min-width: 0; cursor: pointer; padding: 2px 0; }
 .day-title { font-weight: 640; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .day-star svg { width: 13px; height: 13px; margin: 0 4px -1px 0; color: #f59e0b; fill: currentColor; stroke-width: 1.5; }
@@ -1137,3 +1133,84 @@ body.placing .cal-col.due::before {
   padding: 1px 6px; border-radius: 6px; background: var(--warn); color: #fff; font-size: 10px; font-weight: 800; white-space: nowrap;
 }
 @media (min-width: 420px) { .due-chip { padding: 0 14px; font-size: 14px; } .due-row { gap: 6px; } }
+
+/* ---------- Tâche terminée : coche, éclat, barré, reflet, sortie ---------- */
+.completing { pointer-events: none; animation: done-lift .6s cubic-bezier(.3, .7, .3, 1) backwards; } /* terminé avant la sortie : le glissement peut s'animer */
+@keyframes done-lift {
+  30% { transform: scale(1.012); box-shadow: 0 10px 26px color-mix(in srgb, var(--c) 24%, transparent); }
+  100% { transform: scale(1); }
+}
+/* la coche se remplit d'un rebond, puis le ✓ se dessine */
+.completing .check { color: #fff; border-color: var(--c); animation: tick-pop .55s cubic-bezier(.3, 1.6, .5, 1) both; }
+.completing .check::before {
+  content: ""; position: absolute; inset: -2px; border-radius: 50%; background: var(--c);
+  animation: tick-fill .34s cubic-bezier(.3, 1.4, .6, 1) both;
+}
+.completing .check::after {
+  content: ""; position: absolute; inset: -2px; border-radius: 50%; border: 2px solid var(--c);
+  animation: tick-ring .65s .06s cubic-bezier(.2, .7, .3, 1) both;
+}
+.completing .check svg { position: relative; z-index: 1; stroke-dasharray: 24; stroke-dashoffset: 24; animation: tick-draw .32s .14s cubic-bezier(.65, 0, .35, 1) forwards; }
+@keyframes tick-pop { 0% { transform: scale(1); } 22% { transform: scale(.78); } 58% { transform: scale(1.18); } 100% { transform: scale(1); } }
+@keyframes tick-fill { from { transform: scale(0); } }
+@keyframes tick-ring { from { transform: scale(1); opacity: .75; } to { transform: scale(2.4); opacity: 0; } }
+@keyframes tick-draw { to { stroke-dashoffset: 0; } }
+/* éclat : rayons et paillettes qui partent du centre de la coche */
+.done-burst { --r: 15px; position: absolute; left: 50%; top: 50%; width: 0; height: 0; z-index: 2; pointer-events: none; }
+.done-burst i { position: absolute; left: 0; top: 0; border-radius: 99px; opacity: 0; }
+.done-burst .ray {
+  width: 3px; height: 8px; margin: -4px 0 0 -1.5px; background: var(--c);
+  animation: burst-ray .5s .1s cubic-bezier(.2, .8, .3, 1) forwards;
+}
+.done-burst .dot {
+  width: 5px; height: 5px; margin: -2.5px 0 0 -2.5px; background: color-mix(in srgb, var(--c) 55%, #fff);
+  animation: burst-dot .62s calc(.12s + var(--t)) cubic-bezier(.2, .8, .3, 1) forwards;
+}
+.done-burst .dot.gold { background: #fbbf24; }
+@keyframes burst-ray {
+  0% { opacity: 1; transform: rotate(var(--a)) translateY(calc(var(--r) * -1)) scaleY(1); }
+  100% { opacity: 0; transform: rotate(var(--a)) translateY(calc(var(--r) * -1 - 13px)) scaleY(.25); }
+}
+@keyframes burst-dot {
+  0% { opacity: 1; transform: rotate(var(--a)) translateY(calc(var(--r) * -1 + 3px)) scale(1); }
+  100% { opacity: 0; transform: rotate(var(--a)) translateY(calc(var(--r) * -1 - var(--d))) scale(.3); }
+}
+/* le titre se barre de gauche à droite en passant en gris */
+.completing :is(.task-title, .day-title) { color: var(--muted); transition: color .4s .12s; }
+.strike {
+  background: linear-gradient(currentColor, currentColor) 0 58% / 0 2px no-repeat;
+  -webkit-box-decoration-break: clone; box-decoration-break: clone;
+  animation: strike .42s .12s cubic-bezier(.65, 0, .35, 1) forwards;
+}
+@keyframes strike { to { background-size: 100% 2px; } }
+/* reflet lumineux qui balaie la carte */
+.done-shine { position: absolute; inset: 0; border-radius: inherit; overflow: hidden; pointer-events: none; }
+.done-shine i {
+  position: absolute; top: 0; bottom: 0; left: 0; width: 55%; transform: translateX(-130%) skewX(-18deg);
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--c) 14%, transparent) 30%, rgba(255, 255, 255, .55) 50%, color-mix(in srgb, var(--c) 14%, transparent) 70%, transparent);
+  animation: shine .75s .18s cubic-bezier(.4, 0, .2, 1) forwards;
+}
+@media (prefers-color-scheme: dark) { .done-shine i { background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--c) 22%, transparent) 30%, rgba(255, 255, 255, .16) 50%, color-mix(in srgb, var(--c) 22%, transparent) 70%, transparent); } }
+@keyframes shine { to { transform: translateX(260%) skewX(-18deg); } }
+/* sortie : la carte glisse et s'efface, la liste se resserre */
+.leaving {
+  overflow: hidden; opacity: 0; transform: translateX(18px) scale(.98); animation: none !important;
+  padding-top: 0 !important; padding-bottom: 0 !important;
+  transition: height .34s cubic-bezier(.4, 0, .2, 1), margin .34s cubic-bezier(.4, 0, .2, 1), padding .34s cubic-bezier(.4, 0, .2, 1), opacity .24s ease, transform .34s ease;
+}
+/* pastille ✓ au centre, quand il n'y a pas de carte à animer */
+.done-hud { position: fixed; left: 50%; top: 42%; z-index: 80; pointer-events: none; transform: translate(-50%, -50%); }
+.done-hud .check { width: 68px; height: 68px; border: 0; box-shadow: 0 14px 34px color-mix(in srgb, var(--c) 42%, transparent); }
+.done-hud .check svg { width: 34px; height: 34px; stroke-width: 2.6; }
+.done-hud .done-burst { --r: 40px; }
+.done-hud .done-burst .ray { width: 4px; height: 12px; margin: -6px 0 0 -2px; }
+.done-hud .done-burst .dot { width: 7px; height: 7px; margin: -3.5px 0 0 -3.5px; }
+.done-hud.completing { animation: done-hud .95s ease both; }
+@keyframes done-hud {
+  0% { opacity: 0; transform: translate(-50%, -50%) scale(.6); }
+  18%, 72% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  100% { opacity: 0; transform: translate(-50%, -50%) scale(.92); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .completing, .completing *, .completing *::before, .completing *::after, .done-hud { animation-duration: .01ms !important; animation-delay: 0s !important; transition-duration: .01ms !important; }
+}

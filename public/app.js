@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.9.0';
+const VERSION = '2.10.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -899,7 +899,7 @@ sheet.addEventListener('close', () => {
   if (sheet.open) return; // une autre fiche s'est déjà rouverte entre-temps
   $$('.plan-preview.range').forEach((x) => x.remove());
   const f = $('form[data-form="task"]', sheet);
-  if (f?.dataset.id) { commitTaskForm(f); render(); }
+  if (f?.dataset.id) { commitTaskForm(f); if (!doneAnims) render(); } // une animation de fin de tâche redessinera
   sheet.innerHTML = '';
   if (history.state?.sheet) history.back();
 });
@@ -3916,6 +3916,91 @@ function viewToday() {
 
 /* ----- Valider, reporter, caler ----- */
 
+/* Animation « tâche terminée » : la coche se remplit d'un rebond et le ✓ se dessine, un anneau et un éclat
+   de petits rayons partent autour, le titre se barre de gauche à droite, un reflet balaie la carte,
+   puis la carte glisse et la liste se resserre. Retour haptique en même temps. */
+
+let doneAnims = 0; // animations en cours : l'écran n'est redessiné qu'à la fin de la dernière
+
+// Retour haptique : vibration (Android) ; sur iPhone (iOS 18 et plus), le petit « clic » d'un interrupteur système.
+function haptic() {
+  navigator.vibrate?.([10, 40, 18]);
+  if (!isIOS()) return;
+  try {
+    const label = document.createElement('label');
+    label.setAttribute('aria-hidden', 'true');
+    label.style.display = 'none';
+    const sw = Object.assign(document.createElement('input'), { type: 'checkbox' });
+    sw.setAttribute('switch', '');
+    label.appendChild(sw);
+    document.body.appendChild(label);
+    label.click();
+    label.remove();
+  } catch (_) { /* pas de retour haptique */ }
+}
+
+// Éclat autour d'une coche : 8 petits rayons et 6 paillettes (dont 2 dorées).
+function doneBurst(check) {
+  if (!check) return;
+  const burst = document.createElement('span');
+  burst.className = 'done-burst';
+  burst.setAttribute('aria-hidden', 'true');
+  burst.innerHTML = [...Array(8)].map((_, i) => `<i class="ray" style="--a:${i * 45 + 22.5}deg"></i>`).join('')
+    + [...Array(6)].map((_, i) => `<i class="dot${i % 3 === 1 ? ' gold' : ''}" style="--a:${Math.round(i * 60 + Math.random() * 30 - 15)}deg;--d:${Math.round(16 + Math.random() * 10)}px;--t:${Math.round(Math.random() * 70)}ms"></i>`).join('');
+  check.appendChild(burst);
+}
+
+// Sans carte à animer (fiche d'un créneau, planning, carte « Maintenant ») : une pastille ✓ au centre de l'écran.
+function doneHud(color) {
+  const hud = document.createElement('div');
+  hud.className = 'done-hud completing';
+  hud.style.setProperty('--c', color);
+  hud.innerHTML = `<span class="check">${ICON.check}</span>`;
+  if (!matchMedia('(prefers-reduced-motion: reduce)').matches) doneBurst($('.check', hud));
+  document.body.appendChild(hud);
+  setTimeout(() => hud.remove(), 1000);
+}
+
+// La carte de la tâche qu'on vient de terminer : celle qu'on a cochée, sinon celle de la liste derrière la fiche.
+function doneCard(id, el) {
+  return el?.closest('#view .task, #view .day-card') || $(`#view .check[data-id="${id}"]`)?.closest('.task, .day-card') || undefined;
+}
+
+// Joue l'animation sur la carte, puis redessine l'écran. La carte quitte sa liste, sauf dans le programme
+// de « Ma journée » où le créneau reste en place, barré. card : undefined → pastille au centre ; null → rien.
+function playDone(card, color) {
+  haptic();
+  if (!card?.isConnected) {
+    if (card === undefined) doneHud(color);
+    render();
+    return;
+  }
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const title = card.querySelector('.task-title, .day-title');
+  if (title && !title.querySelector('.strike')) title.innerHTML = `<span class="strike">${title.innerHTML}</span>`;
+  card.classList.add('completing');
+  if (!reduce) {
+    doneBurst(card.querySelector('.check'));
+    card.insertAdjacentHTML('beforeend', '<span class="done-shine" aria-hidden="true"><i></i></span>');
+  }
+  doneAnims++;
+  const finish = () => { if (--doneAnims === 0) render(); };
+  if (reduce) { setTimeout(finish, 280); return; }
+  if (card.closest('.agenda')) { setTimeout(finish, 760); return; }
+  setTimeout(() => {
+    // la carte glisse et s'efface pendant que la liste se resserre (l'espace entre les cartes compris)
+    const box = card.closest('.swipe-wrap') || card;
+    const gap = parseFloat(getComputedStyle(box.parentElement).rowGap) || 0;
+    box.style.height = `${box.offsetHeight}px`;
+    void box.offsetHeight;
+    box.classList.add('leaving');
+    box.style.height = '0px';
+    if (box.nextElementSibling) box.style.marginBottom = `${-gap}px`;
+    else if (box.previousElementSibling) box.style.marginTop = `${-gap}px`;
+    setTimeout(finish, 340);
+  }, 640);
+}
+
 function celebrate() {
   buzz();
   if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
@@ -3934,7 +4019,8 @@ function celebrate() {
 }
 
 // Valider (ou dévalider) un bloc ou une tâche de la journée.
-async function validateToday(kind, id) {
+// card : la carte à animer (undefined : pastille au centre ; null : déjà partie d'un balayage).
+async function validateToday(kind, id, card) {
   const before = todayModel();
   if (kind === 'plan') {
     const p = state.plans.find((x) => x.id === id);
@@ -3954,7 +4040,8 @@ async function validateToday(kind, id) {
     // Si la tâche a d'autres créneaux à venir, seul ce créneau est validé.
     const later = state.plans.filter((x) => x.taskId === t.id && x !== p && !x.done && x.start > now()).sort((a, b) => a.start - b.start)[0];
     if (!later) { t.done = true; t.doneAt = now(); }
-    save(); render();
+    save();
+    playDone(card, colorOf(t.projectId));
     doneToast(before, `${later ? `Créneau validé · suite ${planLabel(later)}` : 'Bravo, tâche terminée ✓'}${countedLabel(extra)}`, () => {
       Object.assign(p, { done: prev.pDone });
       Object.assign(t, { done: prev.tDone, doneAt: prev.tAt });
@@ -3971,7 +4058,8 @@ async function validateToday(kind, id) {
     t.done = true;
     t.doneAt = now();
     state.sessions.push(...extra);
-    save(); render();
+    save();
+    playDone(card, colorOf(t.projectId));
     doneToast(before, `Bravo, tâche terminée ✓${countedLabel(extra)}`, () => {
       t.done = false; t.doneAt = null;
       state.sessions = state.sessions.filter((s) => !extra.includes(s));
@@ -4023,7 +4111,7 @@ const countedLabel = (list) => (list.length ? ` · ${fmtDur(list.reduce((n, s) =
 function doneToast(before, msg, undo) {
   const after = todayModel();
   const finished = after.total && after.doneN === after.total && before.doneN < before.total;
-  if (finished) celebrate();
+  if (finished) setTimeout(celebrate, 450); // après l'animation de la carte
   toast(finished ? 'Journée bouclée, bravo ! 🎉' : msg, { label: 'Annuler', fn: undo });
 }
 
@@ -4101,7 +4189,7 @@ document.addEventListener('touchend', () => {
   c.style.transform = `translateX(${dx > 0 ? 110 : -110}%)`;
   buzz();
   const { swipe: kind, id } = c.dataset;
-  setTimeout(() => (dx > 0 ? validateToday(kind, id) : postponeToday(kind, id)), 200);
+  setTimeout(() => (dx > 0 ? validateToday(kind, id, null) : postponeToday(kind, id)), 200);
 });
 document.addEventListener('touchcancel', () => { resetCardSwipe(cs.card); cs.card = null; });
 
@@ -4449,7 +4537,9 @@ const actions = {
     t.done = !t.done;
     t.doneAt = t.done ? now() : null;
     state.sessions.push(...extra);
-    save(); render(); buzz();
+    save();
+    if (t.done) playDone(doneCard(t.id, el), colorOf(t.projectId));
+    else { render(); buzz(); }
     if (t.done) {
       toast(`Tâche terminée${countedLabel(extra)}`, { label: 'Annuler', fn: () => {
         t.done = false; t.doneAt = null;
@@ -4465,16 +4555,7 @@ const actions = {
     const projectId = el.dataset.project || temp.openProject;
     openTaskSheet(null, projectId ? { projectId, subprojectId: el.dataset.sub || null } : undefined);
   },
-  'today-done'(el) {
-    const { kind, id } = el.dataset;
-    const card = el.closest('.day-card');
-    const already = kind === 'plan' ? planDone(state.plans.find((x) => x.id === id) || {}) : !!getTask(id)?.done;
-    if (card && !already) { // petite animation avant de passer la tâche en « fait »
-      card.classList.add('validating');
-      buzz();
-      setTimeout(() => validateToday(kind, id), 380);
-    } else validateToday(kind, id);
-  },
+  'today-done'(el) { validateToday(el.dataset.kind, el.dataset.id, el.closest('.day-card') || undefined); },
   'today-later'(el) { postponeToday(el.dataset.kind, el.dataset.id); },
   'pf-open'(el) {
     const field = el.closest('.pick-field');
