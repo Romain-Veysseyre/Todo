@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.10.0';
+const VERSION = '2.11.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -433,11 +433,11 @@ function render() {
   if (tab !== 'plan') temp.placing = null;
   document.body.classList.toggle('placing', !!temp.placing);
   if (!temp.placing) $('.carry-ghost')?.remove();
-  $('#title').textContent = openP ? openP.name : { today: 'Ma journée', tasks: 'Tâches', plan: 'Planning', projects: 'Projets', stats: 'Statistiques' }[tab];
+  $('#title').textContent = openP ? openP.name : { today: 'Ma journée', tasks: 'Tâches', plan: 'Planning', projects: 'Projets', journal: 'Journal', stats: 'Statistiques' }[tab];
   $$('.tabbar button').forEach((b) => b.classList.toggle('on', b.dataset.value === tab));
   renderBanner();
   const sideScroll = $('.side-list')?.scrollTop || 0;
-  $('#view').innerHTML = openP ? viewProject(openP) : tab === 'projects' ? viewProjects() : tab === 'stats' ? viewStats() : tab === 'plan' ? viewPlan() : tab === 'today' ? viewToday() : viewTasks();
+  $('#view').innerHTML = openP ? viewProject(openP) : tab === 'projects' ? viewProjects() : tab === 'stats' ? viewStats() : tab === 'plan' ? viewPlan() : tab === 'today' ? viewToday() : tab === 'journal' ? viewJournal() : viewTasks();
   if (sideScroll && $('.side-list')) $('.side-list').scrollTop = sideScroll;
   tick();
 }
@@ -1992,8 +1992,10 @@ function viewPlan() {
       ${pls.map((it) => {
         const t = getTask(it.p.taskId);
         const running = !!timerOf(t.id);
-        return `<div class="plan-block${t.done || it.p.done ? ' done' : ''}${running ? ' running' : ''}" data-action="open-plan" data-id="${it.p.id}" style="${boxStyle(it)};--c:${colorOf(t.projectId)}">
-          <b>${t.starred ? '★ ' : ''}${esc(t.title)}</b><span>${it.p.series ? '↻ ' : ''}${shortLabel(it.s0)}–${shortLabel(it.e)}</span>
+        const done = t.done || it.p.done; // réalisé : badge ✓ et « Fait »
+        const spent = done ? state.sessions.reduce((n, x) => n + (x.taskId === t.id ? overlap(x, dateAt(key, 0), dateAt(key, DAY_MIN)) : 0), 0) : 0;
+        return `<div class="plan-block${done ? ' done' : ''}${running ? ' running' : ''}" data-action="open-plan" data-id="${it.p.id}" style="${boxStyle(it)};--c:${colorOf(t.projectId)}">
+          ${done ? `<i class="pb-done" aria-hidden="true">${ICON.check}</i>` : ''}<b>${t.starred ? '★ ' : ''}${esc(t.title)}</b><span>${done ? 'Fait · ' : it.p.series ? '↻ ' : ''}${shortLabel(it.s0)}–${shortLabel(it.e)}${spent ? `<em class="pb-spent"> · ⏱ ${fmtDur(spent)}</em>` : ''}</span>
           <i class="plan-resize" aria-hidden="true"></i></div>`;
       }).join('')}
       ${key === today && nowMin >= VIEW_START ? `<div class="now-line" style="top:${posPct(nowMin)}%"></div>` : ''}
@@ -3706,6 +3708,9 @@ function dayAgenda(day) {
   return [...evs, ...pls].sort((a, b) => a.s - b.s || (a.kind === 'event' ? -1 : 1));
 }
 
+// Ce qui reste à faire dans l'agenda d'un jour : un créneau réalisé libère sa place.
+const isOpenItem = (i) => i.kind !== 'plan' || !planDone(i.p);
+
 // Créneaux libres (30 min et plus) entre « from » et 23h.
 function freeGaps(items, from, to = DAY_WINDOW_END) {
   const gaps = [];
@@ -3722,7 +3727,7 @@ function freeGaps(items, from, to = DAY_WINDOW_END) {
 
 function nextFreeSlot(day) {
   const from = Math.max(VIEW_START, Math.ceil(nowMin() / 15) * 15);
-  const gap = freeGaps(dayAgenda(day), from)[0];
+  const gap = freeGaps(dayAgenda(day).filter(isOpenItem), from)[0];
   return gap ? { s: gap.s, dur: Math.min(PLAN_DUR, gap.e - gap.s) } : null;
 }
 
@@ -3744,7 +3749,7 @@ function todayModel() {
   const extraDone = state.tasks.filter((t) => t.done && t.doneAt >= d0 && t.doneAt < d1 && !plannedIds.has(t.id));
   const total = blocks.length + due.length + extraDone.length;
   const doneN = blocks.filter((i) => planDone(i.p)).length + extraDone.length;
-  return { day, d0, d1, items, blocks, spans, due, prio, extraDone, total, doneN };
+  return { day, d0, d1, items, open: items.filter(isOpenItem), blocks, spans, due, prio, extraDone, total, doneN };
 }
 
 // Bloc de tâche à valider (agenda, « à faire aujourd'hui », « terminé »).
@@ -3813,8 +3818,8 @@ function viewToday() {
 
   // Carte « Maintenant » : créneau en cours, sinon le prochain
   const open = (i) => i.kind === 'plan' && !planDone(i.p);
-  const current = m.items.find((i) => open(i) && i.s <= nm && nm < i.e);
-  const next = m.items.find((i) => open(i) && i.s > nm);
+  const current = m.open.find((i) => open(i) && i.s <= nm && nm < i.e);
+  const next = m.open.find((i) => open(i) && i.s > nm);
   const busyEvent = m.items.find((i) => i.kind === 'event' && i.s <= nm && nm < i.e);
   const focus = current || next;
   let nowCard = '';
@@ -3837,9 +3842,9 @@ function viewToday() {
     </section>`;
   }
 
-  // Programme : agenda + créneaux libres + ligne « maintenant »
+  // Programme : ce qui reste à faire + créneaux libres + ligne « maintenant » (les créneaux réalisés le quittent)
   const from = Math.max(VIEW_START, Math.ceil(nm / 15) * 15);
-  const rows = [...m.items, ...freeGaps(m.items, from).map((g) => ({ kind: 'gap', ...g }))]
+  const rows = [...m.open, ...freeGaps(m.open, from).map((g) => ({ kind: 'gap', ...g }))]
     .sort((a, b) => a.s - b.s || (a.kind === 'gap' ? 1 : -1));
   const nowRule = `<li class="ag-now"><time>${minLabel(nm)}</time><div class="rule"></div></li>`;
   let placed = false;
@@ -3889,12 +3894,26 @@ function viewToday() {
       ${m.prio.length > 4 ? `<button type="button" class="prio-more" data-action="toggle-prio">${temp.showAllPrio ? 'Voir moins' : `Voir les ${m.prio.length - 4} autres`}</button>` : ''}
     </div>` : '';
 
+  // Réalisées aujourd'hui (créneaux et tâches) : rangées dans un petit menu discret, avec « ↺ » pour annuler.
   const doneItems = [
-    ...m.blocks.filter((i) => planDone(i.p)).map((i) => ({ t: i.t, p: i.p, dur: i.e - i.s })),
-    ...m.extraDone.map((t) => ({ t })),
-  ];
-  const doneHtml = doneItems.length ? `<div class="section-title"><span>Terminé aujourd’hui · ${doneItems.length}</span><button type="button" data-action="toggle-today-done">${temp.showTodayDone ? 'Masquer' : 'Afficher'}</button></div>
-    ${temp.showTodayDone ? `<div class="list">${doneItems.map((x) => todayCard({ ...x, done: true, totals })).join('')}</div>` : ''}` : '';
+    ...m.blocks.filter((i) => planDone(i.p)).map((i) => ({ t: i.t, p: i.p, at: i.p.doneAt || i.t.doneAt || dateAt(m.day, i.e) })),
+    ...m.extraDone.map((t) => ({ t, at: t.doneAt })),
+  ].sort((a, b) => b.at - a.at);
+  const spentToday = (t) => state.sessions.reduce((n, x) => n + (x.taskId === t.id ? overlap(x, m.d0, m.d1) : 0), 0);
+  const doneHtml = doneItems.length ? `<details class="done-today"${temp.showTodayDone ? ' open' : ''}>
+      <summary><span class="dt-ic">${ICON.check}</span><span>${doneItems.length} réalisée${doneItems.length > 1 ? 's' : ''} aujourd’hui</span>${ICON.down}</summary>
+      <ul class="dt-list">${doneItems.map(({ t, p, at }) => {
+        const ms = spentToday(t);
+        return `<li class="dt-row" style="--c:${colorOf(t.projectId)}">
+          <span class="dt-tick">${ICON.check}</span>
+          <button type="button" class="dt-main" data-action="${p ? 'open-plan' : 'open-task'}" data-id="${p ? p.id : t.id}"><b>${esc(t.title)}</b>
+            <small>${clockLabel(at)}${t.projectId ? ` · ${esc(pathLabel(t.projectId, t.subprojectId))}` : ''}${ms ? ` · ⏱ ${fmtDur(ms)}` : ''}</small></button>
+          <button type="button" class="dt-undo" data-action="today-done" data-kind="${p ? 'plan' : 'task'}" data-id="${p ? p.id : t.id}" title="Remettre à faire" aria-label="Remettre à faire">↺</button>
+        </li>`;
+      }).join('')}
+        <li class="dt-more"><button type="button" data-action="tab" data-value="journal">Tout le journal ${ICON.right}</button></li>
+      </ul>
+    </details>` : '';
 
   const tm = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
   const tk = ymd(tm);
@@ -3913,6 +3932,145 @@ function viewToday() {
 
   return `${installHint()}${hero}${nowCard}${hint}${spansHtml}${agendaHtml}${dueHtml}${prioHtml}${doneHtml}${tomorrow}`;
 }
+
+/* ---------- Journal : les tâches réalisées, jour par jour ---------- */
+
+// Tâches terminées, et créneaux validés d'une tâche encore en cours (tâche régulière, tâche en plusieurs fois),
+// du plus récent au plus ancien. Un créneau validé le jour où sa tâche est terminée ne compte qu'une fois.
+function journalEntries() {
+  const tasks = new Map(state.tasks.map((t) => [t.id, t]));
+  const doneDay = new Map();
+  const out = [];
+  for (const t of state.tasks) {
+    if (!t.done || !t.doneAt) continue;
+    out.push({ kind: 'task', id: t.id, t, at: t.doneAt });
+    doneDay.set(t.id, ymd(new Date(t.doneAt)));
+  }
+  const slot = new Map();
+  for (const p of state.plans) {
+    const t = p.done && tasks.get(p.taskId);
+    if (!t) continue;
+    const at = p.doneAt || p.end; // anciens créneaux validés : à la fin du créneau
+    if (doneDay.get(t.id) === ymd(new Date(at))) { slot.set(t.id, p); continue; }
+    out.push({ kind: 'plan', id: p.id, t, p, at });
+  }
+  for (const e of out) if (e.kind === 'task') e.p = slot.get(e.t.id);
+  return out.sort((a, b) => b.at - a.at);
+}
+
+const JR_PAGE = 14; // jours affichés, puis « Voir plus »
+const clockLabel = (ts) => { const d = new Date(ts); return minLabel(d.getHours() * 60 + d.getMinutes()); }; // « 8h05 »
+
+function jrDayLabel(day) {
+  const diff = Math.round((startOfDay(new Date()) - parseYmd(day)) / 864e5);
+  if (diff === 0) return 'Aujourd’hui';
+  if (diff === 1) return 'Hier';
+  const d = parseYmd(day);
+  return cap(fmt(d, { weekday: 'long', day: 'numeric', month: 'long', year: d.getFullYear() === new Date().getFullYear() ? undefined : 'numeric' }));
+}
+
+function viewJournal() {
+  const all = journalEntries();
+  const today = ymd(new Date());
+  const count = new Map();
+  for (const e of all) { const k = ymd(new Date(e.at)); count.set(k, (count.get(k) || 0) + 1); }
+  // chiffres : aujourd'hui, cette semaine (et la précédente), série de jours d'affilée
+  const n = new Date();
+  const week = +new Date(n.getFullYear(), n.getMonth(), n.getDate() - ((n.getDay() + 6) % 7));
+  const thisWeek = all.filter((e) => e.at >= week).length;
+  const lastWeek = all.filter((e) => e.at >= week - 7 * 864e5 && e.at < week).length;
+  let streak = 0;
+  const d = new Date();
+  if (!count.has(today)) d.setDate(d.getDate() - 1);
+  while (count.has(ymd(d))) { streak++; d.setDate(d.getDate() - 1); }
+  const days = [...Array(14)].map((_, i) => { const x = new Date(); x.setDate(x.getDate() - 13 + i); return ymd(x); });
+  const max = Math.max(1, ...days.map((k) => count.get(k) || 0));
+  const diff = thisWeek - lastWeek;
+  const hero = `<section class="jr-hero">
+      <div class="jr-kpis">
+        <div class="jr-kpi"><b>${count.get(today) || 0}</b><small>aujourd’hui</small></div>
+        <div class="jr-kpi"><b>${thisWeek}</b><small>cette semaine</small>${diff > 0 ? `<em>+${diff} vs sem. dernière</em>` : lastWeek ? `<em>sem. dernière : ${lastWeek}</em>` : ''}</div>
+        <div class="jr-kpi"><b>${streak ? `${streak}<span>🔥</span>` : '0'}</b><small>jour${streak > 1 ? 's' : ''} d’affilée</small></div>
+      </div>
+      <div class="jr-bars" role="img" aria-label="Tâches réalisées sur les 14 derniers jours">${days.map((k) => {
+        const c = count.get(k) || 0;
+        return `<button type="button" class="jr-bar${k === today ? ' today' : ''}" data-action="jr-day" data-value="${k}" title="${esc(jrDayLabel(k))} : ${c} réalisée${c > 1 ? 's' : ''}"${c ? '' : ' disabled'}>
+          <i style="height:${Math.max(4, Math.round((c / max) * 100))}%"></i><span>${fmt(parseYmd(k), { weekday: 'narrow' })}</span></button>`;
+      }).join('')}</div>
+    </section>`;
+  if (!all.length) {
+    return `${hero}<div class="jr-empty"><span class="jr-empty-ic">${ICON.check}</span><b>Ton journal est encore vide</b>
+      <p>Chaque tâche que tu termines viendra s’ajouter ici, jour par jour, avec son projet et le temps passé.</p></div>`;
+  }
+  // filtres : recherche et projets
+  const per = new Map();
+  for (const e of all) { const k = getProject(e.t.projectId) ? e.t.projectId : 'none'; per.set(k, (per.get(k) || 0) + 1); }
+  const cur = per.has(temp.jrProject) ? temp.jrProject : 'all';
+  const chip = (value, label, color, nb) => `<button type="button" class="chip${cur === value ? ' on' : ''}" data-action="jr-project" data-value="${value}"${color ? ` style="--c:${color}"` : ''}>${color ? '<i></i>' : ''}${esc(label)} <small>${nb}</small></button>`;
+  const chips = per.size > 1 ? `<div class="chips jr-chips">${chip('all', 'Tout', '', all.length)}${state.projects.filter((p) => per.has(p.id)).map((p) => chip(p.id, p.name, p.color, per.get(p.id))).join('')}${per.has('none') ? chip('none', 'Sans projet', '', per.get('none')) : ''}</div>` : '';
+  return `${hero}
+    <label class="jr-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+      <input type="search" value="${esc(temp.jrQuery || '')}" placeholder="Rechercher une tâche réalisée" aria-label="Rechercher une tâche réalisée" autocomplete="off" enterkeyhint="search"></label>
+    ${chips}
+    <div class="jr-results">${journalResults(all)}</div>`;
+}
+
+// Liste du journal, jour par jour (filtres et recherche appliqués).
+function journalResults(all = journalEntries()) {
+  const q = plain(temp.jrQuery || '');
+  const proj = temp.jrProject || 'all';
+  const list = all.filter((e) => (proj === 'all' || (proj === 'none' ? !getProject(e.t.projectId) : e.t.projectId === proj))
+    && (!q || plain(`${e.t.title} ${pathLabel(e.t.projectId, e.t.subprojectId)}`).includes(q)));
+  if (!list.length) return '<p class="jr-none">Aucune tâche réalisée ne correspond.</p>';
+  const groups = [];
+  for (const e of list) {
+    const k = ymd(new Date(e.at));
+    if (groups[groups.length - 1]?.day !== k) groups.push({ day: k, items: [] });
+    groups[groups.length - 1].items.push(e);
+  }
+  const shown = groups.slice(0, temp.jrDays || JR_PAGE);
+  const totals = taskTotals();
+  const keys = new Set(shown.map((g) => g.day));
+  // temps chronométré chaque jour (toutes tâches) et par tâche ce jour-là
+  const dayMs = new Map();
+  const taskDayMs = new Map();
+  for (const x of state.sessions) {
+    const k = ymd(new Date(x.start));
+    if (!keys.has(k)) continue;
+    dayMs.set(k, (dayMs.get(k) || 0) + (x.end - x.start));
+    if (x.taskId) taskDayMs.set(`${x.taskId}|${k}`, (taskDayMs.get(`${x.taskId}|${k}`) || 0) + (x.end - x.start));
+  }
+  const row = (e, k) => {
+    const t = e.t;
+    const ms = e.kind === 'task' ? totals.get(t.id) || 0 : taskDayMs.get(`${t.id}|${k}`) || 0;
+    const slot = e.p && !e.p.allDay ? `${clockLabel(e.p.start)}–${clockLabel(e.p.end)}` : '';
+    return `<div class="jr-row" style="--c:${colorOf(t.projectId)}">
+      <span class="jr-tick">${ICON.check}</span>
+      <button type="button" class="jr-main" data-action="${e.kind === 'plan' ? 'open-plan' : 'open-task'}" data-id="${e.id}">
+        <b>${t.starred ? '★ ' : ''}${esc(t.title)}</b>
+        <small>${t.projectId ? `<span class="tag"><i></i>${esc(pathLabel(t.projectId, t.subprojectId))}</span>` : ''}${ms ? `<span>⏱ ${fmtDur(ms)}</span>` : ''}${slot ? `<span>${e.p.series ? '↻' : '📅'} ${slot}</span>` : ''}</small>
+      </button>
+      <time>${clockLabel(e.at)}</time>
+      <button type="button" class="jr-undo" data-action="journal-undo" data-kind="${e.kind}" data-id="${e.id}" title="Remettre à faire" aria-label="Remettre à faire">↺</button>
+    </div>`;
+  };
+  return shown.map((g, i) => `<section class="jr-day" id="jr-${g.day}" style="--i:${Math.min(i, 6)}">
+      <div class="jr-day-head"><b>${esc(jrDayLabel(g.day))}</b><small>${g.items.length} réalisée${g.items.length > 1 ? 's' : ''}${dayMs.get(g.day) ? ` · ${fmtDur(dayMs.get(g.day))} chronométrées` : ''}</small></div>
+      <div class="jr-list">${g.items.map((e) => row(e, g.day)).join('')}</div>
+    </section>`).join('')
+    + (groups.length > shown.length ? `<button type="button" class="btn wide jr-more" data-action="jr-more">Voir les jours précédents</button>` : '');
+}
+
+// Recherche dans le journal : seule la liste se met à jour (le champ garde le clavier).
+document.addEventListener('input', (e) => {
+  if (!e.target.matches?.('.jr-search input')) return;
+  temp.jrQuery = e.target.value;
+  temp.jrDays = JR_PAGE;
+  const box = $('.jr-results');
+  if (box) box.innerHTML = journalResults();
+});
+// Le menu « réalisées aujourd'hui » reste ouvert ou fermé d'un affichage à l'autre.
+document.addEventListener('toggle', (e) => { if (e.target.matches?.('.done-today')) temp.showTodayDone = e.target.open; }, true);
 
 /* ----- Valider, reporter, caler ----- */
 
@@ -3966,8 +4124,8 @@ function doneCard(id, el) {
   return el?.closest('#view .task, #view .day-card') || $(`#view .check[data-id="${id}"]`)?.closest('.task, .day-card') || undefined;
 }
 
-// Joue l'animation sur la carte, puis redessine l'écran. La carte quitte sa liste, sauf dans le programme
-// de « Ma journée » où le créneau reste en place, barré. card : undefined → pastille au centre ; null → rien.
+// Joue l'animation sur la carte, puis redessine l'écran : la carte se barre et quitte sa liste (dans le programme
+// de « Ma journée », toute la ligne se replie). card : undefined → pastille au centre ; null → rien.
 function playDone(card, color) {
   haptic();
   if (!card?.isConnected) {
@@ -3986,16 +4144,16 @@ function playDone(card, color) {
   doneAnims++;
   const finish = () => { if (--doneAnims === 0) render(); };
   if (reduce) { setTimeout(finish, 280); return; }
-  if (card.closest('.agenda')) { setTimeout(finish, 760); return; }
   setTimeout(() => {
     // la carte glisse et s'efface pendant que la liste se resserre (l'espace entre les cartes compris)
-    const box = card.closest('.swipe-wrap') || card;
+    const box = card.closest('li.ag') || card.closest('.swipe-wrap') || card;
     const gap = parseFloat(getComputedStyle(box.parentElement).rowGap) || 0;
     box.style.height = `${box.offsetHeight}px`;
     void box.offsetHeight;
     box.classList.add('leaving');
     box.style.height = '0px';
-    if (box.nextElementSibling) box.style.marginBottom = `${-gap}px`;
+    if (!gap) Object.assign(box.style, { marginTop: '0px', marginBottom: '0px' });
+    else if (box.nextElementSibling) box.style.marginBottom = `${-gap}px`;
     else if (box.previousElementSibling) box.style.marginTop = `${-gap}px`;
     setTimeout(finish, 340);
   }, 640);
@@ -4027,15 +4185,15 @@ async function validateToday(kind, id, card) {
     const t = getTask(p?.taskId);
     if (!p || !t) return;
     if (planDone(p)) { // annuler la validation
-      p.done = false;
+      Object.assign(p, { done: false, doneAt: null });
       if (t.done) { t.done = false; t.doneAt = null; }
       save(); render();
       return;
     }
     const extra = await askPlannedTime(t, plannedToCount(t, p));
-    const prev = { pDone: !!p.done, tDone: t.done, tAt: t.doneAt };
+    const prev = { pDone: !!p.done, pAt: p.doneAt || null, tDone: t.done, tAt: t.doneAt };
     const stopped = finishTimer(t.id);
-    p.done = true;
+    Object.assign(p, { done: true, doneAt: now() });
     state.sessions.push(...extra);
     // Si la tâche a d'autres créneaux à venir, seul ce créneau est validé.
     const later = state.plans.filter((x) => x.taskId === t.id && x !== p && !x.done && x.start > now()).sort((a, b) => a.start - b.start)[0];
@@ -4043,7 +4201,7 @@ async function validateToday(kind, id, card) {
     save();
     playDone(card, colorOf(t.projectId));
     doneToast(before, `${later ? `Créneau validé · suite ${planLabel(later)}` : 'Bravo, tâche terminée ✓'}${countedLabel(extra)}`, () => {
-      Object.assign(p, { done: prev.pDone });
+      Object.assign(p, { done: prev.pDone, doneAt: prev.pAt });
       Object.assign(t, { done: prev.tDone, doneAt: prev.tAt });
       state.sessions = state.sessions.filter((s) => !extra.includes(s));
       save(); render();
@@ -4557,6 +4715,32 @@ const actions = {
   },
   'today-done'(el) { validateToday(el.dataset.kind, el.dataset.id, el.closest('.day-card') || undefined); },
   'today-later'(el) { postponeToday(el.dataset.kind, el.dataset.id); },
+  'jr-project'(el) { Object.assign(temp, { jrProject: el.dataset.value, jrDays: JR_PAGE }); render(); },
+  'jr-more'() { temp.jrDays = (temp.jrDays || JR_PAGE) + JR_PAGE; const box = $('.jr-results'); if (box) box.innerHTML = journalResults(); },
+  'jr-day'(el) { // barre du graphique : aller à ce jour (en affichant assez de jours, sans filtre)
+    const go = () => document.getElementById(`jr-${el.dataset.value}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (!document.getElementById(`jr-${el.dataset.value}`)) { Object.assign(temp, { jrQuery: '', jrProject: 'all', jrDays: 60 }); render(); }
+    go();
+  },
+  // Journal : remettre à faire (la tâche, ou ce créneau validé), avec « Annuler ».
+  'journal-undo'(el) {
+    const { kind, id } = el.dataset;
+    const changes = [];
+    const reopen = (x) => { changes.push([x, { done: x.done, doneAt: x.doneAt ?? null }]); Object.assign(x, { done: false, doneAt: null }); };
+    if (kind === 'plan') {
+      const p = state.plans.find((x) => x.id === id);
+      if (!p) return;
+      reopen(p);
+    } else {
+      const t = getTask(id);
+      if (!t) return;
+      const day = ymd(new Date(t.doneAt || now()));
+      for (const p of state.plans) if (p.taskId === t.id && p.done && ymd(new Date(p.doneAt || p.end)) === day) reopen(p);
+      reopen(t);
+    }
+    save(); render(); buzz();
+    toast('Remise à faire', { label: 'Annuler', fn: () => { for (const [x, v] of changes) Object.assign(x, v); save(); render(); } });
+  },
   'pf-open'(el) {
     const field = el.closest('.pick-field');
     const open = field.querySelector('.pf-menu');
@@ -4649,7 +4833,6 @@ const actions = {
     Object.assign(state.ui, { tab: 'plan', planView: 'day', planDate: el.dataset.value });
     writeLocal(); render(); window.scrollTo(0, 0); scrollPlanToHour();
   },
-  'toggle-today-done'() { temp.showTodayDone = !temp.showTodayDone; render(); },
   'toggle-prio'() { temp.showAllPrio = !temp.showAllPrio; render(); },
   'hide-swipe-hint'() { state.ui.hideSwipeHint = true; writeLocal(); render(); },
   'set-deadline'(el) { // toucher l'échéance déjà choisie la retire
