@@ -1,5 +1,5 @@
 // Service worker : l'app fonctionne hors-ligne et se met à jour dès qu'il y a du réseau.
-const CACHE = 'chronotodo-v1';
+const CACHE = 'chronotodo-v2';
 const ASSETS = [
   './',
   './styles.css',
@@ -41,7 +41,8 @@ function networkFirst(req) {
     const finish = (res) => { if (!settled && res) { settled = true; resolve(res); } };
     const slow = setTimeout(() => fromCache().then(finish), 3000);
 
-    fetch(req)
+    // « no-cache » : on vérifie toujours auprès du serveur (304 si rien n'a changé), jamais une vieille copie du navigateur
+    (req.mode === 'navigate' ? fetch(req.url, { cache: 'no-cache' }) : fetch(req, { cache: 'no-cache' }))
       .then((res) => {
         if (res.ok && !res.redirected) {
           const copy = res.clone();

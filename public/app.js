@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.13.1';
+const VERSION = '2.14.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -17,7 +17,7 @@ const PROFILES = [
 ];
 const getProfile = (id) => PROFILES.find((p) => p.id === id);
 const storeKey = (p) => (p === 'romain' ? STORE_KEY : `${STORE_KEY}:${p}`);
-const LONG_SESSION = 4 * 3600e3; // au-delà : on propose de corriger (chrono oublié)
+const LONG_SESSION = 3 * 3600e3; // au-delà : chrono sans doute oublié, on propose de corriger
 const MIN_SESSION = 3e3;         // en dessous : clic accidentel, ignoré
 const COLORS = ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ec4899', '#8b5cf6', '#ef4444', '#14b8a6', '#84cc16', '#64748b'];
 const NO_COLOR = '#94a3b8';
@@ -352,11 +352,11 @@ function dueInfo(deadline) {
 /* ---------- Chronomètre ---------- */
 
 // Arrête le chrono d'une tâche et l'enregistre dans le journal. Renvoie la session créée.
-function finishTimer(taskId) {
+// end : heure d'arrêt (plus tôt que maintenant quand on a oublié de l'arrêter).
+function finishTimer(taskId, end = now()) {
   const a = timerOf(taskId);
   if (!a) return null;
   state.timers = state.timers.filter((x) => x !== a);
-  const end = now();
   stretchPlan(a, end);
   if (end - a.start < MIN_SESSION) return null;
   const t = getTask(a.taskId);
@@ -407,6 +407,14 @@ function stopTimer(taskId) {
   const done = finishTimer(taskId);
   save(); render(); buzz();
   return done;
+}
+
+// Arrêter un chrono qui tourne depuis très longtemps (oubli probable) : on demande d'abord jusqu'à quand compter.
+function askStop(taskId, back = '') {
+  const a = timerOf(taskId);
+  if (!a || now() - a.start < LONG_SESSION) return false;
+  openTimerSheet(taskId, { forgot: true, back });
+  return true;
 }
 
 // Après un arrêt : si une session est très longue, on propose de la corriger.
@@ -511,6 +519,16 @@ function render() {
   tick();
 }
 
+// Changement de page en douceur : fondu et léger glissement dans le sens de la navigation (si le navigateur le permet).
+const TAB_ORDER = ['today', 'tasks', 'projects', 'plan', 'journal', 'stats'];
+function pageTransition(dir, update) {
+  window.scrollTo(0, 0);
+  if (!document.startViewTransition || matchMedia('(prefers-reduced-motion: reduce)').matches) { update(); return; }
+  document.documentElement.dataset.nav = dir; // « fwd » : vers la droite ; « back » : retour
+  const vt = document.startViewTransition(update);
+  vt.ready.catch(() => {}); // transition sautée (une autre a commencé) : la page est quand même à jour
+}
+
 // Chronos en cours, le plus récent d'abord.
 const runningTimers = () => state.timers.slice().sort((a, b) => b.start - a.start);
 
@@ -520,6 +538,15 @@ function tick() {
     const v = Number(n.dataset.base || 0) + elapsedSince(since);
     n.textContent = n.dataset.tick === 'clock' ? fmtClock(v) : fmtDur(v);
   }
+  // anneau de la fiche d'un chrono : avance vers la durée prévue (sinon fait le tour de chaque heure)
+  for (const r of $$('[data-ring]')) {
+    const el = now() - Number(r.dataset.ring);
+    const len = Number(r.dataset.len) || 3600e3;
+    r.style.setProperty('--p', (r.dataset.len ? Math.min(1, el / len) : (el % len) / len).toFixed(4));
+    r.classList.toggle('over', !!r.dataset.len && el > len);
+  }
+  const tf = sheet.open && $('form[data-form="timer"]', sheet);
+  if (tf) timerSheetRefresh(tf);
   let long = false;
   for (const r of $$('#banner .bn')) {
     const l = now() - Number(r.dataset.start) > LONG_SESSION;
@@ -543,11 +570,11 @@ function renderBanner() {
     const t = getTask(a.taskId);
     const long = now() - a.start > LONG_SESSION;
     return `<div class="bn${long ? ' long' : ''}" data-start="${a.start}">
-      <div class="banner-info" role="button" tabindex="0" data-action="open-task" data-id="${a.taskId}">
-        <div class="banner-label"><span class="pulse"></span>${long ? 'Chrono oublié ? Arrête pour corriger' : esc(t ? pathLabel(t.projectId, t.subprojectId) : 'En cours')}</div>
+      <div class="banner-info" role="button" tabindex="0" data-action="open-timer" data-id="${a.taskId}" title="Ajuster ce chrono">
+        <div class="banner-label"><span class="pulse"></span>${long ? 'Chrono oublié ? Touche pour corriger' : esc(t ? pathLabel(t.projectId, t.subprojectId) : 'En cours')}</div>
         <div class="banner-title">${esc(t?.title || 'Tâche')}</div>
       </div>
-      <div class="banner-time"${tickAttr('clock', 0, [a.start])}>${fmtClock(now() - a.start)}</div>
+      <div class="banner-time" role="button" tabindex="0" data-action="open-timer" data-id="${a.taskId}"${tickAttr('clock', 0, [a.start])}>${fmtClock(now() - a.start)}</div>
       <button type="button" class="round-btn stop" data-action="stop" data-id="${a.taskId}" aria-label="Arrêter le chrono de « ${esc(t?.title || 'Tâche')} »">${ICON.stop}</button>
     </div>`;
   }).join('');
@@ -616,40 +643,48 @@ const cmpDeadline = (a, b) => {
   return a.deadline ? -1 : b.deadline ? 1 : 0;
 };
 
-function viewTasks() {
+// Tâches du filtre choisi (projet, sous-projet) et de la recherche : à faire et terminées.
+function tasksModel() {
   const ui = state.ui;
-  const totals = taskTotals();
   const open = state.tasks.filter((t) => !t.done);
   const key = (t) => t.projectId || 'none';
   const subKey = (t) => t.subprojectId || 'none';
-
   const counts = new Map();
   open.forEach((t) => counts.set(key(t), (counts.get(key(t)) || 0) + 1));
   const showChips = counts.size >= 2;
   const filter = showChips && counts.has(ui.filter) ? ui.filter : 'all';
-
-  let subCounts = new Map();
+  const subCounts = new Map();
   if (filter !== 'all' && filter !== 'none') {
     open.filter((t) => key(t) === filter).forEach((t) => subCounts.set(subKey(t), (subCounts.get(subKey(t)) || 0) + 1));
   }
   const showSubChips = subCounts.size >= 2;
   const subfilter = showSubChips && subCounts.has(ui.subfilter) ? ui.subfilter : 'all';
-
-  const match = (t) => (filter === 'all' || key(t) === filter) && (subfilter === 'all' || subKey(t) === subfilter);
+  // recherche : chaque mot tapé se retrouve dans le titre, la note ou le projet (sans accents)
+  const words = plainWords(temp.taskQuery || '');
+  const hit = (t) => !words.length || words.every((w) => plain(`${t.title} ${t.notes || ''} ${pathLabel(t.projectId, t.subprojectId)}`).includes(w));
+  const match = (t) => (filter === 'all' || key(t) === filter) && (subfilter === 'all' || subKey(t) === subfilter) && hit(t);
   const list = open.filter(match).sort((a, b) => !!b.starred - !!a.starred || !!timerOf(b.id) - !!timerOf(a.id) || cmpDeadline(a, b) || b.createdAt - a.createdAt);
   const done = state.tasks.filter((t) => t.done && match(t)).sort((a, b) => (b.doneAt || 0) - (a.doneAt || 0));
+  return { open, counts, showChips, filter, subCounts, showSubChips, subfilter, words, list, done };
+}
 
+function viewTasks() {
+  const m = tasksModel();
+  const { filter, subfilter, subCounts } = m;
   let html = summaryCard();
-
-  if (showChips) {
+  if (m.open.length >= 6 || m.words.length) {
+    html += `<label class="jr-search tk-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+      <input type="search" value="${esc(temp.taskQuery || '')}" placeholder="Rechercher une tâche" aria-label="Rechercher une tâche" autocomplete="off" enterkeyhint="search"></label>`;
+  }
+  if (m.showChips) {
     const chip = (value, label, color, n) =>
       `<button type="button" class="chip${filter === value ? ' on' : ''}" data-action="filter" data-value="${value}"${color ? ` style="--c:${color}"` : ''}>${color ? '<i></i>' : ''}${esc(label)} <small>${n}</small></button>`;
-    html += `<div class="chips">${chip('all', 'Tout', '', open.length)}${state.projects
-      .filter((p) => counts.has(p.id))
-      .map((p) => chip(p.id, p.name, p.color, counts.get(p.id)))
-      .join('')}${counts.has('none') ? chip('none', 'Sans projet', '', counts.get('none')) : ''}</div>`;
+    html += `<div class="chips">${chip('all', 'Tout', '', m.open.length)}${state.projects
+      .filter((p) => m.counts.has(p.id))
+      .map((p) => chip(p.id, p.name, p.color, m.counts.get(p.id)))
+      .join('')}${m.counts.has('none') ? chip('none', 'Sans projet', '', m.counts.get('none')) : ''}</div>`;
   }
-  if (showSubChips) {
+  if (m.showSubChips) {
     const color = colorOf(filter);
     const chip = (value, label, n) =>
       `<button type="button" class="chip${subfilter === value ? ' on' : ''}" data-action="subfilter" data-value="${value}" style="--c:${color}">${esc(label)} <small>${n}</small></button>`;
@@ -659,24 +694,42 @@ function viewTasks() {
       .join('')}${subCounts.has('none') ? chip('none', 'Autre', subCounts.get('none')) : ''}${getSub(subfilter)
       ? `<button type="button" class="chip chip-edit" data-action="edit-sub" data-id="${subfilter}" aria-label="Modifier le sous-projet « ${esc(getSub(subfilter).name)} »">${ICON.edit}</button>` : ''}</div>`;
   }
+  return `${html}<div class="tk-results">${taskResults(m)}</div>`;
+}
 
+// Liste des tâches (à faire, puis terminées) : seule elle change pendant une recherche (le champ garde le clavier).
+function taskResults(m = tasksModel()) {
+  const totals = taskTotals();
+  let html = '';
   if (!state.tasks.length) {
     html += `<div class="empty"><b>Aucune tâche pour l’instant</b>Touche <b style="display:inline">+</b> pour ajouter ta première tâche.</div>`;
-  } else if (!list.length) {
-    html += `<div class="empty"><b>Rien à faire ici ✓</b>Touche + pour ajouter une tâche.</div>`;
+  } else if (m.words.length && !m.list.length && !m.done.length) {
+    html += `<div class="empty"><b>Aucune tâche ne correspond</b>Essaie un autre mot, ou un autre projet.</div>`;
+  } else if (!m.list.length) {
+    html += m.words.length ? '' : `<div class="empty"><b>Rien à faire ici ✓</b>Touche + pour ajouter une tâche.</div>`;
   } else {
-    html += `<div class="list">${list.map((t) => taskCard(t, totals)).join('')}</div>`;
+    if (m.words.length) html += `<p class="tk-count">${m.list.length} tâche${m.list.length > 1 ? 's' : ''} à faire</p>`;
+    html += `<div class="list">${m.list.map((t) => taskCard(t, totals)).join('')}</div>`;
   }
-
-  if (done.length) {
-    html += `<div class="section-title"><span>Terminées · ${done.length}</span><button type="button" data-action="toggle-done-list">${ui.showDone ? 'Masquer' : 'Afficher'}</button></div>`;
-    if (ui.showDone) {
-      html += `<div class="list">${done.slice(0, 60).map((t) => taskCard(t, totals)).join('')}</div>
-        <button type="button" class="btn ghost danger wide" data-action="clear-done">${ICON.trash} Effacer les tâches terminées</button>`;
+  if (m.done.length) {
+    const show = state.ui.showDone || m.words.length;
+    html += `<div class="section-title"><span>Terminées · ${m.done.length}</span>${m.words.length ? '' : `<button type="button" data-action="toggle-done-list">${show ? 'Masquer' : 'Afficher'}</button>`}</div>`;
+    if (show) {
+      html += `<div class="list">${m.done.slice(0, 60).map((t) => taskCard(t, totals)).join('')}</div>
+        ${m.words.length ? '' : `<button type="button" class="btn ghost danger wide" data-action="clear-done">${ICON.trash} Effacer les tâches terminées</button>`}`;
     }
   }
   return html;
 }
+
+// Recherche dans les tâches : seule la liste se met à jour.
+document.addEventListener('input', (e) => {
+  if (!e.target.matches?.('.tk-search input')) return;
+  temp.taskQuery = e.target.value;
+  const box = $('.tk-results');
+  if (box) box.innerHTML = taskResults();
+  tick();
+});
 
 /* ----- Onglet Projets ----- */
 
@@ -897,13 +950,35 @@ function viewStats() {
       return { ...c, per, sum };
     });
     const top = Math.max(...cols.map((c) => c.sum), 1);
-    chart = `<div class="card chart"><div class="cols">${cols.map((c) => `
-      <div class="col${t >= c.a && t < c.b ? ' now' : ''}" title="${esc(c.title)} · ${fmtDur(c.sum)}">
+    // toucher une colonne affiche sa valeur (et le détail par projet sous le graphique)
+    const sel = cols[temp.statsCol] ? temp.statsCol : -1;
+    chart = `<div class="card chart${sel >= 0 ? ' has-sel' : ''}"><div class="cols">${cols.map((c, i) => `
+      <button type="button" class="col${t >= c.a && t < c.b ? ' now' : ''}${i === sel ? ' sel' : ''}" data-action="stats-col" data-i="${i}" title="${esc(c.title)} · ${fmtDur(c.sum)}"${c.sum ? '' : ' disabled'}>
+        ${i === sel ? `<b class="col-tip">${fmtDur(c.sum)}</b>` : ''}
         <div class="bar" style="height:calc((100% - 17px) * ${(c.sum / top).toFixed(4)})">${[...c.per.entries()]
           .map(([k, ms]) => `<i style="flex:${ms} 0 0;background:${colorOf(k)}"></i>`).join('')}</div>
         <span>${esc(c.label)}</span>
-      </div>`).join('')}</div></div>`;
+      </button>`).join('')}</div>
+      ${sel >= 0 ? `<div class="col-detail"><b>${esc(cap(cols[sel].title))}</b>${[...cols[sel].per.entries()].sort((x, y) => y[1] - x[1])
+        .map(([k, ms]) => `<span style="--c:${colorOf(k)}"><i></i>${esc(getProject(k)?.name || 'Sans projet')} · ${fmtDur(ms)}</span>`).join('')}</div>` : ''}
+    </div>`;
   }
+
+  // Comparaison avec la période d'avant (au même stade si la période est en cours) et moyenne par jour actif
+  let compare = '';
+  if (!isAll && total) {
+    const prev = periodRange(ui.period, ui.offset - 1);
+    const t = now();
+    const running = t >= r.a && t < r.b;
+    const prevEnd = running ? Math.min(prev.b, prev.a + (t - r.a)) : prev.b;
+    const prevTotal = allSessions().reduce((n, s) => n + overlap(s, prev.a, prevEnd), 0);
+    const word = { day: 'hier', week: 'la semaine dernière', month: 'le mois dernier', term: 'le trimestre dernier', year: 'l’an dernier' }[ui.period];
+    const diff = total - prevTotal;
+    compare = prevTotal || diff
+      ? `<span class="tc-delta ${diff >= 0 ? 'up' : 'down'}">${diff >= 0 ? '▲' : '▼'} ${fmtDur(Math.abs(diff))}</span><span class="tc-vs">vs ${word}${running ? ' à ce stade' : ''}</span>`
+      : '';
+  }
+  const avg = activeDays > 1 ? `<span class="tc-avg">≈ ${fmtDur(total / activeDays)} par jour actif</span>` : '';
 
   const bars = sorted.map(([k, g]) => {
     const p = getProject(k);
@@ -942,7 +1017,8 @@ function viewStats() {
       <button type="button" class="period-label" data-action="offset" data-value="0"><b>${esc(r.label)}</b><small>${esc(r.sub)}</small></button>
       ${isAll ? '' : `<button type="button" class="icon-btn" data-action="offset" data-value="1"${ui.offset >= 0 ? ' disabled' : ''} aria-label="Période suivante">${ICON.right}</button>`}
     </div>
-    <div class="card total-card"><b>${fmtDur(total)}</b><span>${activeDays ? `${activeDays} jour${activeDays > 1 ? 's' : ''} actif${activeDays > 1 ? 's' : ''}` : 'Aucun temps enregistré'}</span></div>
+    <div class="card total-card"><div class="tc-main"><b>${fmtDur(total)}</b><span>${activeDays ? `${activeDays} jour${activeDays > 1 ? 's' : ''} actif${activeDays > 1 ? 's' : ''}` : 'Aucun temps enregistré'}</span></div>
+      ${compare || avg ? `<div class="tc-more">${compare}${avg}</div>` : ''}</div>
     ${chart}
     ${sorted.length ? `<div class="card bars">${bars}</div><p class="hint center">Touche un projet pour voir le détail.</p>` : ''}
     ${journal ? `<div class="section-title">Journal</div>${journal}` : ''}`;
@@ -954,10 +1030,14 @@ const sheet = $('#sheet');
 const head = (title) => `<div class="grabber"></div><div class="sheet-head"><h2>${esc(title)}</h2><button type="button" class="icon-btn" data-action="close-sheet" aria-label="Fermer">${ICON.close}</button></div>`;
 const taskFormOpen = () => (sheet.open ? $('form[data-form="task"]', sheet) : null);
 
+let sheetClosing = 0;
+
 function openSheet(html) {
   // la fiche d'une tâche ouverte juste avant est enregistrée avant d'être remplacée
   const prev = $('form[data-form="task"]', sheet);
   if (prev?.dataset.id) commitTaskForm(prev);
+  clearTimeout(sheetClosing); // une fiche qui se refermait reste ouverte avec le nouveau contenu
+  sheet.classList.remove('closing');
   sheet.innerHTML = html;
   if (!sheet.open) {
     sheet.showModal();
@@ -966,9 +1046,17 @@ function openSheet(html) {
   sheet.scrollTop = 0;
 }
 
+// La fiche glisse vers le bas en s'effaçant (ce qu'elle contenait est enregistré tout de suite).
 function closeSheet() {
-  if (sheet.open) sheet.close();
+  if (!sheet.open || sheet.classList.contains('closing')) return;
+  const f = $('form[data-form="task"]', sheet);
+  if (f?.dataset.id) commitTaskForm(f);
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) { sheet.close(); return; }
+  sheet.classList.add('closing');
+  sheetClosing = setTimeout(() => { sheet.classList.remove('closing'); if (sheet.open) sheet.close(); }, 170);
 }
+// Échap : même fermeture en douceur.
+sheet.addEventListener('cancel', (e) => { e.preventDefault(); closeSheet(); });
 
 sheet.addEventListener('close', () => {
   if (sheet.open) return; // une autre fiche s'est déjà rouverte entre-temps
@@ -981,7 +1069,7 @@ sheet.addEventListener('close', () => {
 window.addEventListener('popstate', () => {
   if (sheet.open) { sheet.close(); return; }
   // Bouton retour du téléphone sur la page d'un projet : revient à la liste des projets.
-  if (temp.openProject && !history.state?.project) { temp.openProject = null; render(); }
+  if (temp.openProject && !history.state?.project) pageTransition('back', () => { temp.openProject = null; render(); });
 });
 sheet.addEventListener('click', (e) => { if (e.target === sheet) closeSheet(); });
 
@@ -1095,6 +1183,7 @@ function openTaskSheet(id, preset) {
           <div><small>Temps passé</small>${liveDur(total, sinceOf(id))}</div>
           <button type="button" class="btn ${running ? 'stop' : 'primary'}" data-action="toggle-timer" data-id="${id}">${running ? `${ICON.stop} Arrêter` : `${ICON.play} Lancer`}</button>
         </div>
+        ${running ? `<button type="button" class="tb-live" data-action="open-timer" data-id="${id}" data-back="${id}"><span class="pulse"></span><span>En cours depuis ${clockLabel(timerOf(id).start)}</span><span class="tb-adj">Corriger ${ICON.right}</span></button>` : ''}
         ${sessions.length ? `<ul class="sessions">${sessions.slice(0, 40).map((s) => `<li><button type="button" data-action="open-session" data-id="${s.id}" data-back="${id}">
           <span>${fmt(new Date(s.start), { weekday: 'short', day: 'numeric', month: 'short' })} · ${hm(new Date(s.start))}–${hm(new Date(s.end))}</span><b>${fmtDur(s.end - s.start)}</b></button></li>`).join('')}</ul>`
           : '<p class="hint">Aucune session pour l’instant.</p>'}
@@ -1347,24 +1436,25 @@ sheet.addEventListener('change', (e) => {
 
 /* ----- Session (temps) ----- */
 
+// Fiche d'une session (ou du temps ajouté à la main) : jour, début et fin, durée en direct, « retirer » d'un toucher.
 function openSessionSheet(sid, opts = {}) {
   const t0 = now();
   const s = sid ? state.sessions.find((x) => x.id === sid) : { taskId: opts.taskId, start: t0 - 30 * 60e3, end: t0 };
   if (!s) return;
   const t = getTask(s.taskId);
-  const mins = Math.round((s.end - s.start) / 60e3);
   const d = new Date(s.start);
-  openSheet(`<form class="sheet-body" data-form="session" data-id="${sid || ''}" data-task="${esc(s.taskId || '')}" data-back="${esc(opts.back || '')}">
+  openSheet(`<form class="sheet-body sess-sheet" data-form="session" data-id="${sid || ''}" data-task="${esc(s.taskId || '')}" data-back="${esc(opts.back || '')}">
     ${head(sid ? 'Session' : 'Ajouter du temps')}
-    ${opts.warn ? `<p class="warn">Le chrono a tourné ${fmtDur(s.end - s.start)}. Un oubli ? Corrige la durée si besoin.</p>` : ''}
+    ${opts.warn ? `<p class="warn">⏰ Le chrono a tourné ${fmtDur(s.end - s.start)}. Un oubli ? Avance l’heure de fin, ou retire le temps en trop.</p>` : ''}
     <p class="hint"><b>${esc(t?.title || s.title || 'Tâche')}</b> · ${esc(pathLabel(t ? t.projectId : s.projectId, t ? t.subprojectId : s.subprojectId))}</p>
+    <label class="field"><span>Jour</span><input type="date" name="date" value="${ymd(d)}" required></label>
     <div class="row2">
-      <label class="field"><span>Jour</span><input type="date" name="date" value="${ymd(d)}" required></label>
       <label class="field"><span>Début</span><input type="time" name="time" value="${hm(d)}" required></label>
+      <label class="field"><span>Fin</span><input type="time" name="end" value="${hm(new Date(s.end))}" required></label>
     </div>
-    <div class="row2">
-      <label class="field"><span>Heures</span><input type="number" name="h" min="0" max="99" inputmode="numeric" value="${Math.floor(mins / 60)}"></label>
-      <label class="field"><span>Minutes</span><input type="number" name="m" min="0" max="59" inputmode="numeric" value="${mins % 60}"></label>
+    <div class="sess-dur">
+      <span class="sd-label">Durée</span><b class="sd-val">${fmtDur(s.end - s.start)}</b>
+      <span class="sd-trim" role="group" aria-label="Retirer du temps à la fin">${[5, 15, 30, 60].map((m) => `<button type="button" data-action="sess-trim" data-value="${m}">−${m < 60 ? `${m} min` : '1 h'}</button>`).join('')}</span>
     </div>
     <div class="sheet-actions">
       ${sid ? `<button type="button" class="btn ghost danger" data-action="delete-session" data-id="${sid}">${ICON.trash} Supprimer</button>` : ''}
@@ -1373,6 +1463,33 @@ function openSessionSheet(sid, opts = {}) {
   </form>`);
 }
 
+// Début et fin lus dans la fiche (une fin avant le début passe au lendemain).
+function sessTimes(form) {
+  const date = form.elements.date.value;
+  const time = form.elements.time.value;
+  const endT = form.elements.end.value;
+  if (!date || !time || !endT) return null;
+  const s = state.sessions.find((x) => x.id === form.dataset.id);
+  const [y, mo, d] = date.split('-').map(Number);
+  let start = +new Date(y, mo - 1, d, ...time.split(':').map(Number));
+  if (s && ymd(new Date(s.start)) === date && hm(new Date(s.start)) === time) start = s.start; // garde les secondes
+  let end = +new Date(y, mo - 1, d, ...endT.split(':').map(Number));
+  if (end <= start) end += 864e5;
+  if (s && hm(new Date(s.end)) === endT && Math.abs(end - s.end) < 60e3) end = s.end;
+  return { start, end };
+}
+
+function sessRefresh(form) {
+  const r = sessTimes(form);
+  const v = $('.sd-val', form);
+  if (v) v.textContent = r ? fmtDur(r.end - r.start) : '—';
+}
+
+sheet.addEventListener('input', (e) => {
+  const form = e.target.closest('form[data-form="session"]');
+  if (form) sessRefresh(form);
+});
+
 function afterSessionSheet(back) {
   if (back && getTask(back)) openTaskSheet(back);
   else closeSheet();
@@ -1380,32 +1497,174 @@ function afterSessionSheet(back) {
 }
 
 function saveSession(form) {
-  const fd = new FormData(form);
-  const date = String(fd.get('date') || '');
-  const time = String(fd.get('time') || '');
-  if (!date || !time) return;
-  const [y, mo, d] = date.split('-').map(Number);
-  const [hh, mi] = time.split(':').map(Number);
-  let start = +new Date(y, mo - 1, d, hh, mi);
-  const mins = (parseInt(fd.get('h'), 10) || 0) * 60 + (parseInt(fd.get('m'), 10) || 0);
-  if (mins <= 0) { toast('Indique une durée (heures ou minutes)'); return; }
-
+  const r = sessTimes(form);
+  if (!r) return;
+  const { start, end } = r;
   const s = state.sessions.find((x) => x.id === form.dataset.id);
-  if (s) {
-    const old = new Date(s.start);
-    if (ymd(old) === date && hm(old) === time) start = s.start; // garde les secondes si rien n'a changé
-    const dur = Math.round((s.end - s.start) / 60e3) === mins ? s.end - s.start : mins * 60e3;
-    Object.assign(s, { start, end: start + dur });
-  } else {
+  const before = s && { start: s.start, end: s.end };
+  if (s) Object.assign(s, { start, end });
+  else {
     const t = getTask(form.dataset.task);
     state.sessions.push({
       id: uid(), taskId: t?.id || null, title: t?.title || 'Tâche',
-      projectId: t?.projectId || null, subprojectId: t?.subprojectId || null, start, end: start + mins * 60e3,
+      projectId: t?.projectId || null, subprojectId: t?.subprojectId || null, start, end,
     });
   }
   save();
   afterSessionSheet(form.dataset.back);
+  if (before && before.end - before.start !== end - start) {
+    const diff = end - start - (before.end - before.start);
+    toast(`${diff < 0 ? `${fmtDur(-diff)} retirées` : `${fmtDur(diff)} ajoutées`} · ${fmtDur(end - start)} au total`, { label: 'Annuler', fn: () => { Object.assign(s, before); save(); render(); } });
+  }
 }
+
+/* ----- Chrono en cours : vue « focus », début corrigé, arrêt à une heure passée ----- */
+
+// Créneau de la tâche qui recouvre ce chrono (le dernier commencé), s'il y en a un.
+function timerPlan(a, t = now()) {
+  let p = null;
+  for (const x of state.plans) if (x.taskId === a.taskId && !x.allDay && !x.done && x.start <= t && x.end > a.start && (!p || x.start > p.start)) p = x;
+  return p;
+}
+
+// Fiche d'un chrono en cours : grand compteur et anneau ; « commencé à » (le début se corrige) ; « arrêter » maintenant
+// ou à une heure passée (oubli), avec ce qui sera gardé et retiré ; ou l'annuler sans rien compter.
+function openTimerSheet(taskId, { forgot = false, back = '' } = {}) {
+  const a = timerOf(taskId);
+  const t = getTask(taskId);
+  if (!a || !t) return;
+  const plan = timerPlan(a);
+  const pick = forgot && plan && plan.end < now() ? 'plan' : '0';
+  openSheet(`<form class="sheet-body tm-sheet" data-form="timer" data-task="${t.id}" data-back="${esc(back)}" style="--c:${colorOf(t.projectId)}">
+    ${head(forgot ? 'Oublié de l’arrêter ?' : 'Chrono en cours')}
+    ${forgot ? `<p class="warn">⏰ Le chrono tourne depuis ${fmtDur(now() - a.start)}. Choisis quand tu as vraiment arrêté : le reste ne sera pas compté.</p>` : ''}
+    <button type="button" class="tm-task" data-action="open-task" data-id="${t.id}"><span class="dot"></span><span class="tm-task-name">${esc(t.title)}<small>${esc(pathLabel(t.projectId, t.subprojectId))}</small></span>${ICON.right}</button>
+    <div class="tm-dial">
+      <div class="tm-ring" data-ring="${a.start}"${plan ? ` data-len="${plan.end - plan.start}"` : ''}></div>
+      <div class="tm-center"><b class="tm-clock"${tickAttr('clock', 0, [a.start])}>${fmtClock(now() - a.start)}</b><small class="tm-since"></small></div>
+    </div>
+    <div class="tm-start">
+      <label><span>Commencé à</span><input type="time" name="start_at" value="${hm(new Date(a.start))}" step="60"></label>
+      <span class="tm-chips" role="group" aria-label="Commencé plus tôt">${[5, 15, 30].map((m) => `<button type="button" data-action="timer-shift" data-value="${m}" aria-label="Commencé ${m} minutes plus tôt">−${m} min</button>`).join('')}</span>
+    </div>
+    <div class="tm-stop">
+      <h3>Arrêter le chrono</h3>
+      <div class="tm-opts" role="radiogroup" aria-label="Heure d’arrêt">
+        ${[[0, 'Maintenant'], [15, 'Il y a 15 min'], [30, 'Il y a 30 min'], [60, 'Il y a 1 h']].map(([m, l]) => `<label data-min="${m}"><input type="radio" name="stop" value="${m}"${String(m) === pick ? ' checked' : ''}><span>${l}</span></label>`).join('')}
+        ${plan ? `<label data-plan="${plan.end}"><input type="radio" name="stop" value="plan"${pick === 'plan' ? ' checked' : ''}><span>Fin du créneau · ${clockLabel(plan.end)}</span></label>` : ''}
+        <label class="tm-at"><input type="radio" name="stop" value="at"><span>À</span><input type="time" name="stop_at" value="${hm(new Date(Math.max(a.start + 60e3, now() - 30 * 60e3)))}" step="60" aria-label="Heure d’arrêt"></label>
+      </div>
+      <div class="tm-line" aria-hidden="true">
+        <div class="tm-track"><i class="tm-keep"></i><i class="tm-cut"></i></div>
+        <div class="tm-ticks"><span class="tm-t0"></span><span class="tm-end"></span><span class="tm-t1"></span></div>
+      </div>
+      <p class="tm-sum"></p>
+    </div>
+    <button class="btn stop wide tm-go">${ICON.stop}<span>Arrêter</span></button>
+    <button type="button" class="btn ghost danger wide tm-discard" data-action="timer-discard">Annuler ce chrono · ne rien compter</button>
+  </form>`);
+  timerSheetRefresh($('form[data-form="timer"]', sheet));
+}
+
+// Heure d'arrêt choisie (null si elle n'est pas après le début du chrono).
+function timerStopAt(form, a) {
+  const v = form.querySelector('[name="stop"]:checked')?.value || '0';
+  const t = now();
+  let end = t - Number(v) * 60e3;
+  if (v === 'plan') end = Number(form.querySelector('[data-plan]')?.dataset.plan) || t;
+  else if (v === 'at') {
+    const [h, m] = (form.elements.stop_at.value || '').split(':').map(Number);
+    if (Number.isNaN(h)) return null;
+    const d = new Date(t);
+    d.setHours(h, m || 0, 0, 0);
+    end = +d > t ? +d - 864e5 : +d; // plus tard qu'il n'est : c'était la veille
+  }
+  return end > a.start ? Math.min(end, t) : null;
+}
+
+// Fiche d'un chrono : choix possibles, frise gardé / retiré, résumé et bouton (chaque seconde).
+function timerSheetRefresh(form) {
+  const a = timerOf(form.dataset.task);
+  if (!a || !form.isConnected) return;
+  const t = now();
+  for (const l of form.querySelectorAll('.tm-opts label[data-min]')) l.hidden = Number(l.dataset.min) > 0 && t - Number(l.dataset.min) * 60e3 <= a.start;
+  if (form.querySelector('[name="stop"]:checked')?.closest('label').hidden) form.querySelector('[name="stop"][value="0"]').checked = true;
+  const plan = timerPlan(a, t);
+  form.querySelector('.tm-since').textContent = `depuis ${clockLabel(a.start)}${plan ? ` · prévu ${fmtDur(plan.end - plan.start)}` : ''}`;
+  const end = timerStopAt(form, a);
+  const keep = end ? end - a.start : 0;
+  const cut = end ? t - end : 0;
+  const pct = `${((keep / Math.max(1, t - a.start)) * 100).toFixed(2)}%`;
+  form.querySelector('.tm-keep').style.width = pct;
+  form.querySelector('.tm-cut').style.left = pct;
+  const mid = form.querySelector('.tm-end');
+  mid.textContent = cut >= 60e3 ? clockLabel(end) : '';
+  mid.style.left = pct;
+  form.querySelector('.tm-t0').textContent = clockLabel(a.start);
+  form.querySelector('.tm-t1').textContent = clockLabel(t);
+  form.querySelector('.tm-sum').innerHTML = !end ? 'Choisis une heure après le début du chrono.'
+    : `On garde <b>${fmtDur(keep)}</b>${cut >= 60e3 ? ` · on retire <b class="cut">${fmtDur(cut)}</b>` : ''}`;
+  const go = form.querySelector('.tm-go');
+  go.disabled = !end;
+  go.querySelector('span').textContent = !end ? 'Arrêter' : cut >= 60e3 ? `Arrêter à ${clockLabel(end)}` : 'Arrêter maintenant';
+  form.classList.toggle('cutting', cut >= 60e3);
+}
+
+// « Commencé à » : le début du chrono se corrige (jamais dans le futur).
+function timerSetStart(form, start) {
+  const a = timerOf(form.dataset.task);
+  if (!a) return;
+  start = Math.min(start, now() - 60e3);
+  if (start === a.start) return;
+  a.start = start;
+  save(); render();
+  form.elements.start_at.value = hm(new Date(start));
+  for (const n of form.querySelectorAll('[data-since]')) n.dataset.since = String(start);
+  form.querySelector('[data-ring]').dataset.ring = String(start);
+  tick();
+}
+
+function stopTimerAt(form) {
+  const a = timerOf(form.dataset.task);
+  if (!a) { closeSheet(); return; }
+  const end = timerStopAt(form, a);
+  if (!end) return;
+  const plans = state.plans.filter((p) => p.taskId === a.taskId).map((p) => [p, p.start, p.end]);
+  const s = finishTimer(a.taskId, end);
+  save(); buzz();
+  const back = getTask(form.dataset.back);
+  if (back) openTaskSheet(back.id); else closeSheet();
+  render();
+  const cut = now() - end;
+  toast(cut >= 60e3 ? `Arrêté à ${clockLabel(end)} · ${fmtDur(cut)} retirées` : `Chrono arrêté · ${fmtDur(end - a.start)}`, {
+    label: 'Annuler',
+    fn: () => {
+      state.sessions = state.sessions.filter((x) => x !== s);
+      for (const [p, st, en] of plans) Object.assign(p, { start: st, end: en });
+      delete state.deleted[timerKey(a)];
+      state.timers.unshift(a);
+      save(); render();
+    },
+  });
+}
+
+sheet.addEventListener('change', (e) => {
+  const form = e.target.closest('form[data-form="timer"]');
+  if (!form) return;
+  if (e.target.name === 'start_at' && e.target.value) {
+    const [h, m] = e.target.value.split(':').map(Number);
+    const d = new Date();
+    d.setHours(h, m, 0, 0);
+    timerSetStart(form, +d > now() ? +d - 864e5 : +d);
+  }
+  timerSheetRefresh(form);
+});
+sheet.addEventListener('input', (e) => {
+  const form = e.target.closest('form[data-form="timer"]');
+  if (!form || e.target.name === 'start_at') return;
+  if (e.target.name === 'stop_at') form.querySelector('[name="stop"][value="at"]').checked = true;
+  timerSheetRefresh(form);
+});
 
 sheet.addEventListener('submit', (e) => {
   e.preventDefault();
@@ -1415,6 +1674,7 @@ sheet.addEventListener('submit', (e) => {
     else createTask(form, 'create');
   } else if (form.dataset.form === 'project') saveProject(form);
   else if (form.dataset.form === 'sub') saveSub(form);
+  else if (form.dataset.form === 'timer') stopTimerAt(form);
   else if (form.dataset.form === 'session') saveSession(form);
   else if (form.dataset.form === 'clean') {
     const ids = new Set(new FormData(form).getAll('drop'));
@@ -5202,7 +5462,8 @@ document.addEventListener('pointermove', (e) => {
   if (temp.placing && e.pointerType === 'mouse' && state.ui.tab === 'plan') carryMove(e.clientX, e.clientY);
 });
 
-// Raccourcis : Échap repose la tâche « en main », N crée une tâche, Ctrl / ⌘ + Entrée valide la fiche de création.
+// Raccourcis : Échap repose la tâche « en main », N crée une tâche, Ctrl / ⌘ + Entrée valide la fiche de création,
+// 1 à 6 changent d'onglet, / cherche une tâche.
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && temp.placing && !sheet.open && !$('#ask').open) { actions['cancel-placing'](); return; }
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
@@ -5210,10 +5471,18 @@ document.addEventListener('keydown', (e) => {
     if (f && !f.dataset.id) { e.preventDefault(); f.requestSubmit(); }
     return;
   }
-  if ((e.key === 'n' || e.key === 'N') && !e.ctrlKey && !e.metaKey && !e.altKey && profile && !sheet.open && !$('#ask').open
-    && !e.target.closest?.('input, textarea, select, [contenteditable]')) {
+  const free = !e.ctrlKey && !e.metaKey && !e.altKey && profile && !sheet.open && !$('#ask').open
+    && !e.target.closest?.('input, textarea, select, [contenteditable]');
+  if (!free) return;
+  if (e.key === 'n' || e.key === 'N') {
     e.preventDefault();
     actions['new-task']({ dataset: {} });
+  } else if (/^[1-6]$/.test(e.key)) { // 1 à 6 : les onglets
+    e.preventDefault();
+    actions.tab({ dataset: { value: TAB_ORDER[Number(e.key) - 1] } });
+  } else if (e.key === '/') { // rechercher (Tâches, Journal)
+    const input = $('.tk-search input, .jr-search input');
+    if (input) { e.preventDefault(); input.focus(); }
   }
 });
 
@@ -5359,10 +5628,15 @@ const actions = {
     save(); closeSheet(); render();
   },
   tab(el) {
-    state.ui.tab = el.dataset.value;
-    Object.assign(temp, { openProject: null, placing: null });
-    writeLocal(); render(); window.scrollTo(0, 0);
-    if (state.ui.tab === 'plan') scrollPlanToHour();
+    const from = TAB_ORDER.indexOf(state.ui.tab);
+    const to = TAB_ORDER.indexOf(el.dataset.value);
+    if (from === to && !temp.openProject && window.scrollY > 0) { window.scrollTo({ top: 0, behavior: 'smooth' }); return; } // onglet déjà ouvert : remonter
+    pageTransition(to >= from ? 'fwd' : 'back', () => {
+      state.ui.tab = el.dataset.value;
+      Object.assign(temp, { openProject: null, placing: null });
+      writeLocal(); render();
+      if (state.ui.tab === 'plan') scrollPlanToHour();
+    });
   },
   'go-stats'() { Object.assign(state.ui, { tab: 'stats', period: 'day', offset: 0 }); writeLocal(); render(); window.scrollTo(0, 0); },
   filter(el) { Object.assign(state.ui, { filter: el.dataset.value, subfilter: 'all' }); writeLocal(); render(); },
@@ -5374,10 +5648,37 @@ const actions = {
     if (el.closest('form[data-form="plan"]')) closeSheet(); // depuis un créneau du planning : on referme
     const f = taskFormOpen();
     if (f?.dataset.id) commitTaskForm(f);
-    if (timerOf(id)) afterTimer(stopTimer(id), inSheet ? id : null);
+    if (timerOf(id)) { if (!askStop(id, inSheet ? id : '')) afterTimer(stopTimer(id), inSheet ? id : null); }
     else { startTimer(id); if (inSheet) openTaskSheet(id); }
   },
-  stop(el) { afterTimer(stopTimer(el.dataset.id), null); },
+  stop(el) { if (!askStop(el.dataset.id)) afterTimer(stopTimer(el.dataset.id), null); },
+  'open-timer'(el) {
+    const f = taskFormOpen();
+    if (f?.dataset.id) commitTaskForm(f);
+    if (timerOf(el.dataset.id)) openTimerSheet(el.dataset.id, { back: el.dataset.back || '' });
+    else openTaskSheet(el.dataset.id);
+  },
+  'timer-shift'(el) {
+    const form = el.closest('form');
+    const a = timerOf(form.dataset.task);
+    if (a) timerSetStart(form, a.start - Number(el.dataset.value) * 60e3);
+  },
+  'timer-discard'(el) {
+    const a = timerOf(el.closest('form').dataset.task);
+    if (!a) return;
+    state.timers = state.timers.filter((x) => x !== a);
+    save(); closeSheet(); render(); buzz();
+    toast('Chrono annulé · rien n’a été compté', { label: 'Annuler', fn: () => { delete state.deleted[timerKey(a)]; state.timers.unshift(a); save(); render(); } });
+  },
+  'sess-trim'(el) { // retirer du temps à la fin d'une session
+    const form = el.closest('form');
+    const r = sessTimes(form);
+    if (!r) return;
+    const end = Math.max(r.start + 60e3, r.end - Number(el.dataset.value) * 60e3);
+    form.elements.end.value = hm(new Date(end));
+    sessRefresh(form);
+    buzz();
+  },
   'toggle-star'(el) {
     const t = getTask(el.dataset.id);
     if (!t) return;
@@ -5569,11 +5870,12 @@ const actions = {
   'close-sheet'() { closeSheet(); },
 
   'open-project'(el) {
-    temp.openProject = el.dataset.id;
-    temp.showProjectDone = false;
     history.pushState({ project: el.dataset.id }, '');
-    render();
-    window.scrollTo(0, 0);
+    pageTransition('fwd', () => {
+      temp.openProject = el.dataset.id;
+      temp.showProjectDone = false;
+      render();
+    });
   },
   'close-project'() {
     if (history.state?.project) history.back(); // le popstate referme la page
@@ -5691,12 +5993,14 @@ const actions = {
     afterSessionSheet(back);
   },
 
-  period(el) { Object.assign(state.ui, { period: el.dataset.value, offset: 0 }); temp.statsOpen.clear(); writeLocal(); render(); },
+  period(el) { Object.assign(state.ui, { period: el.dataset.value, offset: 0 }); temp.statsOpen.clear(); temp.statsCol = -1; writeLocal(); render(); },
   offset(el) {
     const v = Number(el.dataset.value);
     state.ui.offset = v === 0 ? 0 : Math.min(0, state.ui.offset + v);
+    temp.statsCol = -1;
     writeLocal(); render();
   },
+  'stats-col'(el) { const i = Number(el.dataset.i); temp.statsCol = temp.statsCol === i ? -1 : i; render(); buzz(); },
   'stats-toggle'(el) {
     const k = el.dataset.id;
     if (temp.statsOpen.has(k)) temp.statsOpen.delete(k); else temp.statsOpen.add(k);
