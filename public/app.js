@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.13.0';
+const VERSION = '2.13.1';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -2619,7 +2619,7 @@ function whenSaid(form) {
   const w = whenValues($('.when', form), day);
   const label = w.multi ? `Plusieurs jours · jusqu’au ${dShort(w.to)}` : scheduleLabel(w.weekly
     ? { repeat: true, days: w.days, every: w.every, weeks: w.count || w.until ? 0 : w.weeks, count: w.count, until: w.until, start: min, dur: w.dur }
-    : { repeat: false, date: day, start: min, dur: w.dur });
+    : { repeat: false, date: day, start: min, dur: w.dur, now: st.s.now && min === st.s.start });
   p.innerHTML = `<span class="ws-ic" aria-hidden="true">✨</span><span class="ws-txt"><b>${esc(label)}</b>${st.src === 'title'
     ? `<small>Lu dans le titre · la tâche s’appellera « ${esc(st.s.title)} »</small></span><button type="button" class="ws-x" data-action="when-off" aria-label="Ne pas tenir compte du titre">${ICON.close}</button>`
     : '</span>'}`;
@@ -4938,7 +4938,21 @@ function parseSchedule(text, { strict = true, base = new Date() } = {}) {
   let habit = false;  // « le lundi » : une habitude (avec une heure ou une durée de série)
   let one = '';       // « lundi », « ce lundi », « lundi prochain » : un jour précis
   let part = -1;      // « matin », « soir »… : heure proposée
+  let dateTag = '';   // catégorie du jour retiré du titre
   let m;
+
+  // Délai : « dans 3 jours », « dans une semaine » (un jour) ; champ « Quand » : « maintenant », « dans 20 min », « dans 1h »
+  const DUR = '(?:(\\d{1,2})\\s?h(?:eures?)?\\s?(\\d{2})?(\\s+et\\s+demie?)?|(\\d{1,3})\\s?(?:min(?:utes?|s)?|mn)|(?:une|1)\\s+heure(\\s+et\\s+demie?)?|(?:une\\s+)?demi-?\\s?heure|(?:un\\s+)?quart\\s+d\'?\\s?heure)(?![a-z])';
+  const durOf = (g) => (g[1] ? Number(g[1]) * 60 + Number(g[2] || 0) + (g[3] ? 30 : 0) : g[4] ? Number(g[4])
+    : /quart/.test(g[0]) ? 15 : /demi-?\s?heure/.test(g[0]) ? 30 : 60 + (g[5] ? 30 : 0));
+  m = take(new RegExp(`\\bdans\\s+${SCH_N}\\s+(jours?|semaines?)\\b`, 'g'), 'date');
+  if (m) { r.date = inDays(schNum(m[1]) * (m[2].startsWith('s') ? 7 : 1)); dateTag = 'date'; }
+  if (!strict && !r.date) {
+    let at = -1;
+    if (take(/\b(?:des\s+)?(?:maintenant|tout\s+de\s+suite|immediatement|a\s+l'?\s?instant)\b/g, 'date')) { at = Math.floor(nowM / 5) * 5; r.now = true; }
+    else if ((m = take(new RegExp(`\\bdans\\s+${DUR}`, 'g'), 'date'))) at = Math.round((nowM + durOf(m)) / 5) * 5;
+    if (at >= 0) { r.date = inDays(Math.floor(at / DAY_MIN)); r.start = at % DAY_MIN; dateTag = 'date'; }
+  }
 
   // Heures : « de 8h30 à 10h30 », « 8h-10h », « entre 14h et 16h » ; durée : « pendant 1h30 », « 45 min » ; « à 7h »
   const H = '(\\d{1,2})\\s?(h(?:eures?)?|:)?\\s?(\\d{2})?';
@@ -4952,10 +4966,9 @@ function parseSchedule(text, { strict = true, base = new Date() } = {}) {
     Object.assign(r, { start: s, dur: e - s });
     return true;
   });
-  take(/\b(?:pendant|durant)\s+(?:(\d{1,2})\s?h(?:eures?)?\s?(\d{2})?(\s+et\s+demie?)?|(\d{1,3})\s?(?:min(?:utes?|s)?|mn)|(?:une|1)\s+heure(\s+et\s+demie?)?|(?:une\s+)?demi-?\s?heure|(?:un\s+)?quart\s+d'?\s?heure)(?![a-z])/g, 'dur', (g) => {
-    const d = g[1] ? Number(g[1]) * 60 + Number(g[2] || 0) + (g[3] ? 30 : 0) : g[4] ? Number(g[4])
-      : /quart/.test(g[0]) ? 15 : /demi-?\s?heure/.test(g[0]) ? 30 : 60 + (g[5] ? 30 : 0);
-    if (!d || d > 16 * 60 || r.start >= 0) return false;
+  take(new RegExp(`\\b(?:pendant|durant|pour)\\s+${DUR}`, 'g'), 'dur', (g) => {
+    const d = durOf(g);
+    if (!d || d > (g[0].startsWith('pour') ? 4 * 60 : 16 * 60) || r.dur) return false; // « pour 14h » : une heure, pas une durée
     r.dur = d;
     return true;
   });
@@ -5024,7 +5037,7 @@ function parseSchedule(text, { strict = true, base = new Date() } = {}) {
   r.repeat = strong || (!fixed && !!r.days && endCond) || (habit && (!strict || r.start >= 0 || part >= 0 || bare)) || (!strict && !fixed && endCond);
 
   // Une seule fois : un jour (« vendredi », « demain », « le 25 », « 25/10 », « lundi 3 novembre »)
-  let dateTag = '';
+  if (r.repeat && r.date) { r.from ||= r.date; r.date = ''; } // « dans 3 jours, tous les lundis » : le début de la série
   if (!r.repeat) {
     if ((one || habit) && r.days.length === 1) { r.date = nextDay(r.days, one === 'ce'); dateTag = 'days'; }
     m = r.date ? null : take(/\b(?:aujourd'?\s?hui|ce\s+(soir|matin|midi)|cet\s+(apres-?\s?midi)|apres-?\s?demain|demain)\b/g, 'date');
@@ -5051,7 +5064,7 @@ function parseSchedule(text, { strict = true, base = new Date() } = {}) {
   if (!spans.length) return null;
 
   // Le titre, sans ce qui a servi (ni les mots de liaison restés en bout)
-  const used = new Set(r.repeat ? ['time', 'dur', 'end', 'from', 'rep', 'days'] : ['time', 'dur', dateTag]);
+  const used = new Set(r.repeat ? ['time', 'dur', 'end', 'from', 'rep', 'days', 'date'] : ['time', 'dur', dateTag]);
   let title = '';
   let last = 0;
   let head = false; // la planification ouvrait le texte : le titre restant prend une majuscule
@@ -5094,7 +5107,7 @@ const dayLabel = (day) => { const w = dayWord(day); return w === 'Aujourd’hui'
 // En une ligne : « Chaque lundi · 8h30–10h30 · pendant 6 semaines ».
 function scheduleLabel(s, withTime = true) {
   const time = withTime && s.start >= 0 ? `${minLabel(s.start)}–${minLabel(Math.min(DAY_MIN, s.start + (s.dur || PLAN_DUR)))}` : '';
-  if (!s.repeat) return [s.date ? dayLabel(s.date) : '', time].filter(Boolean).join(' · ');
+  if (!s.repeat) return [s.now ? 'Maintenant' : s.date ? dayLabel(s.date) : '', time].filter(Boolean).join(' · ');
   const name = (d) => SCH_DAYS[Number(d) - 1];
   const many = (days) => { const n = [...days].map((d) => `${name(d)}s`); return `${n.slice(0, -1).join(', ')} et ${n[n.length - 1]}`; };
   const set = s.days === '1234567' ? 'tous les jours' : s.days === '12345' ? 'du lundi au vendredi' : s.days === '67' ? 'le week-end' : '';
