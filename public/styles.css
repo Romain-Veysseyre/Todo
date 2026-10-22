@@ -416,7 +416,6 @@ body[data-screen="profiles"] { padding-bottom: 0; }
 .star.on svg { fill: currentColor; }
 .star:active { transform: scale(.88); }
 .task.starred { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, #f59e0b 50%, transparent), var(--shadow); }
-.star-toggle svg { width: 18px; height: 18px; color: #f59e0b; fill: currentColor; margin-right: -4px; }
 
 /* ---------- Planning ---------- */
 body[data-tab="plan"] { padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 80px); }
@@ -640,6 +639,12 @@ body.is-dragging, body.is-dragging * { cursor: grabbing !important; }
   box-shadow: 0 10px 30px rgba(0, 0, 0, .2);
 }
 .place-bar .btn { background: rgba(255, 255, 255, .16); color: inherit; }
+.place-bar { flex-wrap: wrap; row-gap: 8px; }
+.pb-text { flex: 1 1 240px; display: flex; align-items: center; gap: 9px; min-width: 0; }
+.pb-text > i { width: 10px; height: 10px; border-radius: 50%; background: var(--c); flex: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--c) 40%, transparent); animation: pulse 1.6s ease-in-out infinite; }
+.pb-durs { display: inline-flex; gap: 2px; padding: 3px; border-radius: 11px; background: rgba(255, 255, 255, .13); }
+.pb-durs button { padding: 5px 9px; border-radius: 8px; font-size: 13px; font-weight: 700; color: inherit; opacity: .78; }
+.pb-durs button.on { background: var(--bg); color: var(--text); opacity: 1; }
 
 /* Zone « retirer du planning » pendant le déplacement d'un bloc */
 .drop-remove {
@@ -888,10 +893,6 @@ body.is-sorting, body.is-sorting * { cursor: grabbing !important; user-select: n
 .empty-day span { color: var(--muted); font-size: 14px; }
 .section-title button svg { width: 15px; height: 15px; }
 
-/* Raccourcis d'échéance dans la fiche d'une tâche */
-.quick-dates { display: flex; flex-wrap: wrap; gap: 6px; margin: -4px 0 12px; }
-.quick-dates button { padding: 6px 12px; border-radius: 999px; background: var(--card-2); border: 1px solid var(--line); font-size: 13.5px; font-weight: 650; }
-.quick-dates button:active { background: var(--accent-soft); }
 
 /* Fête quand la journée est bouclée */
 .confetti { position: fixed; left: 50%; bottom: 32%; z-index: 90; pointer-events: none; }
@@ -917,38 +918,6 @@ body.is-sorting, body.is-sorting * { cursor: grabbing !important; user-select: n
 .dur-pick input, .seg2 input, .daypick input, .swatch input { left: 0; top: 0; width: 1px; height: 1px; margin: 0; }
 
 /* ---------- Planifier dans l'agenda (fiche d'une tâche) ---------- */
-.pp { margin: 14px 0 6px; padding: 10px 12px 12px; border-radius: var(--radius); background: var(--card-2); border: 1px solid var(--line); }
-.pp-head { display: flex; align-items: center; justify-content: space-between; min-height: 28px; margin-bottom: 8px; font-size: 13px; font-weight: 700; color: var(--muted); }
-.pp-head span { display: inline-flex; align-items: center; gap: 6px; }
-.pp-head svg { width: 16px; height: 16px; }
-.pp-off { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; color: var(--muted); visibility: hidden; }
-.pp-off svg { width: 16px; height: 16px; }
-.pp[data-on="1"] .pp-off { visibility: visible; }
-.pp-sugg { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; scrollbar-width: none; }
-.pp-sugg::-webkit-scrollbar { display: none; }
-.pp-chip {
-  flex: none; min-width: 76px; display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
-  padding: 6px 12px; border-radius: 12px; background: var(--card); border: 1.5px solid var(--line); text-align: left;
-}
-.pp-chip small { font-size: 11.5px; font-weight: 650; color: var(--muted); }
-.pp-chip b { font-size: 15px; font-variant-numeric: tabular-nums; }
-.pp-chip:hover { border-color: var(--accent); }
-.pp-chip.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
-.pp-chip.on small { color: inherit; opacity: .85; }
-.pp-detail { display: none; margin-top: 8px; }
-.pp[data-on="1"] .pp-detail { display: block; }
-.pp-detail .row2 .field { margin: 4px 0 8px; }
-.pp-detail .field input { background: var(--card); }
-.pp-bar { min-height: 1px; }
-.ppb-track { position: relative; height: 28px; margin-top: 10px; border-radius: 9px; background: var(--card); border: 1px solid var(--line); overflow: hidden; cursor: pointer; }
-.ppb-track i { position: absolute; top: 5px; bottom: 5px; border-radius: 4px; background: color-mix(in srgb, var(--c) 40%, transparent); }
-.ppb-track i.event { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--c) 38%, transparent) 0 4px, color-mix(in srgb, var(--c) 12%, transparent) 4px 8px); }
-.ppb-sel { position: absolute; top: 2px; bottom: 2px; border-radius: 6px; border: 2px solid var(--accent); background: color-mix(in srgb, var(--accent) 30%, transparent); transition: left .15s, width .15s; }
-.ppb-sel.clash { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 30%, transparent); }
-.ppb-scale { display: flex; justify-content: space-between; margin-top: 3px; font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.ppb-sum { margin: 6px 0 0; font-size: 13px; font-weight: 650; color: var(--accent); }
-.ppb-sum.clash { color: var(--warn); }
-.pp-add { margin-top: 10px; }
 .pp-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
 .pp-plan { display: inline-flex; align-items: center; gap: 2px; padding: 3px 3px 3px 10px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 13px; font-weight: 700; }
 .pp-plan > button:first-child { padding: 3px 2px; }
@@ -1025,8 +994,6 @@ body.ranging, body.ranging * { cursor: ns-resize !important; }
 .when-sum.warn { color: var(--warn); }
 .when-sum.shake { animation: shake .35s; }
 @keyframes shake { 25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
-.pp.multi .pp-time, .pp.multi .pp-bar { display: none; }
-.pp.multi .row2 { grid-template-columns: 1fr; }
 
 /* Créneau d'une série (fiche) */
 .series-box { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin: 4px 0 12px; padding: 10px 12px; border-radius: 12px; background: var(--accent-soft); color: var(--accent); font-size: 14px; font-weight: 650; }
@@ -1071,3 +1038,102 @@ form[data-auto*="s"] .pick-field:last-child > span::after { content: "✨ suggé
 .ac-title b { color: var(--accent); font-weight: 750; }
 .ac-meta { display: flex; align-items: center; gap: 6px; max-width: 100%; font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ac-meta i { width: 8px; height: 8px; border-radius: 50%; background: var(--c); flex: none; }
+
+/* ---------- Fiche d'une tâche : compacte, tient sur un écran ---------- */
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.task-sheet .field { margin: 10px 0; }
+.task-sheet .row2 .field { margin: 6px 0; }
+.tn-title { display: flex; align-items: stretch; gap: 8px; margin: 4px 0 10px; }
+.tn-title .field { flex: 1; min-width: 0; margin: 0; }
+.task-sheet .field input.big { min-height: 54px; font-size: 19px; font-weight: 650; border-radius: 15px; }
+.star-pick {
+  position: relative; flex: none; width: 50px; display: grid; place-items: center; border-radius: 15px; cursor: pointer;
+  background: var(--card-2); border: 1.5px solid var(--line); color: color-mix(in srgb, var(--muted) 75%, transparent); transition: background .15s, border-color .15s, color .15s;
+}
+.star-pick input { position: absolute; opacity: 0; pointer-events: none; }
+.star-pick svg { width: 23px; height: 23px; stroke-width: 1.8; transition: transform .2s; }
+.star-pick:hover { color: #f59e0b; }
+.star-pick:has(input:checked) { color: #f59e0b; background: color-mix(in srgb, #f59e0b 13%, var(--card)); border-color: color-mix(in srgb, #f59e0b 50%, var(--line)); }
+.star-pick:has(input:checked) svg { fill: currentColor; transform: scale(1.1) rotate(-8deg); }
+.star-pick:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Échéance : pastilles */
+.due-row { display: flex; gap: 5px; overflow-x: auto; scrollbar-width: none; margin: 0 -2px; padding: 0 2px; }
+.due-row::-webkit-scrollbar { display: none; }
+.due-chip {
+  position: relative; flex: none; display: inline-flex; align-items: center; gap: 5px; height: 38px; padding: 0 10px; border-radius: 999px; cursor: pointer;
+  background: var(--card-2); border: 1.5px solid var(--line); font-size: 13.5px; font-weight: 650; white-space: nowrap; transition: background .15s, border-color .15s, color .15s;
+}
+.due-chip:hover { border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); }
+.due-chip.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.due-chip svg { width: 16px; height: 16px; }
+.due-chip em { font-style: normal; }
+.due-pick input { position: absolute; inset: 0; width: 100%; height: 100%; min-height: 0; padding: 0; border: 0; opacity: 0; cursor: pointer; }
+.due-row.auto .due-chip.on::before { content: "✨"; }
+
+/* Agenda : un bouton, la tâche se place ensuite à la souris ou au doigt */
+.ag-block { margin: 12px 0 4px; }
+.ag-block .pp-list { margin-bottom: 8px; }
+.place-btn {
+  width: 100%; display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 10px; text-align: left; border-radius: 16px;
+  border: 1.5px solid color-mix(in srgb, var(--accent) 30%, var(--line));
+  background: linear-gradient(120deg, color-mix(in srgb, var(--accent) 14%, var(--card)), color-mix(in srgb, var(--accent) 3%, var(--card)) 70%);
+  transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.place-btn:hover { border-color: var(--accent); box-shadow: 0 8px 22px color-mix(in srgb, var(--accent) 20%, transparent); transform: translateY(-1px); }
+.place-btn:active { transform: scale(.985); }
+.place-ic {
+  width: 42px; height: 42px; flex: none; display: grid; place-items: center; border-radius: 13px; color: #fff;
+  background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 65%, #ec4899)); box-shadow: 0 5px 14px color-mix(in srgb, var(--accent) 38%, transparent);
+}
+.place-ic svg { width: 21px; height: 21px; }
+.place-txt { flex: 1; min-width: 0; }
+.place-txt b { display: block; font-size: 15.5px; }
+.place-txt small { display: block; color: var(--muted); font-size: 12.5px; font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.place-btn > svg { width: 18px; height: 18px; flex: none; color: var(--accent); transition: transform .15s; }
+.place-btn:hover > svg { transform: translateX(3px); }
+
+/* Note repliée */
+.tn-notes { margin: 6px 0 0; }
+.tn-notes summary { display: inline-flex; align-items: center; gap: 6px; padding: 6px 2px; color: var(--muted); font-size: 14px; font-weight: 650; cursor: pointer; list-style: none; }
+.tn-notes summary::-webkit-details-marker { display: none; }
+.tn-notes summary:hover { color: var(--accent); }
+.tn-notes summary svg { width: 16px; height: 16px; transition: transform .2s; }
+.tn-notes[open] summary svg { transform: rotate(45deg); }
+.tn-notes textarea {
+  width: 100%; margin-top: 2px; padding: 11px 13px; border-radius: 12px; border: 1.5px solid var(--line); background: var(--card-2);
+  font-size: 16px; line-height: 1.45; resize: vertical; outline: none;
+}
+.tn-notes textarea:focus { border-color: var(--accent); }
+
+/* Boutons de la fiche de création, toujours visibles en bas */
+.task-sheet.is-new { padding-bottom: 0; }
+.tn-actions {
+  position: sticky; bottom: 0; z-index: 2; display: flex; gap: 10px; margin: 12px -18px 0;
+  padding: 12px 18px calc(14px + env(safe-area-inset-bottom)); background: var(--card); border-top: 1px solid var(--line);
+}
+.tn-actions .btn { min-height: 52px; border-radius: 15px; font-size: 16.5px; }
+.tn-actions .btn.primary { flex: 1; font-weight: 750; box-shadow: 0 8px 20px color-mix(in srgb, var(--accent) 32%, transparent); }
+.tn-start { color: var(--run); background: var(--run-soft); }
+.tn-start svg { width: 16px; height: 16px; }
+kbd { margin-left: 4px; padding: 2px 7px; border-radius: 6px; background: color-mix(in srgb, currentColor 18%, transparent); font: inherit; font-size: 11.5px; font-weight: 700; letter-spacing: .02em; }
+
+/* Planning : tâche « en main » */
+.carry-ghost {
+  position: fixed; left: 0; top: 0; z-index: 60; pointer-events: none; max-width: 240px; padding: 7px 12px; border-radius: 11px;
+  background: var(--c); color: #fff; font-size: 13.5px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, .25);
+}
+.carry-ghost.over { display: none; }
+.plan-preview.carry {
+  display: flex; flex-direction: column; gap: 1px; border-style: solid; border-width: 2px; white-space: normal; line-height: 1.2;
+  background: color-mix(in srgb, var(--c) 28%, var(--card)); color: var(--text); box-shadow: 0 8px 20px color-mix(in srgb, var(--c) 30%, transparent);
+}
+.plan-preview.carry b { overflow: hidden; text-overflow: ellipsis; }
+.plan-preview.carry span { font-size: 10.5px; font-weight: 650; opacity: .8; }
+body.placing .cal-col.due { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--warn) 60%, transparent); }
+body.placing .cal-col.due::before {
+  content: "Échéance"; position: absolute; top: 4px; left: 50%; transform: translateX(-50%); z-index: 3; pointer-events: none;
+  padding: 1px 6px; border-radius: 6px; background: var(--warn); color: #fff; font-size: 10px; font-weight: 800; white-space: nowrap;
+}
+@media (min-width: 420px) { .due-chip { padding: 0 14px; font-size: 14px; } .due-row { gap: 6px; } }

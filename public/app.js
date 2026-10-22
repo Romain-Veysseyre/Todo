@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.8.0';
+const VERSION = '2.9.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -432,6 +432,7 @@ function render() {
   if (openP) document.body.dataset.inProject = '1'; else delete document.body.dataset.inProject;
   if (tab !== 'plan') temp.placing = null;
   document.body.classList.toggle('placing', !!temp.placing);
+  if (!temp.placing) $('.carry-ghost')?.remove();
   $('#title').textContent = openP ? openP.name : { today: 'Ma journée', tasks: 'Tâches', plan: 'Planning', projects: 'Projets', stats: 'Statistiques' }[tab];
   $$('.tabbar button').forEach((b) => b.classList.toggle('on', b.dataset.value === tab));
   renderBanner();
@@ -1005,10 +1006,11 @@ function openTaskSheet(id, preset) {
   const sessions = isNew ? [] : state.sessions.filter((s) => s.taskId === id).sort((x, y) => y.start - x.start);
   const total = sessions.reduce((n, s) => n + (s.end - s.start), 0);
 
+  // Création : « Créer » est le bouton principal (et le seul validé par Entrée) ; « Lancer » crée et démarre le chrono.
   const footer = isNew
-    ? `<div class="sheet-actions">
-        <button class="btn" value="create">Créer</button>
-        <button class="btn primary grow" value="start">${ICON.play} Créer et lancer</button>
+    ? `<div class="tn-actions">
+        <button type="button" class="btn tn-start" data-action="new-start" title="Créer la tâche et lancer son chrono">${ICON.play} Lancer</button>
+        <button class="btn primary" value="create">Créer${matchMedia('(pointer: fine)').matches ? '<kbd>Entrée</kbd>' : ''}</button>
       </div>`
     : `<section class="time-box">
         <div class="time-head">
@@ -1026,24 +1028,24 @@ function openTaskSheet(id, preset) {
         <button type="button" class="btn primary grow" data-action="close-sheet">OK</button>
       </div>`;
 
-  openSheet(`<form class="sheet-body" data-form="task" data-id="${id || ''}" autocomplete="off">
+  openSheet(`<form class="sheet-body task-sheet${isNew ? ' is-new' : ''}" data-form="task" data-id="${id || ''}" autocomplete="off">
     ${head(isNew ? 'Nouvelle tâche' : 'Tâche')}
-    <label class="field"><span>Tâche</span>${emojiField(`<input class="big" name="title" value="${esc(t.title)}" placeholder="Ex. Préparer le cours S2" maxlength="200" required enterkeyhint="done"${isNew ? ' autofocus' : ''}>`)}</label>
-    <label class="toggle star-toggle"><input type="checkbox" name="starred"${t.starred ? ' checked' : ''}> ${ICON.star} Prioritaire (affichée en premier)</label>
-    ${pickFields(t.projectId, t.subprojectId)}
-    <label class="field"><span>Échéance (facultatif)</span><input type="date" name="deadline" value="${esc(t.deadline || '')}"></label>
-    <div class="quick-dates">
-      <button type="button" data-action="set-deadline" data-value="0">Aujourd’hui</button>
-      <button type="button" data-action="set-deadline" data-value="1">Demain</button>
-      <button type="button" data-action="set-deadline" data-value="7">Dans 1 semaine</button>
-      <button type="button" data-action="set-deadline" data-value="">Aucune</button>
+    <div class="tn-title">
+      <label class="star-pick" title="Prioritaire : affichée en premier"><input type="checkbox" name="starred"${t.starred ? ' checked' : ''} aria-label="Prioritaire"><span>${ICON.star}</span></label>
+      <label class="field"><span class="sr-only">Tâche</span>${emojiField(`<input class="big" name="title" value="${esc(t.title)}" placeholder="${isNew ? 'Que faut-il faire ?' : 'Nom de la tâche'}" maxlength="200" required enterkeyhint="done"${isNew ? ' autofocus' : ''}>`)}</label>
     </div>
-    ${ppSection(isNew ? null : id)}
-    <label class="field"><span>Notes</span><textarea name="notes" rows="3" placeholder="Détails, étapes, liens…">${esc(t.notes || '')}</textarea></label>
+    ${pickFields(t.projectId, t.subprojectId)}
+    <div class="field due-field"><span>Échéance</span>${dueChips(t.deadline)}</div>
+    ${agendaBlock(isNew ? '' : id)}
+    <details class="tn-notes"${t.notes ? ' open' : ''}><summary>${ICON.plus} ${t.notes ? 'Note' : 'Ajouter une note'}</summary>
+      <textarea name="notes" rows="3" placeholder="Détails, étapes, liens…" aria-label="Note">${esc(t.notes || '')}</textarea></details>
     ${footer}
   </form>`);
+  const form = $('form', sheet);
+  Object.assign(form.dataset, { due: 'default', dueDef: t.deadline || '' });
+  dueRefresh(form);
   // Création : suggestions de titre et de projet (depuis la page d'un projet, ce projet reste fixé).
-  if (isNew) suggestInit($('form', sheet), preset?.projectId ? { p: preset.projectId, s: preset.subprojectId || '' } : {});
+  if (isNew) suggestInit(form, preset?.projectId ? { p: preset.projectId, s: preset.subprojectId || '' } : {});
 }
 
 function readTaskForm(form) {
@@ -1076,14 +1078,13 @@ function commitTaskForm(form) {
   save();
 }
 
-function createTask(form, start) {
+// how : « create » (Créer), « start » (Lancer : crée et démarre le chrono), « place » (placer dans l'agenda).
+function createTask(form, how = 'create') {
   const v = readTaskForm(form);
   if (!v.title) return;
-  // Quand : créneau touché dans l'agenda, ou bloc « Planifier dans l'agenda » de la fiche
+  // Créée depuis un créneau de l'agenda : durée, répétition ou plusieurs jours
   const slotDay = form.dataset.slotDay;
-  const pp = form.querySelector('.pp[data-on="1"]');
-  const pv = pp && ppValues(pp);
-  const when = slotDay ? whenValues($('.when', form), slotDay) : pv && pv.day && (pv.hasTime || pv.when.multi) ? pv.when : null;
+  const when = slotDay ? whenValues($('.when', form), slotDay) : null;
   if (when && whenInvalid($('.when', form), when)) return;
   const t = { id: uid(), ...v, done: false, doneAt: null, createdAt: now() };
   state.tasks.push(t);
@@ -1096,14 +1097,11 @@ function createTask(form, start) {
     if (form.dataset.event) eventConverted(form.dataset.event, t, made);
     return;
   }
-  let planned = '';
-  if (when) {
-    const made = addPlans(t.id, pv.day, pv.min, when);
-    const msg = whenDone(when, pv.day, pv.min, made.length);
-    planned = ` · ${msg.charAt(0).toLowerCase()}${msg.slice(1)}`;
-  }
-  if (start) { startTimer(t.id); toast(`C’est parti, chrono lancé${planned}`); }
-  else { save(); render(); toast(`Tâche ajoutée${planned}`); }
+  if (how === 'start') { startTimer(t.id); toast('C’est parti, chrono lancé'); return; }
+  save();
+  if (how === 'place') { placeInAgenda(t.id); return; }
+  render();
+  toast('Tâche ajoutée', { label: 'Planifier', fn: () => placeInAgenda(t.id) });
 }
 
 // Fiche d'une tâche existante : chaque modification est enregistrée aussitôt.
@@ -1232,7 +1230,7 @@ sheet.addEventListener('submit', (e) => {
   const form = e.target;
   if (form.dataset.form === 'task') {
     if (form.dataset.id) closeSheet();
-    else createTask(form, e.submitter?.value === 'start');
+    else createTask(form, 'create');
   } else if (form.dataset.form === 'project') saveProject(form);
   else if (form.dataset.form === 'session') saveSession(form);
   else if (form.dataset.form === 'clean') {
@@ -1987,7 +1985,8 @@ function viewPlan() {
     const visible = (it) => ({ ...it, s0: it.s, s: Math.max(it.s, VIEW_START) });
     const evs = pack(eventsOn(d).map((ev) => visible({ ev, s: ev.start, e: Math.max(ev.end, ev.start + SNAP) })).filter((it) => it.e > it.s));
     const pls = pack(plansOn(key).map((p) => visible({ p, s: minOfDay(p.start, key), e: Math.max(minOfDay(p.end, key), minOfDay(p.start, key) + SNAP) })).filter((it) => it.e > it.s));
-    return `<div class="cal-col${key === today ? ' today' : ''}" data-action="slot" data-day="${key}">
+    const due = temp.placing && getTask(temp.placing)?.deadline === key; // tâche en main : son jour d'échéance est signalé
+    return `<div class="cal-col${key === today ? ' today' : ''}${due ? ' due' : ''}" data-action="slot" data-day="${key}">
       ${evs.map((it) => `<div class="ev-block" data-action="open-event" data-id="${it.ev.id}" style="${boxStyle(it)};--c:${it.ev.color || EVENT_COLORS[0]}">
         <b>${esc(it.ev.title)}</b><span>${shortLabel(it.ev.start)}–${shortLabel(it.ev.end)}</span></div>`).join('')}
       ${pls.map((it) => {
@@ -2075,7 +2074,10 @@ function viewPlan() {
         : '<p class="side-empty">Aucune tâche à faire. Ajoute-en dans l’onglet Tâches.</p>'}
     </aside>`;
   const floating = placing
-    ? `<div class="place-bar"><span>Touche un créneau pour placer <b>« ${esc(placing.title)} »</b></span><button type="button" class="btn small" data-action="cancel-placing">Annuler</button></div>`
+    ? `<div class="place-bar" style="--c:${colorOf(placing.projectId)}">
+        <span class="pb-text"><i></i><span>${matchMedia('(pointer: fine)').matches ? 'Clique sur' : 'Touche'} un créneau pour placer <b>« ${esc(placing.title)} »</b></span></span>
+        <span class="pb-durs" role="group" aria-label="Durée">${[30, 60, 90, 120].map((d) => `<button type="button" class="${d === (temp.placeDur || PLAN_DUR) ? 'on' : ''}" data-action="place-dur" data-value="${d}">${fmtDur(d * 60e3)}</button>`).join('')}</span>
+        <button type="button" class="btn small" data-action="cancel-placing">Annuler</button></div>`
     : '';
 
   return `<div class="plan-bar">
@@ -2720,9 +2722,11 @@ function placeHere(el, e) {
   const col = el.closest('.cal-col');
   if (!temp.placing || !col) return false;
   const id = temp.placing;
+  const dur = temp.placeDur || PLAN_DUR;
   temp.placing = null;
   document.body.classList.remove('placing');
-  createPlan(id, col.dataset.day, slotAt(col, e.clientY));
+  $('.carry-ghost')?.remove();
+  createPlan(id, col.dataset.day, carryAt(col, e.clientY, dur), dur);
   return true;
 }
 
@@ -2765,7 +2769,7 @@ function emojiField(inputHtml) {
 }
 
 function toggleEmojiPanel(field) {
-  const anchor = field.closest('label.field, .sub-row') || field;
+  const anchor = field.closest('.tn-title, label.field, .sub-row') || field;
   const open = anchor.nextElementSibling?.classList.contains('emoji-panel');
   $$('.emoji-panel').forEach((x) => x.remove());
   if (open) return;
@@ -3486,7 +3490,7 @@ function suggestInit(form, lock = {}) {
   const row = document.createElement('div');
   row.className = 'sug';
   row.setAttribute('aria-live', 'polite');
-  input.closest('label.field').insertAdjacentElement('afterend', row);
+  (input.closest('.tn-title') || input.closest('label.field')).insertAdjacentElement('afterend', row);
   sugRender(form);
   // L'index se prépare juste après l'affichage de la fiche (aussitôt prêt si les données n'ont pas changé).
   setTimeout(() => {
@@ -3601,7 +3605,7 @@ sheet.addEventListener('input', (e) => {
   if (!st) return;
   st.sel = -1;
   clearTimeout(st.timer);
-  st.timer = setTimeout(() => suggestRefresh(form, e.isTrusted), 90); // emoji ajouté par le sélecteur : pas de liste
+  st.timer = setTimeout(() => { dueDetect(form); suggestRefresh(form, e.isTrusted); }, 90); // emoji ajouté par le sélecteur : pas de liste
 });
 sheet.addEventListener('focusin', (e) => {
   const form = e.target.name === 'title' && e.target.form;
@@ -4106,117 +4110,182 @@ setInterval(() => {
   if (state.ui.tab === 'today' && profile && !document.hidden && !sheet.open && !$('#ask').open && !cs.card) render();
 }, 60e3);
 
-/* ----- Planifier une tâche depuis sa fiche : suggestions de créneaux libres + frise du jour ----- */
-
-// Prochains créneaux libres (aujourd'hui, demain, après-demain) pour une durée donnée.
-function slotSuggestions(dur = PLAN_DUR) {
-  const out = [];
-  for (let k = 0; k < 3; k++) {
-    const d = new Date();
-    d.setDate(d.getDate() + k);
-    const day = ymd(d);
-    const from = k === 0 ? Math.max(VIEW_START, Math.ceil(nowMin() / 15) * 15) : 8 * 60;
-    const gaps = freeGaps(dayAgenda(day), from).filter((g) => g.e - g.s >= dur);
-    const picks = [];
-    if (gaps[0]) picks.push(gaps[0].s);
-    // une 2e idée : l'après-midi (demain et après) ou le créneau libre suivant (aujourd'hui)
-    const pm = k > 0 && gaps.find((g) => g.e - Math.max(g.s, 14 * 60) >= dur);
-    if (pm) picks.push(Math.max(pm.s, 14 * 60));
-    else if (gaps[1]) picks.push(gaps[1].s);
-    for (const min of [...new Set(picks)].slice(0, k === 2 ? 1 : 2)) out.push({ day, min, k });
-  }
-  return out.slice(0, 5);
-}
-
 const dayWord = (day) => {
   const diff = Math.round((parseYmd(day) - startOfDay(new Date())) / 864e5);
   return diff === 0 ? 'Aujourd’hui' : diff === 1 ? 'Demain' : cap(fmt(parseYmd(day), { weekday: 'short' }).replace('.', ''));
 };
 
-// Bloc « Planifier dans l'agenda » de la fiche d'une tâche (taskId : tâche existante).
-function ppSection(taskId) {
+/* ----- Fiche d'une tâche : échéance, date écrite dans le titre, agenda ----- */
+
+const DUE_QUICK = [[0, 'Aujourd’hui'], [1, 'Demain'], [7, '+1 sem.']];
+
+// Échéance : pastilles à bascule (toucher celle qui est choisie la retire), plus une date au choix.
+// Vide par défaut : sans date choisie, il n'y a simplement pas d'échéance.
+function dueChips(deadline) {
+  return `<div class="due-row" role="group" aria-label="Échéance">
+    ${DUE_QUICK.map(([n, label]) => `<button type="button" class="due-chip" data-action="set-deadline" data-value="${n}">${label}</button>`).join('')}
+    <label class="due-chip due-pick">${ICON.cal}<em>Date</em><input type="date" name="deadline" value="${esc(deadline || '')}" aria-label="Choisir une date d’échéance"></label>
+  </div>`;
+}
+
+function dueRefresh(form) {
+  const input = form?.elements.deadline;
+  if (!input) return;
+  const v = input.value;
+  const auto = form.dataset.due === 'auto';
+  let quick = false;
+  for (const b of form.querySelectorAll('.due-chip[data-value]')) {
+    const on = !!v && v === addDays(ymd(new Date()), Number(b.dataset.value));
+    b.classList.toggle('on', on);
+    quick ||= on;
+  }
+  const pick = form.querySelector('.due-pick');
+  pick.classList.toggle('on', !!v && !quick);
+  pick.querySelector('em').textContent = v && !quick ? fmt(parseYmd(v), { weekday: 'short', day: 'numeric', month: 'short' }) : 'Date';
+  const row = form.querySelector('.due-row');
+  row.classList.toggle('auto', auto && !!v);
+  row.title = auto && v ? 'Date trouvée dans le titre · touche-la pour la retirer' : '';
+}
+
+const WEEKDAYS = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'];
+const MONTHS = ['janvier', 'fevrier', 'mars', 'avril', 'mai', 'juin', 'juillet', 'aout', 'septembre', 'octobre', 'novembre', 'decembre'];
+
+// Date écrite dans le titre : « demain », « vendredi », « ce week-end », « dans 3 jours », « le 25 », « 25/10 », « 3 novembre »…
+function dateInTitle(title) {
+  const t = ` ${plain(title)} `;
+  const base = startOfDay(new Date());
+  const inDays = (n) => { const d = new Date(base); d.setDate(d.getDate() + n); return ymd(d); };
+  // jour J du mois M : cette année, ou l'an prochain si la date est passée
+  const onDate = (d, m, y) => {
+    let date = new Date(y ?? base.getFullYear(), m, d);
+    if (y == null && date < base) date = new Date(base.getFullYear() + 1, m, d);
+    return date.getDate() === d && date.getMonth() === m ? ymd(date) : '';
+  };
+  if (t.includes(' apres demain ')) return inDays(2);
+  if (t.includes(' demain ')) return inDays(1);
+  if (/ (aujourd hui|ce soir|ce matin|cet apres midi|cet aprem) /.test(t)) return inDays(0);
+  let m = t.match(/ dans (\d{1,2}) (jour|jours|semaine|semaines) /);
+  if (m) return inDays(Number(m[1]) * (m[2][0] === 's' ? 7 : 1));
+  if (t.includes(' semaine prochaine ')) return inDays(7);
+  if (/ (week end|weekend) /.test(t)) return inDays(base.getDay() === 0 ? 0 : 6 - base.getDay());
+  for (let i = 0; i < 7; i++) if (t.includes(` ${WEEKDAYS[i]} `)) return inDays((i - base.getDay() + 7) % 7 || 7);
+  m = String(title).match(/(?:^|[^\d/])(\d{1,2})\/(\d{1,2})(?:\/(\d{2}|\d{4}))?(?![\d/])/);
+  // (une fraction comme « 1/2 » n'est pas une date : il faut un nombre à deux chiffres ou une année)
+  if (m && (m[3] || m[1].length === 2 || m[2].length === 2)) return onDate(Number(m[1]), Number(m[2]) - 1, m[3] ? Number(m[3].length === 2 ? `20${m[3]}` : m[3]) : undefined);
+  m = t.match(new RegExp(` (1er|\\d{1,2}) (${MONTHS.join('|')}) `));
+  if (m) return onDate(m[1] === '1er' ? 1 : Number(m[1]), MONTHS.indexOf(m[2]));
+  m = t.match(/ le (1er|\d{1,2}) /);
+  if (m) {
+    const d = m[1] === '1er' ? 1 : Number(m[1]);
+    return d >= base.getDate() ? onDate(d, base.getMonth(), base.getFullYear()) : onDate(d, base.getMonth() + 1 > 11 ? 0 : base.getMonth() + 1, base.getMonth() === 11 ? base.getFullYear() + 1 : base.getFullYear());
+  }
+  return '';
+}
+
+// Création : une date écrite dans le titre devient l'échéance (marquée ✨), tant qu'on ne l'a pas choisie soi-même.
+function dueDetect(form) {
+  const input = form.elements.deadline;
+  const mode = form.dataset.due;
+  if (!input || form.dataset.id || mode === 'manual') return;
+  const found = dateInTitle(form.elements.title.value);
+  if (found) { input.value = found; form.dataset.due = 'auto'; }
+  else if (mode === 'auto') { input.value = form.dataset.dueDef || ''; form.dataset.due = 'default'; }
+  dueRefresh(form);
+}
+
+sheet.addEventListener('change', (e) => {
+  if (e.target.name !== 'deadline') return;
+  if (e.isTrusted) e.target.form.dataset.due = 'manual'; // date choisie à la main
+  dueRefresh(e.target.form);
+});
+// Ordinateur : un clic sur « Date… » ouvre directement le calendrier.
+sheet.addEventListener('click', (e) => {
+  if (!e.target.matches?.('.due-pick input') || !matchMedia('(pointer: fine)').matches) return;
+  try { e.target.showPicker(); } catch (_) { /* le navigateur l'ouvre lui-même */ }
+});
+
+// Agenda depuis la fiche : les prochains créneaux de la tâche, et un bouton pour la placer soi-même dans le planning.
+function agendaBlock(taskId) {
   const upcoming = taskId ? state.plans.filter((p) => p.taskId === taskId && !p.done && p.end > now()).sort((a, b) => a.start - b.start) : [];
   const seen = new Set(); // une série n'affiche que son prochain créneau
-  return `<section class="pp" data-on="0">
-    <div class="pp-head"><span>${ICON.cal} ${taskId ? 'Créneaux dans l’agenda' : 'Planifier dans l’agenda'}</span>
-      <button type="button" class="pp-off" data-action="pp-off" aria-label="Ne pas planifier">${ICON.close}</button></div>
-    ${upcoming.length ? `<div class="pp-list">${upcoming.filter((p) => !p.series || (!seen.has(p.series) && seen.add(p.series))).map((p) => {
-      const d = new Date(p.start);
-      const left = p.series ? upcoming.filter((x) => x.series === p.series).length : 0;
-      const label = p.allDay ? planLabel(p) : `${dayWord(ymd(d))} · ${minLabel(d.getHours() * 60 + d.getMinutes())}–${hm(new Date(p.end)).replace(':', 'h')}`;
-      return `<span class="pp-plan"><button type="button" data-action="open-plan" data-id="${p.id}">${label}${left > 1 ? ` · ↻ ${left}` : ''}</button>
-        <button type="button" class="pp-x" data-action="pp-remove" data-id="${p.id}" data-task="${taskId}" aria-label="Retirer ce créneau">${ICON.close}</button></span>`;
-    }).join('')}</div>` : ''}
-    <div class="pp-sugg">${slotSuggestions().map((s) => `<button type="button" class="pp-chip" data-action="pp-pick" data-day="${s.day}" data-min="${s.min}">
-        <small>${dayWord(s.day)}</small><b>${minLabel(s.min)}</b></button>`).join('')}
-      <button type="button" class="pp-chip other" data-action="pp-other"><small>Autre</small><b>📆 jour</b></button></div>
-    <div class="pp-detail">
-      <div class="row2">
-        <label class="field"><span>Jour</span><input type="date" name="plan_date"></label>
-        <label class="field pp-time"><span>Début</span><input type="time" name="plan_time" step="300"></label>
-      </div>
-      ${whenFields(ymd(new Date()), [30, 60, 90, 120], PLAN_DUR)}
-      <div class="pp-bar"></div>
-      ${taskId ? `<button type="button" class="btn primary wide pp-add" data-action="pp-add" data-id="${taskId}">${ICON.plus} Ajouter ce créneau</button>` : ''}
-    </div>
-  </section>`;
+  const chips = upcoming.filter((p) => !p.series || (!seen.has(p.series) && seen.add(p.series))).map((p) => {
+    const d = new Date(p.start);
+    const left = p.series ? upcoming.filter((x) => x.series === p.series).length : 0;
+    const label = p.allDay ? planLabel(p) : `${dayWord(ymd(d))} · ${minLabel(d.getHours() * 60 + d.getMinutes())}–${hm(new Date(p.end)).replace(':', 'h')}`;
+    return `<span class="pp-plan"><button type="button" data-action="open-plan" data-id="${p.id}">${label}${left > 1 ? ` · ↻ ${left}` : ''}</button>
+      <button type="button" class="pp-x" data-action="pp-remove" data-id="${p.id}" data-task="${taskId}" aria-label="Retirer ce créneau">${ICON.close}</button></span>`;
+  }).join('');
+  return `<div class="ag-block">
+    ${chips ? `<div class="pp-list">${chips}</div>` : ''}
+    <button type="button" class="place-btn" data-action="${taskId ? 'place-task' : 'new-place'}"${taskId ? ` data-id="${taskId}"` : ''}>
+      <span class="place-ic">${ICON.cal}</span>
+      <span class="place-txt"><b>${chips ? 'Placer un autre créneau' : 'Placer dans l’agenda'}</b>
+        <small>${matchMedia('(pointer: fine)').matches ? 'Elle suit ta souris : un clic sur un créneau la dépose' : 'Puis touche un créneau pour la poser'}</small></span>
+      ${ICON.right}</button>
+  </div>`;
 }
 
-function ppValues(pp) {
-  const day = pp.querySelector('[name="plan_date"]').value;
-  const when = whenValues(pp.querySelector('.when'), day || ymd(new Date()));
-  return {
-    day, when, dur: when.dur,
-    min: toMin(pp.querySelector('[name="plan_time"]').value),
-    hasTime: !!pp.querySelector('[name="plan_time"]').value,
-  };
+// La tâche passe « en main » dans le planning (semaine de son échéance) : elle suit la souris,
+// un clic (ou un toucher) sur un créneau la dépose, avec la durée choisie dans la barre du bas.
+function placeInAgenda(id) {
+  const t = getTask(id);
+  if (!t) return;
+  Object.assign(state.ui, { tab: 'plan', planDate: t.deadline || ymd(new Date()) });
+  Object.assign(temp, { placing: id, placeDur: temp.placeDur || PLAN_DUR, openProject: null });
+  closeSideOnPhone();
+  writeLocal(); render();
+  window.scrollTo(0, 0);
+  scrollPlanToHour();
 }
 
-// Frise du jour choisi (6h → 24h) : occupé en couleur, créneau choisi entouré, alerte s'il chevauche.
-function ppBar(pp) {
-  const v = ppValues(pp);
-  if (!v.day || !v.hasTime) return '';
-  const items = dayAgenda(v.day);
-  const pos = (m) => (((Math.max(VIEW_START, Math.min(DAY_MIN, m)) - VIEW_START) / VIEW_SPAN) * 100).toFixed(2);
-  const s = v.min;
-  const e = Math.min(DAY_MIN, s + v.dur);
-  const clash = items.find((i) => i.s < e && i.e > s);
-  return `<div class="ppb-track" data-action="pp-bar" title="Touche la frise pour choisir l’heure">
-      ${items.map((i) => `<i class="${i.kind}" style="left:${pos(i.s)}%;width:${(pos(i.e) - pos(i.s)).toFixed(2)}%;--c:${i.kind === 'event' ? i.ev.color || EVENT_COLORS[0] : colorOf(i.t.projectId)}"></i>`).join('')}
-      <b class="ppb-sel${clash ? ' clash' : ''}" style="left:${pos(s)}%;width:${Math.max(1.2, pos(e) - pos(s)).toFixed(2)}%"></b>
-    </div>
-    <div class="ppb-scale"><span>6h</span><span>12h</span><span>18h</span><span>24h</span></div>
-    <p class="ppb-sum${clash ? ' clash' : ''}">${clash
-      ? `⚠︎ Chevauche « ${esc(clash.kind === 'event' ? clash.ev.title : clash.t.title)} »`
-      : `${esc(cap(fmt(parseYmd(v.day), { weekday: 'long', day: 'numeric', month: 'long' })))} · ${minLabel(s)} → ${minLabel(e)}`}</p>`;
+// Début du créneau visé (au quart d'heure), le bloc restant dans la journée.
+function carryAt(col, y, dur) {
+  const r = col.getBoundingClientRect();
+  const m = VIEW_START + ((y - r.top) / r.height) * VIEW_SPAN;
+  return Math.max(VIEW_START, Math.min(DAY_MIN - dur, Math.floor(m / SNAP) * SNAP));
 }
 
-// Met à jour la frise, la suggestion surlignée et le libellé du bouton « Créer ».
-function ppRefresh(pp) {
-  const v = ppValues(pp);
-  whenRefresh(pp.querySelector('.when'), v.day || ymd(new Date()));
-  pp.classList.toggle('multi', v.when.multi); // plusieurs jours : pas d'heure ni de frise
-  pp.querySelector('.pp-bar').innerHTML = v.when.multi ? '' : ppBar(pp);
-  let matched = false;
-  for (const c of pp.querySelectorAll('.pp-chip[data-day]')) {
-    const on = pp.dataset.on === '1' && c.dataset.day === v.day && Number(c.dataset.min) === v.min && v.hasTime;
-    c.classList.toggle('on', on);
-    matched ||= on;
+// Souris : une étiquette suit le curseur ; au-dessus d'un jour, l'aperçu du bloc montre où il sera posé.
+function carryMove(x, y) {
+  const t = getTask(temp.placing);
+  if (!t) return;
+  let ghost = $('.carry-ghost');
+  if (!ghost) { ghost = Object.assign(document.createElement('div'), { className: 'carry-ghost' }); document.body.appendChild(ghost); }
+  ghost.style.setProperty('--c', colorOf(t.projectId));
+  ghost.style.transform = `translate(${x + 14}px, ${y + 16}px)`;
+  ghost.textContent = t.title;
+  const col = document.elementFromPoint(x, y)?.closest('.cal-col');
+  for (const p of $$('.plan-preview.carry')) if (p.parentElement !== col) p.remove();
+  ghost.classList.toggle('over', !!col);
+  if (!col) return;
+  const dur = temp.placeDur || PLAN_DUR;
+  const st = carryAt(col, y, dur);
+  let pv = $('.plan-preview.carry', col);
+  if (!pv) { pv = Object.assign(document.createElement('div'), { className: 'plan-preview carry' }); col.appendChild(pv); }
+  pv.style.setProperty('--c', colorOf(t.projectId));
+  pv.style.top = `${posPct(st)}%`;
+  pv.style.height = `${((dur / VIEW_SPAN) * 100).toFixed(3)}%`;
+  pv.innerHTML = `<b>${esc(t.title)}</b><span>${minLabel(st)} – ${minLabel(st + dur)}</span>`;
+}
+document.addEventListener('pointermove', (e) => {
+  if (temp.placing && e.pointerType === 'mouse' && state.ui.tab === 'plan') carryMove(e.clientX, e.clientY);
+});
+
+// Raccourcis : Échap repose la tâche « en main », N crée une tâche, Ctrl / ⌘ + Entrée valide la fiche de création.
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && temp.placing && !sheet.open && !$('#ask').open) { actions['cancel-placing'](); return; }
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    const f = e.target.closest?.('form[data-form="task"]');
+    if (f && !f.dataset.id) { e.preventDefault(); f.requestSubmit(); }
+    return;
   }
-  pp.querySelector('.pp-chip.other').classList.toggle('on', pp.dataset.on === '1' && !matched);
-  const create = pp.closest('form')?.querySelector('button[value="create"]');
-  if (create) create.textContent = pp.dataset.on === '1' ? 'Créer et planifier' : 'Créer';
-}
+  if ((e.key === 'n' || e.key === 'N') && !e.ctrlKey && !e.metaKey && !e.altKey && profile && !sheet.open && !$('#ask').open
+    && !e.target.closest?.('input, textarea, select, [contenteditable]')) {
+    e.preventDefault();
+    actions['new-task']({ dataset: {} });
+  }
+});
 
-function ppOpen(pp, day, min) {
-  pp.dataset.on = '1';
-  pp.querySelector('[name="plan_date"]').value = day;
-  pp.querySelector('[name="plan_time"]').value = hhmm(min);
-  ppRefresh(pp);
-}
-
-sheet.addEventListener('change', (e) => { const pp = e.target.closest('.pp'); if (pp) ppRefresh(pp); });
-sheet.addEventListener('input', (e) => { const pp = e.target.closest('.pp'); if (pp && e.target.type !== 'radio') ppRefresh(pp); });
 
 /* ---------- Actions ---------- */
 
@@ -4281,7 +4350,12 @@ const actions = {
   'emoji-tab'(el) { const panel = el.closest('.emoji-panel'); $('.emoji-search', panel).value = ''; fillEmojiPanel(panel, el.dataset.value); },
   'emoji-pick'(el) { pickEmoji(el); },
   'emoji-close'(el) { el.closest('.emoji-panel')?.remove(); },
-  'cancel-placing'() { temp.placing = null; document.body.classList.remove('placing'); render(); },
+  'cancel-placing'() { temp.placing = null; document.body.classList.remove('placing'); $('.carry-ghost')?.remove(); render(); },
+  'place-dur'(el) { temp.placeDur = Number(el.dataset.value); $$('.pb-durs button').forEach((b) => b.classList.toggle('on', b === el)); },
+  // Fiche de création : « Lancer » et « Placer dans l'agenda » créent aussi la tâche (le titre est requis).
+  'new-start'(el) { const form = el.closest('form'); if (form.reportValidity()) createTask(form, 'start'); },
+  'new-place'(el) { const form = el.closest('form'); if (form.reportValidity()) createTask(form, 'place'); },
+  'place-task'(el) { closeSheet(); placeInAgenda(el.dataset.id); },
   slot(el, e) {
     if (placeHere(el, e)) return;
     openSlotSheet(el.dataset.day, slotAt(el, e.clientY));
@@ -4387,11 +4461,9 @@ const actions = {
   },
   'open-task'(el) { openTaskSheet(el.dataset.id); },
   'new-task'(el) {
-    // Depuis la page d'un projet : la tâche est déjà rangée dans ce projet (et ce sous-projet).
-    // Depuis « Aujourd'hui » : la tâche est pour aujourd'hui.
+    // Depuis la page d'un projet : la tâche est déjà rangée dans ce projet (et ce sous-projet). Échéance vide par défaut.
     const projectId = el.dataset.project || temp.openProject;
-    if (projectId) openTaskSheet(null, { projectId, subprojectId: el.dataset.sub || null });
-    else openTaskSheet(null, state.ui.tab === 'today' ? { deadline: ymd(new Date()) } : undefined);
+    openTaskSheet(null, projectId ? { projectId, subprojectId: el.dataset.sub || null } : undefined);
   },
   'today-done'(el) {
     const { kind, id } = el.dataset;
@@ -4449,37 +4521,6 @@ const actions = {
       <div class="sheet-actions"><button class="btn danger solid grow">${ICON.trash} Supprimer la sélection</button></div>
     </form>`);
   },
-  'pp-pick'(el) { ppOpen(el.closest('.pp'), el.dataset.day, Number(el.dataset.min)); },
-  'pp-other'(el) {
-    const pp = el.closest('.pp');
-    const v = ppValues(pp);
-    const tm = new Date();
-    tm.setDate(tm.getDate() + 1);
-    ppOpen(pp, v.day || ymd(tm), v.hasTime ? v.min : 9 * 60);
-    pp.dataset.on = '1';
-    ppRefresh(pp);
-    if (matchMedia('(pointer: fine)').matches) pp.querySelector('[name="plan_date"]').focus();
-  },
-  'pp-off'(el) { const pp = el.closest('.pp'); pp.dataset.on = '0'; ppRefresh(pp); },
-  'pp-bar'(el, e) {
-    const pp = el.closest('.pp');
-    const r = el.getBoundingClientRect();
-    const v = ppValues(pp);
-    let m = VIEW_START + ((e.clientX - r.left) / r.width) * VIEW_SPAN;
-    m = Math.max(VIEW_START, Math.min(DAY_MIN - v.dur, Math.round(m / 15) * 15));
-    pp.querySelector('[name="plan_time"]').value = hhmm(m);
-    ppRefresh(pp);
-  },
-  'pp-add'(el) {
-    const pp = el.closest('.pp');
-    const v = ppValues(pp);
-    if (!v.day || !(v.hasTime || v.when.multi) || whenInvalid(pp.querySelector('.when'), v.when)) return;
-    const f = taskFormOpen();
-    if (f?.dataset.id) commitTaskForm(f);
-    addPlans(el.dataset.id, v.day, v.min, v.when);
-    save(); render(); buzz();
-    openTaskSheet(el.dataset.id); // la fiche affiche le nouveau créneau
-  },
   'pp-remove'(el) {
     const old = state.plans.find((p) => p.id === el.dataset.id);
     if (!old) return;
@@ -4530,10 +4571,13 @@ const actions = {
   'toggle-today-done'() { temp.showTodayDone = !temp.showTodayDone; render(); },
   'toggle-prio'() { temp.showAllPrio = !temp.showAllPrio; render(); },
   'hide-swipe-hint'() { state.ui.hideSwipeHint = true; writeLocal(); render(); },
-  'set-deadline'(el) {
-    const input = el.closest('form').elements.deadline;
-    if (el.dataset.value === '') input.value = '';
-    else { const d = new Date(); d.setDate(d.getDate() + Number(el.dataset.value)); input.value = ymd(d); }
+  'set-deadline'(el) { // toucher l'échéance déjà choisie la retire
+    const form = el.closest('form');
+    const input = form.elements.deadline;
+    const day = addDays(ymd(new Date()), Number(el.dataset.value));
+    input.value = input.value === day ? '' : day;
+    form.dataset.due = 'manual';
+    dueRefresh(form);
     input.dispatchEvent(new Event('change', { bubbles: true })); // enregistre aussitôt une tâche existante
   },
 
