@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.12.0';
+const VERSION = '2.13.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -48,6 +48,7 @@ const ICON = {
   down: svg('<path d="M6 9l6 6 6-6"/>'),
   cloud: svg('<path d="M7.2 18.5h10.3a4 4 0 0 0 .5-7.97 6 6 0 0 0-11.6-1.2A4.6 4.6 0 0 0 7.2 18.5z"/>'),
   list: svg('<path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1.2"/><circle cx="4.5" cy="12" r="1.2"/><circle cx="4.5" cy="18" r="1.2"/>'),
+  edit: svg('<path d="M4.5 19.5h3.8L18.6 9.2a2.7 2.7 0 0 0-3.8-3.8L4.5 15.7z"/><path d="M13.3 6.9l3.8 3.8"/>'),
 };
 
 /* ---------- Données ---------- */
@@ -230,6 +231,47 @@ function deleteSub(id) {
   for (const x of [...state.tasks, ...state.sessions]) if (x.subprojectId === id) x.subprojectId = null;
   state.subprojects = state.subprojects.filter((s) => s.id !== id);
   if (state.ui.subfilter === id) state.ui.subfilter = 'all';
+}
+
+// Ce qu'une modification de sous-projet touche (lui, ses tâches, son temps), pour pouvoir l'annuler.
+function subSnapshot(id) {
+  const keep = (x) => [x, { name: x.name, projectId: x.projectId, subprojectId: x.subprojectId }];
+  return {
+    subs: [...state.subprojects],
+    items: [getSub(id), ...[...state.tasks, ...state.sessions].filter((x) => x.subprojectId === id)].filter(Boolean).map(keep),
+  };
+}
+function subRestore(snap) {
+  state.subprojects = snap.subs;
+  for (const [x, v] of snap.items) for (const [k, val] of Object.entries(v)) { if (val === undefined) delete x[k]; else x[k] = val; }
+}
+
+// Sous-projet déplacé dans un autre projet : ses tâches et son temps le suivent.
+function moveSub(s, projectId) {
+  for (const x of [...state.tasks, ...state.sessions]) if (x.subprojectId === s.id) x.projectId = projectId;
+  s.projectId = projectId;
+  if (state.ui.subfilter === s.id) state.ui.filter = projectId;
+  if (state.ui.lastSubId === s.id) state.ui.lastProjectId = projectId;
+}
+
+// Deux sous-projets réunis en un seul (même nom dans le même projet).
+function mergeSub(fromId, toId) {
+  const to = getSub(toId);
+  for (const x of [...state.tasks, ...state.sessions]) if (x.subprojectId === fromId) Object.assign(x, { projectId: to.projectId, subprojectId: toId });
+  state.subprojects = state.subprojects.filter((s) => s.id !== fromId);
+  if (state.ui.subfilter === fromId) Object.assign(state.ui, { filter: to.projectId, subfilter: toId });
+  if (state.ui.lastSubId === fromId) Object.assign(state.ui, { lastProjectId: to.projectId, lastSubId: toId });
+}
+
+// Un sous-projet devient un projet à part entière, avec ses tâches et son temps.
+function promoteSub(id) {
+  const s = getSub(id);
+  const p = addProject(s.name);
+  for (const x of [...state.tasks, ...state.sessions]) if (x.subprojectId === id) Object.assign(x, { projectId: p.id, subprojectId: null });
+  state.subprojects = state.subprojects.filter((x) => x.id !== id);
+  if (state.ui.subfilter === id) Object.assign(state.ui, { filter: p.id, subfilter: 'all' });
+  if (state.ui.lastSubId === id) Object.assign(state.ui, { lastProjectId: p.id, lastSubId: '' });
+  return p;
 }
 
 // Projets sans aucune tâche (même terminée) ni temps enregistré.
@@ -614,7 +656,8 @@ function viewTasks() {
     html += `<div class="chips sub">${chip('all', 'Tout', subCounts.get('all') || [...subCounts.values()].reduce((a, b) => a + b, 0))}${subsOf(filter)
       .filter((s) => subCounts.has(s.id))
       .map((s) => chip(s.id, s.name, subCounts.get(s.id)))
-      .join('')}${subCounts.has('none') ? chip('none', 'Autre', subCounts.get('none')) : ''}</div>`;
+      .join('')}${subCounts.has('none') ? chip('none', 'Autre', subCounts.get('none')) : ''}${getSub(subfilter)
+      ? `<button type="button" class="chip chip-edit" data-action="edit-sub" data-id="${subfilter}" aria-label="Modifier le sous-projet « ${esc(getSub(subfilter).name)} »">${ICON.edit}</button>` : ''}</div>`;
   }
 
   if (!state.tasks.length) {
@@ -663,7 +706,7 @@ function viewProjects() {
     <button type="button" class="btn primary wide" data-action="new-project">${ICON.plus} Nouveau projet</button>
     ${archived.length ? `<div class="section-title">Archivés</div><div class="card proj-list">${archived.map(row).join('')}</div>` : ''}
     ${unusedProjects().length ? `<button type="button" class="btn ghost wide clean-btn" data-action="clean-projects">🧹 Nettoyer les projets inutilisés (${unusedProjects().length})</button>` : ''}
-    <p class="hint center">Touche un projet pour voir ses tâches. Glisse la poignée ⋮⋮ pour changer l’ordre.</p>
+    <p class="hint center">Touche un projet pour voir ses tâches et gérer ses sous-projets (touche le nom d’un sous-projet pour le modifier). Glisse la poignée ⋮⋮ pour changer l’ordre.</p>
   </div>`;
 }
 
@@ -678,9 +721,13 @@ function viewProject(p) {
   for (const s of state.sessions) if (s.projectId === p.id) spent += s.end - s.start;
   const since = state.timers.filter((a) => getTask(a.taskId)?.projectId === p.id).map((a) => a.start);
 
+  // Le nom d'un sous-projet ouvre sa fiche (renommer, déplacer, en faire un projet, supprimer).
   const section = (title, subId, list, always) => {
     if (!list.length && !always) return '';
-    return `<div class="section-title"><span>${esc(title)}${list.length ? ` · ${list.length}` : ''}</span>
+    const label = `${esc(title)}${list.length ? ` · ${list.length}` : ''}`;
+    return `<div class="section-title">${subId
+        ? `<button type="button" class="sub-name" data-action="edit-sub" data-id="${subId}" title="Modifier ce sous-projet">${label}${ICON.edit}</button>`
+        : `<span>${label}</span>`}
         <button type="button" data-action="new-task" data-project="${p.id}" data-sub="${subId}">${ICON.plus} Ajouter</button></div>
       ${list.length ? `<div class="list">${list.map((t) => taskCard(t, totals, { tag: false })).join('')}</div>` : '<p class="hint section-empty">Aucune tâche.</p>'}`;
   };
@@ -700,6 +747,7 @@ function viewProject(p) {
   } else {
     html += section('Tâches', '', open, true);
   }
+  html += `<button type="button" class="btn ghost wide sub-add" data-action="new-sub" data-project="${p.id}">${ICON.plus} Nouveau sous-projet</button>`;
   if (done.length) {
     html += `<div class="section-title"><span>Terminées · ${done.length}</span><button type="button" data-action="toggle-project-done">${temp.showProjectDone ? 'Masquer' : 'Afficher'}</button></div>`;
     if (temp.showProjectDone) html += `<div class="list">${done.slice(0, 60).map((t) => taskCard(t, totals, { tag: false })).join('')}</div>`;
@@ -998,10 +1046,13 @@ function pfMenu(form, field) {
     </div>`;
   }
   const color = getProject(pid)?.color || NO_COLOR;
+  // fiche d'une tâche existante : le sous-projet choisi se modifie d'ici (on revient ensuite à la tâche)
+  const edit = form.dataset.id && getSub(sid);
   return `<div class="pf-menu" role="menu">
     ${opt('', 'Aucun sous-projet', 'transparent', 0, !sid)}
     ${subsOf(pid).map((x) => opt(x.id, x.name, color, 0, x.id === sid)).join('')}
     <button type="button" class="proj-opt pf-new" data-action="pf-choose" data-field="sub" data-value="__new">${ICON.plus}<span>Nouveau sous-projet…</span></button>
+    ${edit ? `<button type="button" class="proj-opt pf-new" data-action="edit-sub" data-id="${sid}" data-back="${form.dataset.id}">${ICON.edit}<span>Modifier « ${esc(edit.name)} »…</span></button>` : ''}
   </div>`;
 }
 
@@ -1213,6 +1264,87 @@ function saveProject(form) {
   save(); closeSheet(); render();
 }
 
+/* ----- Sous-projet ----- */
+
+// Fiche d'un sous-projet : nom, projet (ses tâches et son temps suivent), temps passé, en faire un projet, le supprimer.
+// projectId : projet d'un nouveau sous-projet ; back : tâche dont la fiche se rouvre ensuite.
+function openSubSheet(id, { projectId, back } = {}) {
+  const s = getSub(id);
+  const pid = s?.projectId || projectId;
+  const P = getProject(pid);
+  if (!P) return;
+  const open = s ? state.tasks.filter((t) => t.subprojectId === s.id && !t.done).length : 0;
+  const spent = s ? state.sessions.reduce((n, x) => n + (x.subprojectId === s.id ? x.end - x.start : 0), 0) : 0;
+  const projects = state.projects.filter((p) => !p.archived || p.id === pid);
+  openSheet(`<form class="sheet-body sub-sheet" data-form="sub" data-id="${s?.id || ''}" data-back="${back || ''}" autocomplete="off">
+    ${head(s ? 'Sous-projet' : 'Nouveau sous-projet')}
+    <label class="field"><span>Nom</span>${emojiField(`<input class="big" name="name" value="${esc(s?.name || '')}" placeholder="Ex. Préparation de cours" maxlength="60" required${s ? '' : ' autofocus'}>`)}</label>
+    <label class="field"><span>Dans le projet</span><select name="projectId">${projects.map((p) => `<option value="${p.id}"${p.id === pid ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}</select></label>
+    ${s ? `<p class="hint sub-move" hidden>${ICON.right} Ses tâches et son temps passeront dans ce projet.</p>
+      <div class="card summary proj-summary" style="--c:${P.color}">
+        <div><small>Temps passé</small><b>${spent ? fmtDur(spent) : '—'}</b></div>
+        <div><small>À faire</small><b>${open}</b></div>
+      </div>` : ''}
+    <div class="sheet-actions">
+      ${s ? `<button type="button" class="btn ghost danger" data-action="delete-sub" data-id="${s.id}" aria-label="Supprimer le sous-projet">${ICON.trash}</button>` : ''}
+      <button class="btn primary grow">${s ? 'Enregistrer' : `${ICON.plus} Créer le sous-projet`}</button>
+    </div>
+    ${s ? `<button type="button" class="btn ghost wide sub-promote" data-action="promote-sub" data-id="${s.id}">⬆️ En faire un projet à part entière</button>` : ''}
+  </form>`);
+}
+
+// Après la fiche d'un sous-projet : retour à la tâche d'où l'on venait, sinon fermeture.
+function afterSubSheet(form) {
+  const back = getTask(form.dataset.back);
+  if (back) openTaskSheet(back.id);
+  else closeSheet();
+  render();
+}
+
+async function saveSub(form) {
+  const name = form.elements.name.value.trim();
+  const pid = form.elements.projectId.value;
+  const P = getProject(pid);
+  if (!name || !P) return;
+  const s = getSub(form.dataset.id);
+  const norm = (x) => x.trim().toLowerCase();
+  const twin = subsOf(pid).find((x) => x !== s && norm(x.name) === norm(name));
+  if (!s) { // nouveau : s'il existe déjà sous ce nom, on garde l'existant
+    if (!twin) addSub(pid, name);
+    save(); afterSubSheet(form);
+    toast(twin ? `« ${twin.name} » existe déjà dans « ${P.name} »` : `Sous-projet « ${name} » créé dans « ${P.name} »`);
+    return;
+  }
+  const snap = subSnapshot(s.id);
+  const undo = { label: 'Annuler', fn: () => { subRestore(snap); save(); render(); } };
+  if (twin) { // même nom déjà présent dans ce projet : on les réunit
+    const ok = await ask({
+      title: `Réunir avec « ${twin.name} » ?`,
+      text: `« ${P.name} » a déjà un sous-projet « ${twin.name} » : les tâches et le temps de « ${s.name} » y seront regroupés.`,
+      ok: 'Réunir',
+    });
+    if (!ok) return;
+    mergeSub(s.id, twin.id);
+    save(); afterSubSheet(form);
+    toast(`Réuni avec « ${twin.name} »`, undo);
+    return;
+  }
+  const moved = s.projectId !== pid;
+  const renamed = s.name !== name;
+  s.name = name;
+  if (moved) moveSub(s, pid);
+  save(); afterSubSheet(form);
+  if (moved || renamed) toast(moved ? `« ${name} » est maintenant dans « ${P.name} »` : `Renommé « ${name} »`, undo);
+}
+
+// Projet changé dans la fiche : on prévient que les tâches suivront.
+sheet.addEventListener('change', (e) => {
+  const form = e.target.closest('form[data-form="sub"]');
+  if (!form || e.target.name !== 'projectId') return;
+  const hint = $('.sub-move', form);
+  if (hint) hint.hidden = e.target.value === getSub(form.dataset.id)?.projectId;
+});
+
 /* ----- Session (temps) ----- */
 
 function openSessionSheet(sid, opts = {}) {
@@ -1282,6 +1414,7 @@ sheet.addEventListener('submit', (e) => {
     if (form.dataset.id) closeSheet();
     else createTask(form, 'create');
   } else if (form.dataset.form === 'project') saveProject(form);
+  else if (form.dataset.form === 'sub') saveSub(form);
   else if (form.dataset.form === 'session') saveSession(form);
   else if (form.dataset.form === 'clean') {
     const ids = new Set(new FormData(form).getAll('drop'));
@@ -5455,6 +5588,43 @@ const actions = {
     toast(`« ${name} » est maintenant un sous-projet de « ${target.name} »`);
   },
   'new-project'() { openProjectSheet(null); },
+  'edit-sub'(el) {
+    const f = taskFormOpen();
+    if (f?.dataset.id) commitTaskForm(f);
+    openSubSheet(el.dataset.id, { back: el.dataset.back });
+  },
+  'new-sub'(el) { openSubSheet(null, { projectId: el.dataset.project }); },
+  async 'delete-sub'(el) {
+    const s = getSub(el.dataset.id);
+    if (!s) return;
+    const form = el.closest('form');
+    const n = state.tasks.filter((t) => t.subprojectId === s.id).length;
+    const ok = await ask({
+      title: `Supprimer « ${s.name} » ?`,
+      text: `${n ? `${n} tâche(s) resteront dans « ${getProject(s.projectId)?.name || ''} », sans sous-projet. ` : ''}Le temps passé reste compté dans le projet.`,
+      ok: 'Supprimer', danger: true,
+    });
+    if (!ok) return;
+    const snap = subSnapshot(s.id);
+    deleteSub(s.id);
+    save(); afterSubSheet(form);
+    toast(`« ${s.name} » supprimé`, { label: 'Annuler', fn: () => { subRestore(snap); save(); render(); } });
+  },
+  async 'promote-sub'(el) {
+    const s = getSub(el.dataset.id);
+    if (!s) return;
+    const form = el.closest('form');
+    const n = state.tasks.filter((t) => t.subprojectId === s.id).length;
+    const ok = await ask({
+      title: `Faire de « ${s.name} » un projet ?`,
+      text: `Il quitte « ${getProject(s.projectId)?.name || ''} » et devient un projet à part entière${n ? `, avec ses ${n} tâche(s) et leur temps` : ''}.`,
+      ok: 'En faire un projet',
+    });
+    if (!ok) return;
+    const p = promoteSub(s.id);
+    save(); afterSubSheet(form);
+    toast(`« ${p.name} » est maintenant un projet`, { label: 'Voir', fn: () => { state.ui.tab = 'projects'; actions['open-project']({ dataset: { id: p.id } }); } });
+  },
   'add-sub'(el) {
     const box = $('.subs', el.closest('.field'));
     box.insertAdjacentHTML('beforeend', subRow(`sub:new${uid()}`, ''));
