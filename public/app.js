@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.14.0';
+const VERSION = '2.15.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -621,12 +621,14 @@ function taskCard(t, totals, { tag = true } = {}) {
   const due = !t.done && dueInfo(t.deadline);
   const plan = !t.done && nextPlanOf(t.id);
   const notes = (t.notes || '').split('\n').map((l) => l.replace(/^\s*[-•*]\s*/, '').trim()).filter(Boolean).join(' · ');
+  const peek = stepsPeek(t); // avec des étapes : la prochaine, à cocher d'ici (à la place de l'aperçu de la note)
   return `<article class="task${running ? ' running' : ''}${t.done ? ' done' : ''}${t.starred && !t.done ? ' starred' : ''}" style="--c:${colorOf(t.projectId)}">
     <button type="button" class="check" data-action="toggle-done" data-id="${t.id}" aria-label="${t.done ? 'Rouvrir' : 'Marquer comme faite'}">${ICON.check}</button>
     <div class="task-main" role="button" tabindex="0" data-action="open-task" data-id="${t.id}">
       <div class="task-title">${esc(t.title)}</div>
-      ${notes ? `<div class="task-notes">${esc(notes)}</div>` : ''}
+      ${peek || (notes ? `<div class="task-notes">${esc(notes)}</div>` : '')}
       <div class="task-meta">
+        ${stepsPill(t)}
         ${tag && t.projectId ? `<span class="tag"><i></i>${esc(pathLabel(t.projectId, t.subprojectId))}</span>` : ''}
         ${due ? `<span class="due ${due.cls}">${esc(due.text)}</span>` : ''}
         ${plan ? `<span class="planned">${ICON.cal}${esc(planLabel(plan))}</span>` : ''}
@@ -661,7 +663,7 @@ function tasksModel() {
   const subfilter = showSubChips && subCounts.has(ui.subfilter) ? ui.subfilter : 'all';
   // recherche : chaque mot tapé se retrouve dans le titre, la note ou le projet (sans accents)
   const words = plainWords(temp.taskQuery || '');
-  const hit = (t) => !words.length || words.every((w) => plain(`${t.title} ${t.notes || ''} ${pathLabel(t.projectId, t.subprojectId)}`).includes(w));
+  const hit = (t) => !words.length || words.every((w) => plain(`${t.title} ${t.notes || ''} ${taskSteps(t).map((s) => s.text).join(' ')} ${pathLabel(t.projectId, t.subprojectId)}`).includes(w));
   const match = (t) => (filter === 'all' || key(t) === filter) && (subfilter === 'all' || subKey(t) === subfilter) && hit(t);
   const list = open.filter(match).sort((a, b) => !!b.starred - !!a.starred || !!timerOf(b.id) - !!timerOf(a.id) || cmpDeadline(a, b) || b.createdAt - a.createdAt);
   const done = state.tasks.filter((t) => t.done && match(t)).sort((a, b) => (b.doneAt || 0) - (a.doneAt || 0));
@@ -1204,8 +1206,9 @@ function openTaskSheet(id, preset) {
     ${pickFields(t.projectId, t.subprojectId)}
     <div class="field due-field"><span>Échéance</span>${dueChips(t.deadline)}</div>
     ${agendaBlock(isNew ? '' : id)}
+    ${stepsBlock(isNew ? [] : taskSteps(t), t)}
     <details class="tn-notes"${t.notes ? ' open' : ''}><summary>${ICON.plus} ${t.notes ? 'Note' : 'Ajouter une note'}</summary>
-      <textarea name="notes" rows="3" placeholder="Détails, étapes, liens…" aria-label="Note">${esc(t.notes || '')}</textarea></details>
+      <textarea name="notes" rows="3" placeholder="Détails, liens…" aria-label="Note">${esc(t.notes || '')}</textarea></details>
     ${footer}
   </form>`);
   const form = $('form', sheet);
@@ -1234,6 +1237,7 @@ function commitTaskForm(form) {
   if (!t) return;
   const v = readTaskForm(form);
   if (!v.title) v.title = t.title;
+  stepsPending(form); // une étape tapée mais pas encore validée par Entrée
   const moved = v.projectId !== t.projectId || v.subprojectId !== t.subprojectId || v.title !== t.title;
   Object.assign(t, v);
   if (moved) {
@@ -1260,6 +1264,9 @@ function createTask(form, how = 'create') {
   // Fiche de création : planifiée comme écrit (« vendredi 14h », « un lundi sur deux à 9h »…)
   const plan = slotDay ? null : schedPlan(form);
   const t = { id: uid(), ...v, done: false, doneAt: null, createdAt: now() };
+  stepsPending(form);
+  const steps = stepDrafts.get(form);
+  if (steps?.length) t.checklist = steps;
   state.tasks.push(t);
   Object.assign(state.ui, { lastProjectId: t.projectId || '', lastSubId: t.subprojectId || '' });
   if (state.ui.filter !== 'all' && state.ui.filter !== (t.projectId || 'none')) Object.assign(state.ui, { filter: 'all', subfilter: 'all' });
@@ -1299,6 +1306,149 @@ sheet.addEventListener('change', (e) => {
   const form = e.target.closest('form[data-form="task"]');
   if (form?.dataset.id && form.isConnected) { commitTaskForm(form); render(); }
 });
+
+/* ----- Étapes d'une tâche (checklist) ----- */
+// Chaque tâche peut avoir des étapes { id, text, done } : on les coche dans sa fiche, ou la prochaine depuis sa carte.
+
+const stepDrafts = new WeakMap(); // fiche de création → étapes de la tâche pas encore créée
+const taskSteps = (t) => t?.checklist || [];
+const stepsList = (form) => (getTask(form.dataset.id) ? taskSteps(getTask(form.dataset.id)) : stepDrafts.get(form) || []);
+// Plusieurs lignes collées (ou tapées) : une étape par ligne, sans puces ; « [x] » : déjà faite.
+const splitSteps = (text) => String(text).split(/\r?\n/).map((l) => l.trim()).filter(Boolean).map((l) => {
+  const m = l.match(/^(?:[-•*]\s*)?(?:\[([ xX✓]?)\]\s*)?(?:\d+[.)]\s+)?(.*)$/);
+  return { id: uid(), text: (m[2] || l).trim().slice(0, 140), done: /[xX✓]/.test(m[1] || '') };
+}).filter((s) => s.text);
+
+function stepsSet(form, list, refresh = true) {
+  const t = getTask(form.dataset.id);
+  if (t) {
+    if (list.length) t.checklist = list; else delete t.checklist;
+    save();
+    if (refresh) render();
+  } else stepDrafts.set(form, list);
+  if (refresh) stepsRefresh(form);
+}
+
+// Étape tapée mais pas validée par Entrée (on crée ou on ferme la fiche) : gardée quand même.
+function stepsPending(form) {
+  const input = $('.step-new', form);
+  const text = input?.value.trim();
+  if (!text) return;
+  input.value = '';
+  stepsSet(form, [...stepsList(form), ...splitSteps(text)], false);
+}
+
+const stepLi = (s) => `<li class="step${s.done ? ' done' : ''}" data-step="${s.id}">
+    <button type="button" class="step-check" data-action="step-toggle" aria-pressed="${!!s.done}" aria-label="${s.done ? 'Remettre à faire' : 'Marquer comme faite'}">${ICON.check}</button>
+    <input class="step-text" value="${esc(s.text)}" maxlength="140" aria-label="Étape" enterkeyhint="done">
+    <button type="button" class="step-del" data-action="step-del" aria-label="Supprimer l’étape">${ICON.close}</button>
+  </li>`;
+
+function stepsHead(list) {
+  const n = list.length;
+  const d = list.filter((s) => s.done).length;
+  return n ? `<span class="steps-ring" style="--sp:${(d / n).toFixed(3)}"></span><b>${d}/${n}</b><span>${d === n ? 'Tout est fait ✓' : `${n - d} à faire`}</span>` : '';
+}
+
+// Lignes d'une note qui ressemblent à une liste (« - », « • », « 1. », « [ ] ») : à transformer en étapes.
+const noteBullets = (notes) => String(notes || '').split('\n').filter((l) => /^\s*(?:[-•*]|\[[ xX✓]?\]|\d+[.)])\s*\S/.test(l));
+
+function stepsBlock(list, t) {
+  const n = list.length;
+  const fromNotes = !n && noteBullets(t?.notes).length >= 2;
+  return `<details class="tn-notes tn-steps"${n ? ' open' : ''}>
+    <summary>${ICON.plus} <span class="steps-sum">${n ? 'Étapes' : 'Ajouter des étapes'}</span></summary>
+    <div class="steps-box">
+      <div class="steps-head">${stepsHead(list)}</div>
+      <ul class="steps-list">${list.map(stepLi).join('')}</ul>
+      <label class="step-add"><span class="step-add-ic">${ICON.plus}</span><input class="step-new" placeholder="${n ? 'Ajouter une étape' : 'Première étape… (Entrée pour la suivante)'}" maxlength="400" enterkeyhint="enter" aria-label="Nouvelle étape"></label>
+      ${t?.id ? `<button type="button" class="steps-finish" data-action="toggle-done" data-id="${t.id}"${!t.done && n && list.every((s) => s.done) ? '' : ' hidden'}>${ICON.check} Tout est fait · Terminer la tâche</button>` : ''}
+    </div>
+    ${fromNotes ? `<button type="button" class="btn ghost small steps-from-notes" data-action="steps-from-notes">☑ Transformer la liste de la note en étapes</button>` : ''}
+  </details>`;
+}
+
+// Met la liste à jour sans tout redessiner (le champ en cours de saisie garde le clavier).
+function stepsRefresh(form) {
+  const box = $('.steps-box', form);
+  if (!box) return;
+  const list = stepsList(form);
+  const ul = $('.steps-list', box);
+  const have = new Map([...ul.children].map((li) => [li.dataset.step, li]));
+  let prev = null;
+  for (const s of list) {
+    let li = have.get(s.id);
+    if (!li) {
+      ul.insertAdjacentHTML('beforeend', stepLi(s));
+      li = ul.lastElementChild;
+      li.classList.add('new');
+    }
+    have.delete(s.id);
+    li.classList.toggle('done', !!s.done);
+    const input = $('.step-text', li);
+    if (document.activeElement !== input && input.value !== s.text) input.value = s.text;
+    const check = $('.step-check', li);
+    check.setAttribute('aria-pressed', String(!!s.done));
+    check.setAttribute('aria-label', s.done ? 'Remettre à faire' : 'Marquer comme faite');
+    if (prev ? prev.nextElementSibling !== li : ul.firstElementChild !== li) { if (prev) prev.after(li); else ul.prepend(li); }
+    prev = li;
+  }
+  for (const li of have.values()) li.remove();
+  $('.steps-head', box).innerHTML = stepsHead(list);
+  $('.steps-sum', form).textContent = list.length ? 'Étapes' : 'Ajouter des étapes';
+  $('.step-new', box).placeholder = list.length ? 'Ajouter une étape' : 'Première étape… (Entrée pour la suivante)';
+  const t = getTask(form.dataset.id);
+  const finish = $('.steps-finish', box);
+  if (finish) finish.hidden = !(t && !t.done && list.length && list.every((s) => s.done));
+  $('.steps-from-notes', form)?.toggleAttribute('hidden', list.length > 0);
+}
+
+// Entrée dans « Ajouter une étape » : l'étape s'ajoute et le champ reste prêt pour la suivante.
+sheet.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' || e.isComposing || e.ctrlKey || e.metaKey) return;
+  const form = e.target.closest?.('form[data-form="task"]');
+  if (!form) return;
+  if (e.target.matches('.step-new')) {
+    e.preventDefault();
+    const steps = splitSteps(e.target.value);
+    if (!steps.length) return;
+    e.target.value = '';
+    stepsSet(form, [...stepsList(form), ...steps]);
+    buzz();
+  } else if (e.target.matches('.step-text')) {
+    e.preventDefault();
+    e.target.blur();
+  }
+});
+// Coller plusieurs lignes : autant d'étapes.
+sheet.addEventListener('paste', (e) => {
+  if (!e.target.matches?.('.step-new')) return;
+  const text = e.clipboardData?.getData('text') || '';
+  if (!/\n/.test(text.trim())) return;
+  e.preventDefault();
+  const form = e.target.closest('form');
+  stepsSet(form, [...stepsList(form), ...splitSteps(text)]);
+});
+// Texte d'une étape modifié (vidé : l'étape disparaît).
+sheet.addEventListener('change', (e) => {
+  if (!e.target.matches?.('.step-text')) return;
+  const form = e.target.closest('form');
+  const id = e.target.closest('.step').dataset.step;
+  const text = e.target.value.trim();
+  stepsSet(form, text ? stepsList(form).map((s) => (s.id === id ? { ...s, text } : s)) : stepsList(form).filter((s) => s.id !== id));
+});
+
+// Carte d'une tâche : avancement des étapes (petit anneau) et la prochaine, à cocher sans ouvrir la fiche.
+function stepsPill(t) {
+  const list = taskSteps(t);
+  if (!list.length) return '';
+  const d = list.filter((s) => s.done).length;
+  return `<span class="steps-pill${d === list.length ? ' full' : ''}" title="${d} étape${d > 1 ? 's' : ''} faite${d > 1 ? 's' : ''} sur ${list.length}"><span class="steps-ring" style="--sp:${(d / list.length).toFixed(3)}"></span>${d}/${list.length}</span>`;
+}
+function stepsPeek(t) {
+  const next = !t.done && taskSteps(t).find((s) => !s.done);
+  return next ? `<button type="button" class="next-step" data-action="step-quick" data-task="${t.id}" data-step="${next.id}" title="Cocher cette étape"><i class="ns-box">${ICON.check}</i><span>${esc(next.text)}</span></button>` : '';
+}
 
 /* ----- Projet ----- */
 
@@ -4446,7 +4596,9 @@ function todayCard({ t, p, dur, done, totals, note = '', live = '' }) {
       <button type="button" class="check" data-action="today-done" data-kind="${kind}" data-id="${id}" aria-label="${done ? 'Annuler la validation' : 'Valider'}">${ICON.check}</button>
       <div class="day-main" role="button" tabindex="0" data-action="${p ? 'open-plan' : 'open-task'}" data-id="${id}">
         <div class="day-title">${t.starred ? `<span class="day-star">${ICON.star}</span>` : ''}${esc(t.title)}</div>
+        ${done ? '' : stepsPeek(t)}
         <div class="day-meta">
+          ${stepsPill(t)}
           ${t.projectId ? `<span class="tag"><i></i>${esc(pathLabel(t.projectId, t.subprojectId))}</span>` : ''}
           ${p ? `<span>${note ? esc(note) : `${p.series ? '↻ ' : ''}${fmtDur(dur * 60e3)}`}${live ? ` <em class="over">${esc(live)}</em>` : ''}</span>` : ''}
           ${late && late.cls === 'late' ? `<span class="due late">${esc(late.text)}</span>` : ''}
@@ -5669,6 +5821,51 @@ const actions = {
     state.timers = state.timers.filter((x) => x !== a);
     save(); closeSheet(); render(); buzz();
     toast('Chrono annulé · rien n’a été compté', { label: 'Annuler', fn: () => { delete state.deleted[timerKey(a)]; state.timers.unshift(a); save(); render(); } });
+  },
+  'step-toggle'(el) {
+    const form = el.closest('form');
+    const id = el.closest('.step').dataset.step;
+    const list = stepsList(form).map((s) => (s.id === id ? { ...s, done: !s.done } : s));
+    const li = el.closest('.step');
+    if (list.find((s) => s.id === id).done) { li.classList.remove('pop'); void li.offsetWidth; li.classList.add('pop'); haptic(); }
+    stepsSet(form, list);
+  },
+  'step-del'(el) {
+    const form = el.closest('form');
+    const id = el.closest('.step').dataset.step;
+    stepsSet(form, stepsList(form).filter((s) => s.id !== id));
+  },
+  'steps-from-notes'(el) { // la liste écrite dans la note devient des étapes (et quitte la note)
+    const form = el.closest('form');
+    const notes = form.elements.notes;
+    const lines = noteBullets(notes.value);
+    if (!lines.length) return;
+    const keep = new Set(lines);
+    notes.value = notes.value.split('\n').filter((l) => !keep.has(l)).join('\n').trim();
+    stepsSet(form, [...stepsList(form), ...splitSteps(lines.join('\n'))]);
+    if (form.dataset.id) { commitTaskForm(form); render(); }
+    $('.tn-steps', form).open = true;
+  },
+  'step-quick'(el) { // depuis une carte : la prochaine étape est cochée, la suivante prend sa place
+    const t = getTask(el.dataset.task);
+    if (!t || el.classList.contains('ticking')) return;
+    el.classList.add('ticking');
+    haptic();
+    setTimeout(() => {
+      const before = taskSteps(t);
+      const step = before.find((s) => s.id === el.dataset.step);
+      if (!step) { render(); return; }
+      t.checklist = before.map((s) => (s === step ? { ...s, done: true } : s));
+      save(); render();
+      const undo = () => { t.checklist = before; save(); render(); };
+      if (!t.done && t.checklist.every((s) => s.done)) {
+        toast(`Toutes les étapes sont faites ✓`, { label: 'Terminer la tâche', fn: () => {
+          const btn = $(`#view .check[data-id="${t.id}"]`) || $(`#view .day-card .check[data-kind="task"][data-id="${t.id}"]`);
+          if (btn?.dataset.action === 'toggle-done') actions['toggle-done'](btn);
+          else actions['toggle-done']({ dataset: { id: t.id }, closest: () => null });
+        } });
+      } else toast(`« ${step.text} » faite`, { label: 'Annuler', fn: undo });
+    }, 420);
   },
   'sess-trim'(el) { // retirer du temps à la fin d'une session
     const form = el.closest('form');
