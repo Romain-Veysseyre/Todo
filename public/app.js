@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.11.0';
+const VERSION = '2.12.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -315,6 +315,7 @@ function finishTimer(taskId) {
   if (!a) return null;
   state.timers = state.timers.filter((x) => x !== a);
   const end = now();
+  stretchPlan(a, end);
   if (end - a.start < MIN_SESSION) return null;
   const t = getTask(a.taskId);
   const s = {
@@ -323,6 +324,32 @@ function finishTimer(taskId) {
   };
   state.sessions.push(s);
   return s;
+}
+
+// Créneau d'une tâche dont le chrono tourne : le dernier commencé du jour, pas encore validé. Une fois son heure de
+// fin passée, il reste actif tant que le chrono tourne : prolongé s'il déborde, ou recalé sur l'heure réelle si le
+// chrono a été lancé après sa fin (sans qu'on y ait travaillé à son heure). Renvoie { p, start, moved } ou null.
+function liveSpan(a, end = now()) {
+  const d0 = +startOfDay(new Date(end));
+  let p = null;
+  for (const x of state.plans) {
+    if (x.taskId !== a.taskId || x.allDay || x.done || x.start < d0 || x.start > end) continue;
+    if (!p || x.start > p.start) p = x;
+  }
+  if (!p || p.end > end) return null; // aucun créneau commencé aujourd'hui, ou il n'est pas fini
+  if (a.start < p.end) return { p, start: p.start, moved: false };
+  const worked = state.sessions.some((s) => s.taskId === a.taskId && s.start < p.end && s.end > p.start);
+  return worked || a.start < d0 ? null : { p, start: a.start, moved: true };
+}
+
+// À l'arrêt du chrono, ce créneau garde sa nouvelle fin (ou sa place réelle), à 5 minutes près.
+function stretchPlan(a, end) {
+  const live = liveSpan(a, end);
+  if (!live || end - a.start < MIN_SESSION || end - (live.moved ? a.start : live.p.end) > LONG_SESSION) return; // chrono oublié : rien
+  const step = 5 * 60e3;
+  const start = live.moved ? Math.floor(a.start / step) * step : live.p.start;
+  live.p.start = start;
+  live.p.end = Math.min(dateAt(ymd(new Date(start)), DAY_MIN), Math.max(Math.round(end / step) * step, live.moved ? start + SNAP * 60e3 : live.p.end));
 }
 
 // Lancer une tâche ne coupe pas les autres chronos : ils tournent en parallèle.
@@ -1080,12 +1107,18 @@ function commitTaskForm(form) {
 
 // how : « create » (Créer), « start » (Lancer : crée et démarre le chrono), « place » (placer dans l'agenda).
 function createTask(form, how = 'create') {
+  clearTimeout(whenTimer);
+  whenDetect(form); // (le texte vient peut-être d'être tapé)
   const v = readTaskForm(form);
   if (!v.title) return;
+  const sched = schedForms.get(form);
+  if (sched?.src === 'title' && sched.s) v.title = sched.s.title; // « Footing tous les lundis à 7h » → « Footing »
   // Créée depuis un créneau de l'agenda : durée, répétition ou plusieurs jours
   const slotDay = form.dataset.slotDay;
   const when = slotDay ? whenValues($('.when', form), slotDay) : null;
   if (when && whenInvalid($('.when', form), when)) return;
+  // Fiche de création : planifiée comme écrit (« vendredi 14h », « un lundi sur deux à 9h »…)
+  const plan = slotDay ? null : schedPlan(form);
   const t = { id: uid(), ...v, done: false, doneAt: null, createdAt: now() };
   state.tasks.push(t);
   Object.assign(state.ui, { lastProjectId: t.projectId || '', lastSubId: t.subprojectId || '' });
@@ -1095,6 +1128,23 @@ function createTask(form, how = 'create') {
   if (slotDay) { // créée depuis un créneau de l'agenda : planifiée à cette heure (ou en série, ou sur plusieurs jours)
     const made = planWith(t.id, slotDay, Number(form.dataset.slotMin), when);
     if (form.dataset.event) eventConverted(form.dataset.event, t, made);
+    return;
+  }
+  if (plan?.dates.length) {
+    const w = { weekly: plan.repeat && plan.dates.length > 1, days: plan.days, every: plan.every, dur: plan.dur, dates: plan.dates };
+    const made = addPlans(t.id, plan.dates[0], plan.start, w);
+    if (how === 'start') startTimer(t.id);
+    else { save(); render(); buzz(); }
+    const ids = new Set(made.map((p) => p.id));
+    toast(whenDone(w, plan.dates[0], plan.start, made.length), {
+      label: 'Annuler',
+      fn: () => {
+        state.tasks = state.tasks.filter((x) => x !== t);
+        state.plans = state.plans.filter((p) => !ids.has(p.id));
+        state.timers = state.timers.filter((a) => a.taskId !== t.id);
+        save(); render();
+      },
+    });
     return;
   }
   if (how === 'start') { startTimer(t.id); toast('C’est parti, chrono lancé'); return; }
@@ -1979,12 +2029,23 @@ function viewPlan() {
       <small>${esc(fmt(d, { weekday: 'short' }).replace('.', ''))}</small><b>${d.getDate()}</b><i>${n ? '•'.repeat(Math.min(n, 3)) : ''}</i></button>`;
   }).join('');
 
+  // Créneaux du jour dont le chrono tourne encore après leur fin : ils s'allongent jusqu'à maintenant.
+  const live = new Map();
+  for (const a of state.timers) { const l = liveSpan(a); if (l) live.set(l.p.id, l); }
+
   const cols = shown.map((d) => {
     const key = ymd(d);
     // Ce qui commence avant 6h est coupé à 6h ; ce qui finit avant 6h n'apparaît pas.
     const visible = (it) => ({ ...it, s0: it.s, s: Math.max(it.s, VIEW_START) });
     const evs = pack(eventsOn(d).map((ev) => visible({ ev, s: ev.start, e: Math.max(ev.end, ev.start + SNAP) })).filter((it) => it.e > it.s));
-    const pls = pack(plansOn(key).map((p) => visible({ p, s: minOfDay(p.start, key), e: Math.max(minOfDay(p.end, key), minOfDay(p.start, key) + SNAP) })).filter((it) => it.e > it.s));
+    const pls = pack(plansOn(key).map((p) => {
+      const s = minOfDay(p.start, key);
+      const e = Math.max(minOfDay(p.end, key), s + SNAP);
+      const l = key === today && live.get(p.id);
+      if (!l) return visible({ p, s, e });
+      const s1 = l.moved ? minOfDay(l.start, key) : s; // e0 : fin prévue (le reste du bloc est le temps en plus)
+      return visible({ p, s: s1, e: Math.max(e, nowMin + 1), e0: l.moved ? s1 : e, live: l });
+    }).filter((it) => it.e > it.s));
     const due = temp.placing && getTask(temp.placing)?.deadline === key; // tâche en main : son jour d'échéance est signalé
     return `<div class="cal-col${key === today ? ' today' : ''}${due ? ' due' : ''}" data-action="slot" data-day="${key}">
       ${evs.map((it) => `<div class="ev-block" data-action="open-event" data-id="${it.ev.id}" style="${boxStyle(it)};--c:${it.ev.color || EVENT_COLORS[0]}">
@@ -1994,8 +2055,12 @@ function viewPlan() {
         const running = !!timerOf(t.id);
         const done = t.done || it.p.done; // réalisé : badge ✓ et « Fait »
         const spent = done ? state.sessions.reduce((n, x) => n + (x.taskId === t.id ? overlap(x, dateAt(key, 0), dateAt(key, DAY_MIN)) : 0), 0) : 0;
-        return `<div class="plan-block${done ? ' done' : ''}${running ? ' running' : ''}" data-action="open-plan" data-id="${it.p.id}" style="${boxStyle(it)};--c:${colorOf(t.projectId)}">
-          ${done ? `<i class="pb-done" aria-hidden="true">${ICON.check}</i>` : ''}<b>${t.starred ? '★ ' : ''}${esc(t.title)}</b><span>${done ? 'Fait · ' : it.p.series ? '↻ ' : ''}${shortLabel(it.s0)}–${shortLabel(it.e)}${spent ? `<em class="pb-spent"> · ⏱ ${fmtDur(spent)}</em>` : ''}</span>
+        const grow = it.live ? ` grow" data-s="${it.s}" data-e0="${it.e0}` : '';
+        const split = it.live ? `;--split:${(((it.e0 - it.s) / (it.e - it.s)) * 100).toFixed(1)}%` : '';
+        const when = !it.live ? `${shortLabel(it.s0)}–${shortLabel(it.e)}`
+          : it.live.moved ? `${shortLabel(it.s0)} · en cours` : `${shortLabel(it.s0)}–${shortLabel(it.e0)} <em class="pb-over">+${fmtDur((nowMin - it.e0) * 60e3)}</em>`;
+        return `<div class="plan-block${done ? ' done' : ''}${running ? ' running' : ''}${grow}" data-action="open-plan" data-id="${it.p.id}" style="${boxStyle(it)};--c:${colorOf(t.projectId)}${split}">
+          ${done ? `<i class="pb-done" aria-hidden="true">${ICON.check}</i>` : ''}<b>${t.starred ? '★ ' : ''}${esc(t.title)}</b><span>${done ? 'Fait · ' : it.p.series ? '↻ ' : ''}${when}${spent ? `<em class="pb-spent"> · ⏱ ${fmtDur(spent)}</em>` : ''}</span>
           <i class="plan-resize" aria-hidden="true"></i></div>`;
       }).join('')}
       ${key === today && nowMin >= VIEW_START ? `<div class="now-line" style="top:${posPct(nowMin)}%"></div>` : ''}
@@ -2146,25 +2211,43 @@ function daysWord(days) {
   return names.length > 1 ? `${names.slice(0, -1).join(', ')} et ${names[names.length - 1]}` : names[0] || '';
 }
 
-// Jours d'une série : les jours cochés, à partir de « day » et pendant N semaines.
-function seriesDays(day, days, weeks) {
+// Jours d'une série : les jours cochés à partir de « day », pendant N semaines, une semaine sur « every »
+// (le rythme part de la semaine du premier créneau). count : nombre de créneaux ; until : dernier jour possible.
+function seriesDays(day, days, weeks, every = 1, count = 0, until = '') {
   const out = [];
-  for (let i = 0; i < weeks * 7; i++) { const d = addDays(day, i); if (days.includes(isoDay(d))) out.push(d); }
+  const first = Number(isoDay(day)) - 1;
+  let w0 = -1;
+  for (let i = 0; i < weeks * 7; i++) {
+    const d = addDays(day, i);
+    if (until && d > until) break;
+    if (!days.includes(isoDay(d))) continue;
+    const wk = Math.floor((i + first) / 7);
+    if (w0 < 0) w0 = wk;
+    if ((wk - w0) % every) continue;
+    out.push(d);
+    if (count && out.length >= count) break;
+  }
   return out;
 }
 
-// Durée (ou « Plusieurs jours ») puis répétition : fiche d'un créneau et bloc « Planifier » d'une tâche.
+const EVERY = [[1, 'Chaque semaine'], [2, '1 sur 2'], [3, '1 sur 3'], [4, '1 sur 4']];
+
+// Quand (en toutes lettres), durée (ou « Plusieurs jours ») puis répétition : fiche d'un créneau de l'agenda.
 function whenFields(day, durs, pick, { days = isoDay(day), weekly = false, auto = true } = {}) {
   return `<div class="when" data-day="${day}" data-auto="${auto ? 1 : 0}">
+    <label class="field when-ask"><span>Quand <small>✨ en toutes lettres</small></span>
+      <input name="when_text" placeholder="Ex. tous les lundis de 8h30 à 10h30" maxlength="140" autocomplete="off" enterkeyhint="done"></label>
+    <p class="when-said" aria-live="polite"></p>
     <div class="field"><span>Durée</span><div class="dur-pick">${durs.map((x) => `<label><input type="radio" name="dur" value="${x}"${x === pick ? ' checked' : ''}><span>${fmtDur(x * 60e3)}</span></label>`).join('')}
       <label class="multi"><input type="radio" name="dur" value="days"><span>📅 Plusieurs jours (voyage…)</span></label></div></div>
     <label class="field when-days"><span>Jusqu’au (inclus)</span><input type="date" name="span_to" min="${day}" value="${addDays(day, 2)}"></label>
     <div class="field rep"><span>Répéter</span>
       <div class="seg2">
         <label><input type="radio" name="rep" value="once"${weekly ? '' : ' checked'}><span>Une seule fois</span></label>
-        <label><input type="radio" name="rep" value="weekly"${weekly ? ' checked' : ''}><span>↻ Chaque semaine</span></label>
+        <label><input type="radio" name="rep" value="weekly"${weekly ? ' checked' : ''}><span>↻ Régulièrement</span></label>
       </div>
       <div class="rep-detail">
+        <div class="rep-every" role="radiogroup" aria-label="Rythme">${EVERY.map(([v, l]) => `<label><input type="radio" name="rep_every" value="${v}"${v === 1 ? ' checked' : ''}><span>${l}</span></label>`).join('')}</div>
         <div class="daypick">${'LMMJVSD'.split('').map((l, i) => `<label><input type="checkbox" name="rep_day" value="${i + 1}"${days.includes(String(i + 1)) ? ' checked' : ''}><span>${l}</span></label>`).join('')}</div>
         <div class="rep-weeks"><span>Pendant</span>
           <button type="button" class="step" data-action="rep-step" data-value="-1" aria-label="Une semaine de moins">−</button>
@@ -2183,12 +2266,17 @@ function whenValues(box, day) {
   const weekly = !multi && box.querySelector('[name="rep"]:checked')?.value === 'weekly';
   const days = [...box.querySelectorAll('[name="rep_day"]:checked')].map((x) => x.value).join('');
   const weeks = Math.max(1, Math.min(52, Math.round(Number(box.querySelector('[name="rep_weeks"]').value) || 1)));
+  const every = Number(box.querySelector('[name="rep_every"]:checked')?.value) || 1;
+  const count = Number(box.dataset.count) || 0; // « 6 fois »
+  const until = box.dataset.until || '';        // « jusqu'au 15 décembre »
   const to = box.querySelector('[name="span_to"]').value;
   return {
-    dur: Number(durV) || PLAN_DUR, multi, weekly, days, weeks, to: to && to >= day ? to : day,
-    dates: weekly ? seriesDays(day, days, weeks) : [day],
+    dur: Number(durV) || PLAN_DUR, multi, weekly, days, weeks, every, count, until, to: to && to >= day ? to : day,
+    dates: weekly ? seriesDays(day, days, count || until ? 52 : weeks, every, count, until) : [day],
   };
 }
+
+const rhythmWord = (w) => `${w.every > 1 ? `1 sem. sur ${w.every} · ` : ''}${daysWord(w.days)}`;
 
 // Résumé sous les réglages (nombre de créneaux, dates), mis à jour à chaque changement.
 function whenRefresh(box, day = box?.dataset.day) {
@@ -2199,15 +2287,32 @@ function whenRefresh(box, day = box?.dataset.day) {
   to.min = day;
   if (to.dataset.auto !== '0' || !to.value || to.value < day) to.value = addDays(day, 2); // 3 jours par défaut
   const w = whenValues(box, day);
-  box.querySelector('.rep-unit').textContent = w.weeks > 1 ? 'semaines' : 'semaine';
+  const step = box.querySelector('[name="rep_weeks"]');
+  const last = w.dates[w.dates.length - 1];
+  // « 6 fois », « jusqu'au … » : le nombre de semaines suit
+  if ((w.count || w.until) && last) step.value = Math.ceil((Math.round((parseYmd(last) - parseYmd(day)) / 864e5) + 1) / 7);
+  box.querySelector('.rep-unit').textContent = Number(step.value) > 1 ? 'semaines' : 'semaine';
   const sum = box.querySelector('.when-sum');
   const n = Math.round((parseYmd(w.to) - parseYmd(day)) / 864e5) + 1;
   sum.classList.toggle('warn', w.weekly && !w.dates.length);
   sum.textContent = w.multi
     ? (n > 1 ? `${n} jours · du ${dShort(day)} au ${dShort(w.to)}` : `Toute la journée · ${dShort(day)}`)
     : w.weekly
-      ? (w.dates.length ? `↻ ${w.dates.length} créneau${w.dates.length > 1 ? 'x' : ''} · ${daysWord(w.days)} · jusqu’au ${dShort(w.dates[w.dates.length - 1])}` : 'Choisis au moins un jour')
+      ? (w.dates.length ? `↻ ${w.dates.length} créneau${w.dates.length > 1 ? 'x' : ''} · ${rhythmWord(w)} · jusqu’au ${dShort(last)}` : 'Choisis au moins un jour')
       : '';
+  slotHead(box, w);
+}
+
+// Fiche d'un créneau : le titre suit le jour (premier créneau d'une série) et l'horaire choisis.
+function slotHead(box, w) {
+  const form = box.closest('.slot-new');
+  const h = form && !form.dataset.event && $('#sheet .sheet-head h2');
+  if (!h) return;
+  const min = Number(form.dataset.slotMin);
+  const day = w.weekly && w.dates.length ? w.dates[0] : form.dataset.slotDay;
+  h.textContent = `${cap(fmt(parseYmd(day), { weekday: 'long', day: 'numeric', month: 'short' }))}${w.multi ? '' : ` · ${minLabel(min)} → ${minLabel(Math.min(DAY_MIN, min + w.dur))}`}`;
+  const at = $('.slot-at', form);
+  if (at) at.textContent = w.multi ? 'Nouvelle tâche' : `Nouvelle tâche à ${minLabel(min)}`;
 }
 
 // Série sans aucun jour coché : on le signale (une fiche ouverte cache les messages du bas).
@@ -2236,7 +2341,7 @@ function addPlans(taskId, day, min, w) {
 
 const whenDone = (w, day, min, n) => (w.multi
   ? (w.to === day ? `Planifiée ${dShort(day)} · toute la journée` : `Planifiée du ${dShort(day)} au ${dShort(w.to)}`)
-  : w.weekly ? `${n} créneau${n > 1 ? 'x planifiés' : ' planifié'} · ${daysWord(w.days)}`
+  : w.weekly ? `${n} créneau${n > 1 ? 'x planifiés' : ' planifié'} · ${rhythmWord(w)}`
     : `Planifiée ${fmt(parseYmd(day), { weekday: 'short', day: 'numeric' })} · ${minLabel(min)}`);
 
 // Planifie puis propose « Annuler ».
@@ -2273,9 +2378,179 @@ sheet.addEventListener('input', (e) => {
   if (!box) return;
   if (e.target.name === 'rep_day') box.dataset.auto = '0';
   if (e.target.name === 'span_to') e.target.dataset.auto = '0';
-  if (e.target.name === 'rep_weeks') whenRefresh(box);
+  if (e.target.name === 'rep_weeks') { delete box.dataset.count; delete box.dataset.until; whenRefresh(box); }
 });
 sheet.addEventListener('change', (e) => { const box = e.target.closest('.when'); if (box) whenRefresh(box); });
+
+/* ----- « Quand » en toutes lettres : fiche d'un créneau et fiche de création ----- */
+
+const schedForms = new WeakMap(); // fiche → { s : planification comprise (ou null), src : « text » ou « title », time }
+const whenBefore = new WeakMap(); // .when → réglages de la fiche d'avant le texte
+const schedKey = (s) => JSON.stringify([s.repeat, s.days, s.every, s.perWeek, s.weeks, s.count, s.until, s.from, s.date, s.start, s.dur]);
+
+// Planification écrite dans le champ « Quand », sinon dans le titre (là, seulement ce qui est sûr).
+// Celle d'un titre qu'on a écartée (×) ne revient pas tant qu'elle reste la même.
+function whenRead(form) {
+  const text = form.elements.when_text?.value.trim() || '';
+  if (text) return { s: parseSchedule(text, { strict: false }), src: 'text', text };
+  const s = parseSchedule(form.elements.title?.value || '');
+  return s && form.dataset.whenOff !== schedKey(s) ? { s, src: 'title', text } : { s: null, src: '', text };
+}
+
+// Titre de la tâche, sans la planification qu'on y a lue.
+const whenTitle = (form) => { const st = schedForms.get(form); return st?.src === 'title' && st.s ? st.s.title : form.elements.title.value; };
+
+function whenDetect(form) {
+  if (!form?.isConnected || form.dataset.id) return;
+  const r = whenRead(form);
+  schedForms.set(form, { ...schedForms.get(form), ...r });
+  const box = $('.when', form);
+  if (box) { whenApply(box, r.s); whenSaid(form); } else schedCardRefresh(form);
+}
+
+// Fiche d'un créneau : remise comme avant le texte, puis réglée d'après ce qu'il dit (jour, heure, durée, répétition).
+function whenApply(box, s) {
+  const form = box.closest('form');
+  const snap = whenBefore.get(box);
+  if (snap) whenRestore(box, snap);
+  if (!s) { whenBefore.delete(box); whenRefresh(box, form.dataset.slotDay); return; }
+  if (!snap) whenBefore.set(box, whenSnap(box));
+  const q = (sel) => box.querySelector(sel);
+  if (s.start >= 0) form.dataset.slotMin = s.start;
+  if (s.dur) whenSetDur(box, s.dur);
+  else if (q('[name="dur"][value="days"]').checked && (s.repeat || s.start >= 0)) whenSetDur(box, PLAN_DUR);
+  if (s.repeat) {
+    if (s.from) form.dataset.slotDay = s.from;
+    q('[name="rep"][value="weekly"]').checked = true;
+    q(`[name="rep_every"][value="${Math.min(4, s.every)}"]`).checked = true;
+    const days = s.days || (s.perWeek ? spreadDays(form.dataset.slotDay, s.perWeek) : '');
+    if (days) { box.dataset.auto = '0'; for (const c of box.querySelectorAll('[name="rep_day"]')) c.checked = days.includes(c.value); }
+    const weeks = q('[name="rep_weeks"]');
+    if (s.count) box.dataset.count = s.count;
+    else if (s.until) box.dataset.until = s.until;
+    else if (s.weeks) weeks.value = s.weeks;
+    else if (weeks.value === '4' && s.every > 1) weeks.value = 4 * s.every; // une semaine sur deux : autant de créneaux
+  } else if (s.date || s.from) {
+    form.dataset.slotDay = s.date || s.from;
+    q('[name="rep"][value="once"]').checked = true;
+  }
+  whenRefresh(box, form.dataset.slotDay);
+}
+
+function whenSnap(box) {
+  const form = box.closest('form');
+  return {
+    inputs: [...box.querySelectorAll('input:not([name="when_text"])')].map((i) => [i, i.checked, i.value]),
+    data: { auto: box.dataset.auto, count: box.dataset.count, until: box.dataset.until },
+    slot: { slotDay: form.dataset.slotDay, slotMin: form.dataset.slotMin },
+  };
+}
+
+function whenRestore(box, snap) {
+  const known = new Set(snap.inputs.map(([i]) => i));
+  for (const lab of box.querySelectorAll('.dur-pick label.custom')) if (!known.has(lab.querySelector('input'))) lab.remove();
+  for (const [i, checked, value] of snap.inputs) {
+    i.value = value;
+    i.checked = checked;
+    if (i.closest('label.custom')) i.nextElementSibling.textContent = fmtDur(Number(value) * 60e3);
+  }
+  for (const [k, v] of Object.entries(snap.data)) { if (v === undefined) delete box.dataset[k]; else box.dataset[k] = v; }
+  Object.assign(box.closest('form').dataset, snap.slot);
+}
+
+// Durée écrite : sa pastille, sinon une pastille de plus (« 45 min », « 1h45 »).
+function whenSetDur(box, dur) {
+  let r = box.querySelector(`[name="dur"][value="${dur}"]`);
+  if (!r) {
+    let lab = box.querySelector('.dur-pick label.custom');
+    if (!lab) {
+      lab = Object.assign(document.createElement('label'), { className: 'custom', innerHTML: '<input type="radio" name="dur"><span></span>' });
+      box.querySelector('.dur-pick label.multi').before(lab);
+    }
+    r = lab.querySelector('input');
+    r.value = dur;
+    lab.querySelector('span').textContent = fmtDur(dur * 60e3);
+  }
+  r.checked = true;
+}
+
+// Ce qui a été compris, sous le champ « Quand » (ou lu dans le titre, avec × pour l'écarter).
+function whenSaid(form) {
+  const p = $('.when-said', form);
+  if (!p) return;
+  const st = schedForms.get(form);
+  p.classList.toggle('miss', !st?.s && !!st?.text);
+  if (!st?.s) { p.textContent = st?.text ? 'Pas compris… essaie « le mardi à 18h » ou « une semaine sur deux »' : ''; return; }
+  const day = form.dataset.slotDay;
+  const min = Number(form.dataset.slotMin);
+  const w = whenValues($('.when', form), day);
+  const label = w.multi ? `Plusieurs jours · jusqu’au ${dShort(w.to)}` : scheduleLabel(w.weekly
+    ? { repeat: true, days: w.days, every: w.every, weeks: w.count || w.until ? 0 : w.weeks, count: w.count, until: w.until, start: min, dur: w.dur }
+    : { repeat: false, date: day, start: min, dur: w.dur });
+  p.innerHTML = `<span class="ws-ic" aria-hidden="true">✨</span><span class="ws-txt"><b>${esc(label)}</b>${st.src === 'title'
+    ? `<small>Lu dans le titre · la tâche s’appellera « ${esc(st.s.title)} »</small></span><button type="button" class="ws-x" data-action="when-off" aria-label="Ne pas tenir compte du titre">${ICON.close}</button>`
+    : '</span>'}`;
+}
+
+// Fiche de création : créneaux à créer d'après la planification comprise (heure à choisir si elle n'est pas écrite).
+function schedPlan(form) {
+  const st = schedForms.get(form);
+  const s = st?.s;
+  if (!s || (!s.repeat && !s.date && s.start < 0)) return null; // une durée seule ne se place pas
+  const start = s.start >= 0 ? s.start : toMin(st.time || '09:00');
+  const dur = Math.max(SNAP, Math.min(s.dur || PLAN_DUR, DAY_MIN - start));
+  const today = ymd(new Date());
+  const day0 = start > nowMin() ? today : addDays(today, 1); // heure passée : à partir de demain
+  return s.repeat ? schedResolve(s, day0, start, dur) : { ...s, start, dur, date: s.date || day0, dates: [s.date || day0] };
+}
+
+function schedSub(form, p) {
+  const st = schedForms.get(form);
+  const n = p.dates.length;
+  return [
+    p.repeat ? (n ? `${n} créneau${n > 1 ? 'x' : ''} · du ${dShort(p.dates[0])} au ${dShort(p.dates[n - 1])}` : 'Aucun créneau sur cette période') : '',
+    st.src === 'title' && st.s.title !== form.elements.title.value.trim() ? `tâche « ${st.s.title} »` : '',
+  ].filter(Boolean).join(' · ');
+}
+
+// La carte qui remplace « Placer dans l'agenda » quand une planification est comprise.
+function schedCardRefresh(form) {
+  const card = $('.sched-card', form);
+  if (!card) return;
+  const st = schedForms.get(form);
+  const p = schedPlan(form);
+  card.closest('.ag-block').classList.toggle('has-sched', !!p);
+  card.hidden = !p;
+  const miss = $('.sched-miss', form);
+  if (miss) {
+    miss.hidden = !!p || !st?.text;
+    miss.textContent = st?.s ? 'Précise un jour ou une heure : « demain 10h », « le lundi à 9h »…' : 'Pas compris… essaie « mardi 18h » ou « une semaine sur deux le lundi à 9h »';
+  }
+  if (!p) { card.innerHTML = ''; return; }
+  const needTime = st.s.start < 0;
+  card.innerHTML = `<span class="sc-ic" aria-hidden="true">${p.repeat ? '↻' : ICON.cal}</span>
+    <span class="sc-txt"><b>${esc(scheduleLabel(p, !needTime))}</b>
+      ${needTime ? `<span class="sc-time">à <input type="time" name="when_time" value="${hhmm(p.start)}" step="300" aria-label="Heure"> · ${fmtDur(p.dur * 60e3)}</span>` : ''}
+      <small class="sc-sub">${esc(schedSub(form, p))}</small></span>
+    <button type="button" class="sc-x" data-action="when-off" aria-label="Ne pas planifier">${ICON.close}</button>`;
+}
+
+let whenTimer = 0;
+sheet.addEventListener('input', (e) => {
+  const form = e.target.form;
+  if (!form) return;
+  if (e.target.name === 'when_text') {
+    clearTimeout(whenTimer);
+    whenTimer = setTimeout(() => { whenDetect(form); dueDetect(form); suggestRefresh(form, false); }, 120);
+  } else if (e.target.name === 'when_time') { // heure choisie dans la carte : seules les dates suivent
+    const st = schedForms.get(form);
+    if (!st || !e.target.value) return;
+    st.time = e.target.value;
+    const p = schedPlan(form);
+    const sub = $('.sc-sub', form);
+    if (p && sub) sub.textContent = schedSub(form, p);
+  }
+});
 
 // Créneau touché dans une colonne : minute de la journée (arrondie à la demi-heure).
 function slotAt(col, y) {
@@ -2689,7 +2964,7 @@ function openSlotSheet(day, min, maxDur = DAY_MIN - min, dur = 0, conv = null) {
     ${head(conv ? 'Transformer en tâche' : `${cap(fmt(d, { weekday: 'long', day: 'numeric', month: 'short' }))} · ${minLabel(min)}${dur ? ` → ${minLabel(min + dur)}` : ''}`)}
     ${conv ? `<p class="hint" style="margin-top:0">« ${esc(conv.title)} » (${minLabel(min)} → ${minLabel(min + dur)}) devient une tâche : tu pourras la chronométrer et la valider dans « Ma journée ».</p>` : ''}
     <form class="slot-new" data-form="task" data-slot-day="${day}" data-slot-min="${min}"${conv ? ` data-event="${conv.id}"` : ''} autocomplete="off">
-      <label class="field"><span>${conv ? 'Tâche' : `Nouvelle tâche à ${minLabel(min)}`}</span>${emojiField(`<input class="big" name="title" value="${esc(conv?.title || '')}" placeholder="Ex. Appeler le garage" maxlength="200" required enterkeyhint="done"${!conv && matchMedia('(pointer: fine)').matches ? ' autofocus' : ''}>`)}</label>
+      <label class="field"><span${conv ? '' : ' class="slot-at"'}>${conv ? 'Tâche' : `Nouvelle tâche à ${minLabel(min)}`}</span>${emojiField(`<input class="big" name="title" value="${esc(conv?.title || '')}" placeholder="Ex. Appeler le garage" maxlength="200" required enterkeyhint="done"${!conv && matchMedia('(pointer: fine)').matches ? ' autofocus' : ''}>`)}</label>
       ${pickFields(def.projectId, def.subprojectId)}
       ${whenFields(day, durs, pick, conv ? { days: conv.days, weekly: conv.weekly, auto: false } : {})}
       <button class="btn primary wide">${conv ? '🔁 Transformer en tâche' : `${ICON.plus} Créer et planifier`}</button>
@@ -2740,8 +3015,19 @@ document.addEventListener('click', (e) => {
 document.addEventListener('pointerdown', () => { temp.suppressClick = false; }, true);
 
 setInterval(() => {
+  const nm = new Date().getHours() * 60 + new Date().getMinutes();
   const line = $('.now-line');
-  if (line && !drag.active) line.style.top = `${posPct(new Date().getHours() * 60 + new Date().getMinutes())}%`;
+  if (line && !drag.active) line.style.top = `${posPct(nm)}%`;
+  // créneau prolongé (chrono en cours) : il s'allonge avec l'heure
+  for (const b of drag.active ? [] : $$('.plan-block.grow')) {
+    const s = Number(b.dataset.s);
+    const e0 = Number(b.dataset.e0);
+    const e = Math.max(e0, nm + 1);
+    b.style.height = `${(((e - s) / VIEW_SPAN) * 100).toFixed(3)}%`;
+    b.style.setProperty('--split', `${(((e0 - s) / (e - s)) * 100).toFixed(1)}%`);
+    const over = $('.pb-over', b);
+    if (over) over.textContent = `+${fmtDur(Math.max(0, nm - e0) * 60e3)}`;
+  }
 }, 60e3);
 
 new ResizeObserver(() => document.documentElement.style.setProperty('--top-h', `${$('.top').offsetHeight}px`)).observe($('.top'));
@@ -3505,7 +3791,7 @@ function suggestInit(form, lock = {}) {
 function suggestRefresh(form, showList) {
   const st = sugForms.get(form);
   if (!st || !st.ix || !form.isConnected) return;
-  Object.assign(st, suggest(form.elements.title.value, st));
+  Object.assign(st, suggest(whenTitle(form), st)); // (« Footing tous les lundis » : on cherche « Footing »)
   if (st.mode === 'default' || st.mode === 'auto') {
     if (st.auto) sugApply(form, st.auto, 'auto');
     else if (st.mode === 'auto') sugApply(form, st.def, 'default'); // plus de suggestion nette : retour au choix par défaut
@@ -3607,7 +3893,7 @@ sheet.addEventListener('input', (e) => {
   if (!st) return;
   st.sel = -1;
   clearTimeout(st.timer);
-  st.timer = setTimeout(() => { dueDetect(form); suggestRefresh(form, e.isTrusted); }, 90); // emoji ajouté par le sélecteur : pas de liste
+  st.timer = setTimeout(() => { whenDetect(form); dueDetect(form); suggestRefresh(form, e.isTrusted); }, 90); // emoji ajouté par le sélecteur : pas de liste
 });
 sheet.addEventListener('focusin', (e) => {
   const form = e.target.name === 'title' && e.target.form;
@@ -3754,7 +4040,8 @@ function todayModel() {
 
 // Bloc de tâche à valider (agenda, « à faire aujourd'hui », « terminé »).
 // note : texte à la place de la durée (tâche sur plusieurs jours : « Jour 2 sur 3 »).
-function todayCard({ t, p, dur, done, totals, note = '' }) {
+// live : créneau prolongé (ou recalé) tant que son chrono tourne (« +22 min », « en cours »).
+function todayCard({ t, p, dur, done, totals, note = '', live = '' }) {
   const running = !!timerOf(t.id);
   const kind = p ? 'plan' : 'task';
   const id = p ? p.id : t.id;
@@ -3768,7 +4055,7 @@ function todayCard({ t, p, dur, done, totals, note = '' }) {
         <div class="day-title">${t.starred ? `<span class="day-star">${ICON.star}</span>` : ''}${esc(t.title)}</div>
         <div class="day-meta">
           ${t.projectId ? `<span class="tag"><i></i>${esc(pathLabel(t.projectId, t.subprojectId))}</span>` : ''}
-          ${p ? `<span>${note ? esc(note) : `${p.series ? '↻ ' : ''}${fmtDur(dur * 60e3)}`}</span>` : ''}
+          ${p ? `<span>${note ? esc(note) : `${p.series ? '↻ ' : ''}${fmtDur(dur * 60e3)}`}${live ? ` <em class="over">${esc(live)}</em>` : ''}</span>` : ''}
           ${late && late.cls === 'late' ? `<span class="due late">${esc(late.text)}</span>` : ''}
           ${spent || running ? `<span class="spent">${ICON.clock}${liveDur(spent, sinceOf(t.id))}</span>` : ''}
         </div>
@@ -3816,9 +4103,20 @@ function viewToday() {
       <div class="mix-legend">${perSorted.slice(0, 3).map(([k, ms]) => `<span style="--c:${colorOf(k)}"><i></i>${esc(getProject(k)?.name || 'Sans projet')} · ${fmtDur(ms)}</span>`).join('')}</div>` : ''}
     </div>`;
 
-  // Carte « Maintenant » : créneau en cours, sinon le prochain
+  // Chrono lancé sur un créneau déjà fini : il reste « en cours » jusqu'à maintenant (ou se recale sur l'heure réelle).
+  const live = new Map();
+  for (const a of state.timers) { const l = liveSpan(a); if (l) live.set(l.p.id, l); }
+  for (const i of m.open) {
+    const l = i.kind === 'plan' && live.get(i.p.id);
+    if (l) Object.assign(i, { s0: i.s, e0: i.e, moved: l.moved, over: l.moved ? 0 : nm - i.e, s: l.moved ? minOfDay(l.start, m.day) : i.s, e: Math.max(i.e, nm + 1) });
+  }
+  m.open.sort((a, b) => a.s - b.s || (a.kind === 'event' ? -1 : 1));
+  const liveNote = (i) => (!i.e0 ? '' : i.moved ? 'en cours' : i.over >= 1 ? `+${fmtDur(i.over * 60e3)}` : 'prolongé');
+
+  // Carte « Maintenant » : créneau en cours (celui dont le chrono tourne d'abord), sinon le prochain
   const open = (i) => i.kind === 'plan' && !planDone(i.p);
-  const current = m.open.find((i) => open(i) && i.s <= nm && nm < i.e);
+  const inNow = (i) => open(i) && i.s <= nm && nm < i.e;
+  const current = m.open.find((i) => inNow(i) && timerOf(i.t.id)) || m.open.find(inNow);
   const next = m.open.find((i) => open(i) && i.s > nm);
   const busyEvent = m.items.find((i) => i.kind === 'event' && i.s <= nm && nm < i.e);
   const focus = current || next;
@@ -3827,14 +4125,17 @@ function viewToday() {
     const t = focus.t;
     const running = !!timerOf(t.id);
     const isNow = focus === current;
-    const label = isNow
-      ? `Maintenant · ${minLabel(focus.s)}–${minLabel(focus.e)}`
-      : `Ensuite · ${minLabel(focus.s)} (dans ${fmtDur((focus.s - nm) * 60e3)})`;
+    const grown = isNow && focus.e0 != null; // prolongé : la fin est « quand le chrono s'arrête »
+    const label = !isNow ? `Ensuite · ${minLabel(focus.s)} (dans ${fmtDur((focus.s - nm) * 60e3)})`
+      : grown ? `Maintenant · depuis ${minLabel(focus.s)}` : `Maintenant · ${minLabel(focus.s)}–${minLabel(focus.e)}`;
+    const meta = !isNow ? (busyEvent ? ` · après « ${esc(busyEvent.ev.title)} »` : '')
+      : !grown ? ` · reste ${fmtDur((focus.e - nm) * 60e3)}`
+        : focus.moved ? ` · prévu à ${minLabel(focus.s0)}` : ` · prévu jusqu’à ${minLabel(focus.e0)}${focus.over >= 1 ? ` · <b class="over">+${fmtDur(focus.over * 60e3)}</b>` : ''}`;
     nowCard = `<section class="now-card${running ? ' running' : ''}" style="--c:${colorOf(t.projectId)}">
       <div class="now-label"><span class="pulse"></span>${label}</div>
       <div class="now-title" role="button" tabindex="0" data-action="open-plan" data-id="${focus.p.id}">${t.starred ? '★ ' : ''}${esc(t.title)}</div>
-      <div class="now-meta">${esc(pathLabel(t.projectId, t.subprojectId))}${isNow ? ` · reste ${fmtDur((focus.e - nm) * 60e3)}` : busyEvent ? ` · après « ${esc(busyEvent.ev.title)} »` : ''}</div>
-      ${isNow ? `<div class="now-progress"><i style="width:${Math.round(((nm - focus.s) / (focus.e - focus.s)) * 100)}%"></i></div>` : ''}
+      <div class="now-meta">${esc(pathLabel(t.projectId, t.subprojectId))}${meta}</div>
+      ${isNow ? `<div class="now-progress${grown ? ' live' : ''}"><i style="width:${grown ? 100 : Math.round(((nm - focus.s) / (focus.e - focus.s)) * 100)}%"></i></div>` : ''}
       <div class="now-actions">
         <button type="button" class="btn ${running ? 'stop' : 'primary'} grow" data-action="toggle-timer" data-id="${t.id}">${running ? `${ICON.stop} <span${tickAttr('clock', 0, sinceOf(t.id))}>${fmtClock(elapsedSince(sinceOf(t.id)))}</span>` : `${ICON.play} ${isNow ? 'Lancer le chrono' : 'Commencer'}`}</button>
         <button type="button" class="btn grow" data-action="today-done" data-kind="plan" data-id="${focus.p.id}">${ICON.check} Fait</button>
@@ -3864,7 +4165,7 @@ function viewToday() {
     }
     const done = planDone(i.p);
     return `${html}<li class="ag ag-plan${past ? ' past' : ''}${isCur && !done ? ' current' : ''}" style="--c:${colorOf(i.t.projectId)}"><time>${minLabel(i.s)}</time>
-      ${todayCard({ t: i.t, p: i.p, dur: i.e - i.s, done, totals })}</li>`;
+      ${todayCard({ t: i.t, p: i.p, dur: (i.e0 ?? i.e) - (i.s0 ?? i.s), done, totals, live: liveNote(i) })}</li>`;
   }).join('') + (placed || !rows.length ? '' : nowRule);
 
   const agendaHtml = `<div class="section-title"><span>Programme</span><button type="button" data-action="go-day" data-value="${m.day}">Planning ${ICON.right}</button></div>
@@ -4433,10 +4734,243 @@ function dueDetect(form) {
   const input = form.elements.deadline;
   const mode = form.dataset.due;
   if (!input || form.dataset.id || mode === 'manual') return;
-  const found = dateInTitle(form.elements.title.value);
+  const found = dateInTitle(whenTitle(form)); // (sans la planification lue dans le titre)
   if (found) { input.value = found; form.dataset.due = 'auto'; }
   else if (mode === 'auto') { input.value = form.dataset.dueDef || ''; form.dataset.due = 'default'; }
   dueRefresh(form);
+}
+
+/* ----- Planification écrite en toutes lettres ----- */
+// « tous les lundis de 8h30 à 10h30 pendant 6 semaines », « une semaine sur deux », « le mardi et le jeudi à 18h »,
+// « tous les jours à 7h », « 6 fois », « jusqu'au 15 décembre », « à partir du 3 novembre », « vendredi à 14h »…
+
+const SCH_NUM = { un: 1, une: 1, deux: 2, trois: 3, quatre: 4, cinq: 5, six: 6, sept: 7, huit: 8, neuf: 9, dix: 10, onze: 11, douze: 12, treize: 13, quatorze: 14, quinze: 15, seize: 16, vingt: 20 };
+const SCH_DAYS = ['lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi', 'dimanche']; // « 1 » = lundi
+const SCH_WD = SCH_DAYS.join('|');
+const SCH_N = `(\\d{1,2}|${Object.keys(SCH_NUM).join('|')})`;
+const SCH_DAY = `(?:${SCH_WD})s?`;
+const SCH_DATE = `(?:(1er|\\d{1,2})\\s+(${MONTHS.join('|')})|(\\d{1,2})\\/(\\d{1,2})(?:\\/(\\d{2}|\\d{4}))?)`; // 5 groupes
+const SCH_EVERY = '(deux|2|trois|3|quatre|4)';
+const SCH_TIMES = { 2: 'deux', 3: 'trois', 4: 'quatre' };
+const schNum = (w) => (/^\d+$/.test(w) ? Number(w) : SCH_NUM[w] || 0);
+const schIso = (w) => String(SCH_DAYS.findIndex((d) => w.startsWith(d)) + 1);
+const schDays = (txt) => [...new Set((txt.match(new RegExp(SCH_WD, 'g')) || []).map(schIso))].sort().join('');
+const schPart = (w = '') => (w.startsWith('matin') ? 8 * 60 : w.startsWith('soir') ? 19 * 60 : w.startsWith('midi') ? 12 * 60 : w.startsWith('apres') ? 14 * 60 : -1);
+
+// Comprend la planification écrite dans un texte. strict (un titre) : seulement ce qui est sûr, une répétition
+// ou un jour avec une heure ; sinon (champ « Quand ») : tout ce qui est compris. Renvoie null, ou :
+// { repeat, days (« 135 »), every (1 chaque semaine, 2 une sur deux…), perWeek, weeks, count, until, from,
+//   date (une seule fois), start / dur (minutes ; -1 / 0 si non précisés), title (le texte sans la planification) }
+function parseSchedule(text, { strict = true, base = new Date() } = {}) {
+  const src = String(text || '');
+  // minuscules sans accents, de même longueur : les positions trouvées valent pour le texte d'origine
+  let low = '';
+  for (const c of src) {
+    const f = c.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+    low += f.length === c.length ? f : c.length === 1 ? ' ' : c;
+  }
+  low = low.replace(/[’‘`]/g, "'").replace(/\b(a|vers|de|des|entre|et|jusqu'?\s?a|-)(\s*)midi\b/g, (x, w, sp) => `${w}${sp}12 h`); // (même longueur)
+  if (!/[a-z0-9]/.test(low)) return null;
+  const today = startOfDay(base);
+  const nowM = base.getHours() * 60 + base.getMinutes();
+  const cur = ((today.getDay() + 6) % 7) + 1;
+  const inDays = (n) => { const d = new Date(today); d.setDate(d.getDate() + n); return ymd(d); };
+  const nextDay = (iso, todayOk) => inDays((Number(iso) - cur + 7) % 7 || (todayOk ? 0 : 7));
+  const onDate = (d, m, y) => {
+    let x = new Date(y ?? today.getFullYear(), m, d);
+    if (y == null && x < today) x = new Date(today.getFullYear() + 1, m, d);
+    return x.getDate() === d && x.getMonth() === m ? ymd(x) : '';
+  };
+  const dateOf = (g, i) => (g[i] ? onDate(g[i] === '1er' ? 1 : Number(g[i]), MONTHS.indexOf(g[i + 1]))
+    : onDate(Number(g[i + 2]), Number(g[i + 3]) - 1, g[i + 4] ? Number(g[i + 4].length === 2 ? `20${g[i + 4]}` : g[i + 4]) : undefined));
+  const monthDay = (w) => { // « le 25 » : ce mois-ci, ou le mois prochain si c'est passé
+    const d = w === '1er' ? 1 : Number(w);
+    const next = d < today.getDate();
+    return onDate(d, (today.getMonth() + next) % 12, today.getFullYear() + (next && today.getMonth() === 11));
+  };
+  const hm = (h, mm) => (Number(h) < 24 && Number(mm || 0) < 60 ? Number(h) * 60 + Number(mm || 0) : -1);
+  const spans = [];
+  // le premier passage qui convient : retiré du texte, et noté avec sa catégorie
+  const take = (re, tag, ok = () => true) => {
+    for (const g of low.matchAll(re)) {
+      if (!ok(g)) continue;
+      spans.push([g.index, g.index + g[0].length, tag]);
+      low = low.slice(0, g.index) + ' '.repeat(g[0].length) + low.slice(g.index + g[0].length);
+      return g;
+    }
+    return null;
+  };
+  const r = { repeat: false, days: '', every: 1, perWeek: 0, weeks: 0, count: 0, until: '', from: '', date: '', start: -1, dur: 0 };
+  let strong = false; // répétition annoncée : « tous les », « chaque », « une semaine sur deux », « lundis »…
+  let habit = false;  // « le lundi » : une habitude (avec une heure ou une durée de série)
+  let one = '';       // « lundi », « ce lundi », « lundi prochain » : un jour précis
+  let part = -1;      // « matin », « soir »… : heure proposée
+  let m;
+
+  // Heures : « de 8h30 à 10h30 », « 8h-10h », « entre 14h et 16h » ; durée : « pendant 1h30 », « 45 min » ; « à 7h »
+  const H = '(\\d{1,2})\\s?(h(?:eures?)?|:)?\\s?(\\d{2})?';
+  take(new RegExp(`(?:\\b(?:de|entre)\\s+)?\\b${H}\\s*(?:a|-|–|et|jusqu'?\\s?a)\\s*${H}\\b`, 'g'), 'time', (g) => {
+    if (!g[2] && !g[5]) return false; // « 2-3 » n'est pas un horaire
+    if (!g[2] && !/^(?:de|entre)\s/.test(g[0])) return false; // « de 9 à 11h », mais « le 3 à 9h » est une date
+    if (/[/:.,\d]$/.test(low.slice(0, g.index))) return false; // « 12/11 à 18h »
+    const s = hm(g[1], g[3]);
+    const e = g[4] === '24' && !g[6] ? DAY_MIN : hm(g[4], g[6]);
+    if (s < 0 || e <= s) return false;
+    Object.assign(r, { start: s, dur: e - s });
+    return true;
+  });
+  take(/\b(?:pendant|durant)\s+(?:(\d{1,2})\s?h(?:eures?)?\s?(\d{2})?(\s+et\s+demie?)?|(\d{1,3})\s?(?:min(?:utes?|s)?|mn)|(?:une|1)\s+heure(\s+et\s+demie?)?|(?:une\s+)?demi-?\s?heure|(?:un\s+)?quart\s+d'?\s?heure)(?![a-z])/g, 'dur', (g) => {
+    const d = g[1] ? Number(g[1]) * 60 + Number(g[2] || 0) + (g[3] ? 30 : 0) : g[4] ? Number(g[4])
+      : /quart/.test(g[0]) ? 15 : /demi-?\s?heure/.test(g[0]) ? 30 : 60 + (g[5] ? 30 : 0);
+    if (!d || d > 16 * 60 || r.start >= 0) return false;
+    r.dur = d;
+    return true;
+  });
+  if (!r.dur) take(/\b(\d{1,3})\s?(?:min(?:utes?|s)?|mn)\b/g, 'dur', (g) => { const d = Number(g[1]); if (!d || d > 600) return false; r.dur = d; return true; });
+  if (r.start < 0) {
+    take(/\b(?:a|vers|des|pour)\s+(\d{1,2})\s?(?:h(?:eures?)?|:)\s?(\d{2})?\b/g, 'time', (g) => { const s = hm(g[1], g[2]); if (s < 0) return false; r.start = s; return true; });
+  }
+
+  // Fin : « jusqu'au 15 décembre », « jusqu'à fin juin », « jusqu'en juin » ; début : « à partir du 3 novembre », « dès lundi »
+  m = take(new RegExp(`\\bjusqu'?\\s?(?:(?:au|a\\s+la|a|en)\\s+)?(?:(?:${SCH_WD})\\s+)?(?:${SCH_DATE}|fin\\s+(${MONTHS.join('|')})|(${MONTHS.join('|')})|(?:la\\s+)?fin\\s+du\\s+mois)\\b`, 'g'), 'end');
+  if (m) {
+    const mo = m[6] || m[7];
+    if (mo) { const k = MONTHS.indexOf(mo); r.until = ymd(new Date(today.getFullYear() + (k < today.getMonth()), k + 1, 0)); }
+    else if (/fin\s+du\s+mois/.test(m[0])) r.until = ymd(new Date(today.getFullYear(), today.getMonth() + 1, 0));
+    else r.until = dateOf(m, 1);
+  }
+  m = take(new RegExp(`\\b(?:a\\s+partir\\s+(?:du|de|d')|des|commencer?)\\s*(?:le\\s+)?(?:(?:${SCH_WD})\\s+)?(?:${SCH_DATE}|(demain|aujourd'?\\s?hui)|(${SCH_WD})(?:\\s+prochain)?|(?:la\\s+)?(semaine\\s+prochaine)|(1er|\\d{1,2})(?![\\d/:]|\\s?h))\\b`, 'g'), 'from');
+  if (m) {
+    r.from = m[6] ? inDays(m[6] === 'demain' ? 1 : 0) : m[7] ? nextDay(schIso(m[7])) : m[8] ? inDays(8 - cur) : m[9] ? monthDay(m[9]) : dateOf(m, 1);
+  }
+
+  // Rythme : « un lundi sur deux », « une semaine sur deux », « toutes les 2 semaines », « tous les 15 jours », « 2 fois par semaine »
+  m = take(new RegExp(`\\b(?:un|une|1)\\s+(${SCH_DAY})\\s+sur\\s+${SCH_EVERY}\\b`, 'g'), 'rep');
+  if (m) { r.days = schDays(m[1]); r.every = schNum(m[2]); strong = true; }
+  m = take(new RegExp(`\\b(?:(?:une|1)\\s+semaine\\s+sur\\s+${SCH_EVERY}|tou(?:s|t|tes)\\s+les\\s+${SCH_EVERY}\\s+semaines|tou(?:s|t)\\s+les\\s+(15|quinze)\\s+jours)\\b`, 'g'), 'rep');
+  if (m) { r.every = m[3] ? 2 : schNum(m[1] || m[2]); strong = true; }
+  m = take(new RegExp(`\\b(?:${SCH_N}\\s+fois\\s+(?:par|chaque|toutes\\s+les)\\s+semaines?|chaque\\s+semaine|tou(?:s|t|tes)\\s+les\\s+semaines)\\b`, 'g'), 'rep');
+  if (m) { strong = true; if (schNum(m[1] || '') > 1) r.perWeek = Math.min(7, schNum(m[1])); }
+  if (take(/\bhebdo(?:madaire)?(?:ment)?\b/g, 'hint')) strong = true; // « Point hebdo » : le mot reste dans le titre
+
+  // Jours : en semaine, le week-end, tous les jours, du mardi au jeudi, les lundis et jeudis, le lundi, lundi…
+  if (take(/\b(?:en\s+semaine|du\s+lundi\s+au\s+vendredi|(?:tous\s+)?les\s+jours\s+(?:de\s+(?:la\s+)?semaine|ouvr(?:es|ables))|(?:les\s+|en\s+)?jours?\s+ouvr(?:es|ables))\b/g, 'rep')) { r.days = '12345'; strong = true; }
+  if (take(/\b(?:tou(?:s|t)\s+les|chaque|les)\s+week-?\s?ends?\b/g, 'rep')) { r.days = '67'; strong = true; }
+  m = take(/\b(?:tou(?:s|t|tes)\s+les\s+(jours|matins|soirs|midis|apres-?\s?midis?)|chaque\s+(jour|matin|soir|midi|apres-?\s?midi))\b/g, 'rep');
+  if (m) { r.days = '1234567'; strong = true; part = schPart(m[1] || m[2]); }
+  if (take(/\b(?:au\s+)?quotidien(?:ne)?(?:ment)?\b/g, 'hint')) { r.days ||= '1234567'; strong = true; } // « Rangement quotidien » : le mot reste dans le titre
+  m = take(new RegExp(`\\bdu\\s+(${SCH_WD})\\s+au\\s+(${SCH_WD})\\b`, 'g'), 'rep');
+  if (m) {
+    const a = Number(schIso(m[1]));
+    const b = Number(schIso(m[2]));
+    r.days = [1, 2, 3, 4, 5, 6, 7].filter((d) => (a <= b ? d >= a && d <= b : d >= a || d <= b)).join('');
+    strong = true;
+  }
+  const list = `${SCH_DAY}(?:\\s*(?:,|et|&|\\/|ou|\\+)\\s*(?:(?:le|les)\\s+)?${SCH_DAY})*`;
+  // (« lundi 3 novembre » est une date : laissée pour plus bas)
+  m = take(new RegExp(`\\b(?:(tous|toutes|tout)\\s+les\\s+|(chaque)\\s+|(les)\\s+|(le)\\s+|(ce)\\s+)?(${list})\\b(\\s+prochain)?(?:\\s+(matins?|soirs?|midis?|apres-?\\s?midis?))?(?!\\s+(?:1er|\\d{1,2})(?![\\d:]|\\s?h))`, 'g'), 'days');
+  if (m) {
+    const days = schDays(m[6]);
+    r.days = [...new Set([...r.days, ...days])].sort().join('');
+    if (m[1] || m[2] || m[3] || days.length > 1 || new RegExp(`(?:${SCH_WD})s\\b`).test(m[6])) strong = true;
+    else if (m[4]) habit = true;
+    else one = m[5] ? 'ce' : m[7] ? 'prochain' : 'bare';
+    if (m[8] && part < 0) part = schPart(m[8]);
+  }
+
+  // Durée de la série : « pendant 6 semaines », « sur 2 mois », « 6 fois »
+  m = take(new RegExp(`\\b(?:(?:pendant|durant|sur)\\s+)?(?:les\\s+)?${SCH_N}\\s+(?:prochaines\\s+)?(semaines?|mois)(?:\\s+(?:a\\s+venir|prochaine?s?))?\\b`, 'g'), 'end',
+    (g) => !/\b(?:dans|il\s+y\s+a|depuis)\s+(?:les\s+)?$/.test(low.slice(0, g.index)));
+  if (m) { const n = schNum(m[1]); r.weeks = Math.min(52, m[2] === 'mois' ? Math.round(n * 4.33) : n); }
+  m = take(new RegExp(`\\b${SCH_N}\\s+(?:fois|seances?)\\b(?!\\s+(?:par|chaque|toutes))`, 'g'), 'end');
+  if (m) r.count = Math.min(100, schNum(m[1]));
+  const endCond = !!(r.weeks || r.count || r.until);
+
+  const fixed = one === 'ce' || one === 'prochain';
+  const bare = /\b\d{1,2}(?:\s?h(?:eures?)?\s?(?:\d{2})?|:\d{2})\b/.test(low); // une heure sans « à » (« le mardi 14h »)
+  r.repeat = strong || (!fixed && !!r.days && endCond) || (habit && (!strict || r.start >= 0 || part >= 0 || bare)) || (!strict && !fixed && endCond);
+
+  // Une seule fois : un jour (« vendredi », « demain », « le 25 », « 25/10 », « lundi 3 novembre »)
+  let dateTag = '';
+  if (!r.repeat) {
+    if ((one || habit) && r.days.length === 1) { r.date = nextDay(r.days, one === 'ce'); dateTag = 'days'; }
+    m = r.date ? null : take(/\b(?:aujourd'?\s?hui|ce\s+(soir|matin|midi)|cet\s+(apres-?\s?midi)|apres-?\s?demain|demain)\b/g, 'date');
+    if (m) {
+      r.date = /apres-?\s?demain/.test(m[0]) ? inDays(2) : /demain/.test(m[0]) ? inDays(1) : inDays(0);
+      if (part < 0) part = schPart(m[1] || m[2]);
+      dateTag = 'date';
+    }
+    m = r.date ? null : take(/\b(?:ce|le)\s+week-?\s?end\b/g, 'date');
+    if (m) { r.date = inDays(cur >= 6 ? 0 : 6 - cur); dateTag = 'date'; }
+    m = r.date ? null : take(new RegExp(`\\b(?:le\\s+)?(?:(?:${SCH_WD})\\s+)?${SCH_DATE}\\b`, 'g'), 'date');
+    if (m) { r.date = dateOf(m, 1); dateTag = 'date'; }
+    m = r.date ? null : take(new RegExp(`\\b(?:le\\s+(?:(?:${SCH_WD})\\s+)?|(?:${SCH_WD})\\s+)(1er|\\d{1,2})\\b(?!\\s*(?:h|:|\\/))`, 'g'), 'date');
+    if (m) { r.date = monthDay(m[1]); dateTag = 'date'; }
+    if (!r.date && r.from) { r.date = r.from; dateTag = 'from'; }
+  }
+  // Heure sans « à » (« lundi 7h », « 18:30 ») : seulement à côté d'un jour ou d'une répétition
+  if (r.start < 0 && (r.repeat || r.date || !strict)) {
+    take(/\b(\d{1,2})(?:\s?h(?:eures?)?\s?(\d{2})?|:(\d{2}))\b/g, 'time', (g) => { const s = hm(g[1], g[2] || g[3]); if (s < 5 * 60) return false; r.start = s; return true; });
+  }
+  if (r.start < 0 && part >= 0 && (r.repeat || !strict)) r.start = part;
+  if (strict && !r.repeat && !r.date && r.start >= 0 && !endCond) r.date = r.start > nowM ? inDays(0) : inDays(1); // « à 14h » : aujourd'hui, sinon demain
+  if (strict && !r.repeat && !(r.date && r.start >= 0)) return null; // un jour sans heure : une échéance, pas un créneau
+  if (!spans.length) return null;
+
+  // Le titre, sans ce qui a servi (ni les mots de liaison restés en bout)
+  const used = new Set(r.repeat ? ['time', 'dur', 'end', 'from', 'rep', 'days'] : ['time', 'dur', dateTag]);
+  let title = '';
+  let last = 0;
+  let head = false; // la planification ouvrait le texte : le titre restant prend une majuscule
+  for (const [i, j] of spans.filter((x) => used.has(x[2])).sort((a, b) => a[0] - b[0])) {
+    if (!src.slice(0, i).trim()) head = true;
+    title += `${src.slice(last, i)} `;
+    last = j;
+  }
+  title += src.slice(last);
+  title = title.replace(/\(\s*\)|\[\s*\]/g, ' ').replace(/\s+([,.)])/g, '$1').replace(/([,;:])(?:\s*[,;:])+/g, '$1').replace(/\s{2,}/g, ' ').trim();
+  for (let k = 0; k < 4; k++) {
+    title = title.replace(/^[\s,;:–—\-·]+|[\s,;:–—\-·]+$/g, '')
+      .replace(/(?:^|\s)(?:de|du|des|d’|d'|le|la|les|l’|l'|à|a|au|aux|et|ou|en|sur|pour|pendant|durant|chaque|tous|toutes|dès|jusqu’|jusqu'|entre|ce|cet|vers|par)$/i, '');
+  }
+  if (!title) title = src.trim();
+  else if (/^\p{Ll}/u.test(title) && (head || /^\p{Lu}/u.test(src.trim()))) title = title.charAt(0).toUpperCase() + title.slice(1);
+  return { ...r, title };
+}
+
+// Jours d'une série « n fois par semaine » : répartis à partir du jour donné (en semaine pour 5).
+function spreadDays(day, n) {
+  if (n >= 7) return '1234567';
+  if (n === 5) return '12345';
+  const b = Number(isoDay(day)) - 1;
+  return [...new Set([...Array(n)].map((_, i) => ((b + Math.floor((i * 7) / n)) % 7) + 1))].sort().join('');
+}
+
+// Une planification comprise, complétée pour créer les créneaux : jours, durée de la série, dates.
+// day : premier jour possible (aujourd'hui, ou le jour du créneau touché).
+function schedResolve(s, day, start = s.start, dur = s.dur || PLAN_DUR) {
+  if (!s.repeat) return { ...s, start, dur, dates: [s.date || day] };
+  const first = s.from && s.from > day ? s.from : day;
+  const days = s.days || (s.perWeek ? spreadDays(first, s.perWeek) : isoDay(first));
+  const weeks = s.weeks || (s.count || s.until ? 52 : 4 * s.every);
+  return { ...s, days, weeks, start, dur, first, dates: seriesDays(first, days, weeks, s.every, s.count, s.until) };
+}
+
+const dayLabel = (day) => { const w = dayWord(day); return w === 'Aujourd’hui' || w === 'Demain' ? w : cap(dShort(day)); };
+
+// En une ligne : « Chaque lundi · 8h30–10h30 · pendant 6 semaines ».
+function scheduleLabel(s, withTime = true) {
+  const time = withTime && s.start >= 0 ? `${minLabel(s.start)}–${minLabel(Math.min(DAY_MIN, s.start + (s.dur || PLAN_DUR)))}` : '';
+  if (!s.repeat) return [s.date ? dayLabel(s.date) : '', time].filter(Boolean).join(' · ');
+  const name = (d) => SCH_DAYS[Number(d) - 1];
+  const many = (days) => { const n = [...days].map((d) => `${name(d)}s`); return `${n.slice(0, -1).join(', ')} et ${n[n.length - 1]}`; };
+  const set = s.days === '1234567' ? 'tous les jours' : s.days === '12345' ? 'du lundi au vendredi' : s.days === '67' ? 'le week-end' : '';
+  const rhythm = !s.days ? (s.every > 1 ? `Une semaine sur ${SCH_TIMES[s.every]}` : 'Chaque semaine')
+    : s.every > 1
+      ? (s.days.length === 1 ? `Un ${name(s.days)} sur ${SCH_TIMES[s.every]}` : `Une semaine sur ${SCH_TIMES[s.every]} · ${set || many(s.days)}`)
+      : set ? cap(set) : s.days.length === 1 ? `Chaque ${name(s.days)}` : `Les ${many(s.days)}`;
+  const end = s.count ? `${s.count} fois` : s.until ? `jusqu’au ${dShort(s.until)}` : s.weeks ? `pendant ${s.weeks} semaine${s.weeks > 1 ? 's' : ''}` : '';
+  return [rhythm, time, end, s.from ? `dès le ${dShort(s.from)}` : ''].filter(Boolean).join(' · ');
 }
 
 sheet.addEventListener('change', (e) => {
@@ -4461,6 +4995,7 @@ function agendaBlock(taskId) {
     return `<span class="pp-plan"><button type="button" data-action="open-plan" data-id="${p.id}">${label}${left > 1 ? ` · ↻ ${left}` : ''}</button>
       <button type="button" class="pp-x" data-action="pp-remove" data-id="${p.id}" data-task="${taskId}" aria-label="Retirer ce créneau">${ICON.close}</button></span>`;
   }).join('');
+  // Création : on peut aussi écrire quand (« jeudi 14h », « tous les lundis 8h30-10h30 ») ; une carte montre ce qui est compris.
   return `<div class="ag-block">
     ${chips ? `<div class="pp-list">${chips}</div>` : ''}
     <button type="button" class="place-btn" data-action="${taskId ? 'place-task' : 'new-place'}"${taskId ? ` data-id="${taskId}"` : ''}>
@@ -4468,6 +5003,10 @@ function agendaBlock(taskId) {
       <span class="place-txt"><b>${chips ? 'Placer un autre créneau' : 'Placer dans l’agenda'}</b>
         <small>${matchMedia('(pointer: fine)').matches ? 'Elle suit ta souris : un clic sur un créneau la dépose' : 'Puis touche un créneau pour la poser'}</small></span>
       ${ICON.right}</button>
+    ${taskId ? '' : `<label class="sched-ask"><span class="sa-ic" aria-hidden="true">✨</span>
+        <input name="when_text" placeholder="Ou écris quand : « tous les lundis 9h »" maxlength="140" autocomplete="off" enterkeyhint="done" aria-label="Quand, en toutes lettres"></label>
+      <p class="sched-miss" hidden>Pas compris… essaie « mardi 18h » ou « une semaine sur deux le lundi à 9h »</p>
+      <div class="sched-card" hidden></div>`}
   </div>`;
 }
 
@@ -4590,6 +5129,8 @@ const actions = {
     input.value = g.title;
     if (!st.lock.s && st.ix.byP.has(g.pid) && (!st.lock.p || g.pid === st.lock.p)) sugApply(form, g, 'manual');
     sugList(form, false);
+    whenDetect(form);
+    dueDetect(form);
     suggestRefresh(form, false);
     if (matchMedia('(pointer: fine)').matches) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
   },
@@ -4608,17 +5149,32 @@ const actions = {
   },
   'open-plan'(el, e) { if (!placeHere(el, e)) openPlanSheet(el.dataset.id); },
   'open-event'(el, e) { if (!placeHere(el, e)) openEventSheet(el.dataset.id); },
-  'plan-here'(el) { // même durée / répétition que celles réglées pour une nouvelle tâche
-    const box = $('#sheet .when');
-    const w = whenValues(box, el.dataset.day);
+  'plan-here'(el) { // même jour, heure, durée et répétition que ceux réglés (ou écrits) pour une nouvelle tâche
+    const form = $('#sheet .slot-new');
+    whenDetect(form);
+    const box = $('.when', form);
+    const day = form.dataset.slotDay;
+    const w = whenValues(box, day);
     if (whenInvalid(box, w)) return;
     closeSheet();
-    planWith(el.dataset.id, el.dataset.day, Number(el.dataset.min), w);
+    planWith(el.dataset.id, day, Number(form.dataset.slotMin), w);
   },
   'rep-step'(el) {
-    const input = el.closest('.when').querySelector('[name="rep_weeks"]');
+    const box = el.closest('.when');
+    const input = box.querySelector('[name="rep_weeks"]');
+    delete box.dataset.count; // le nombre de semaines choisi à la main remplace « 6 fois » / « jusqu'au … »
+    delete box.dataset.until;
     input.value = Math.max(1, Math.min(52, (Number(input.value) || 1) + Number(el.dataset.value)));
     input.dispatchEvent(new Event('change', { bubbles: true }));
+  },
+  'when-off'(el) { // planification écartée : celle du champ « Quand » s'efface, celle du titre ne revient plus
+    const form = el.closest('form');
+    const st = schedForms.get(form);
+    if (st?.src === 'text') form.elements.when_text.value = '';
+    else if (st?.s) form.dataset.whenOff = schedKey(st.s);
+    whenDetect(form);
+    dueDetect(form);
+    suggestRefresh(form, false);
   },
   'series-apply'(el) { // l'horaire de ce créneau pour toute la suite de la série
     const p = state.plans.find((x) => x.id === el.dataset.id);

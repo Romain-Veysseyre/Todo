@@ -485,7 +485,7 @@ body.placing .cal-col { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--acc
   background: linear-gradient(145deg, var(--c), color-mix(in srgb, var(--c) 70%, #fff));
   box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, .5), 0 2px 10px color-mix(in srgb, var(--c) 40%, transparent);
 }
-.plan-block.done b { padding-right: 15px; }
+.plan-block.done b { padding-right: 15px; text-decoration: line-through 1px rgba(255, 255, 255, .85); text-decoration-skip-ink: none; }
 .pb-done {
   position: absolute; top: 3px; right: 3px; width: 15px; height: 15px; border-radius: 50%; display: grid; place-items: center;
   background: #fff; color: var(--c); box-shadow: 0 1px 4px rgba(0, 0, 0, .22);
@@ -497,6 +497,17 @@ body.placing .cal-col { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--acc
 .pb-spent { font-style: normal; }
 .cal:not(.is-day) .pb-spent { display: none; }
 .plan-block.running { box-shadow: 0 0 0 2px var(--run), 0 2px 8px rgba(15, 15, 30, .25); }
+/* créneau prolongé tant que son chrono tourne : le temps en plus, plus clair et rayé, s'allonge avec l'heure */
+.plan-block.grow { background: linear-gradient(to bottom, var(--c) 0 var(--split), color-mix(in srgb, var(--c) 66%, var(--card)) var(--split)); }
+.plan-block.grow::before {
+  content: ""; position: absolute; left: 0; right: 0; top: var(--split); bottom: 0; pointer-events: none;
+  background: repeating-linear-gradient(135deg, rgba(255, 255, 255, .2) 0 5px, transparent 5px 10px); background-size: 14.142px 14.142px;
+  animation: live-flow 1.4s linear infinite;
+}
+.plan-block.grow::after { content: ""; position: absolute; left: 3px; right: 3px; top: var(--split); border-top: 1.5px dashed rgba(255, 255, 255, .9); pointer-events: none; }
+.pb-over { font-style: normal; font-weight: 800; }
+@keyframes live-flow { to { background-position: 14.142px 0; } }
+@media (prefers-reduced-motion: reduce) { .plan-block.grow::before { animation: none; } }
 .plan-block.dragging { opacity: .25; }
 .plan-resize { position: absolute; left: 0; right: 0; bottom: 0; height: 12px; cursor: ns-resize; }
 .plan-resize::after { content: ""; position: absolute; left: 50%; bottom: 3px; width: 18px; height: 3px; margin-left: -9px; border-radius: 2px; background: rgba(255, 255, 255, .75); }
@@ -815,6 +826,14 @@ body.is-sorting, body.is-sorting * { cursor: grabbing !important; user-select: n
 .now-meta { color: var(--muted); font-size: 13.5px; }
 .now-progress { height: 6px; margin: 11px 0 2px; border-radius: 4px; background: var(--card-2); overflow: hidden; }
 .now-progress i { display: block; height: 100%; border-radius: 4px; background: var(--c); }
+/* prolongé : la barre est pleine et défile doucement tant que le chrono tourne */
+.now-progress.live i {
+  background: repeating-linear-gradient(135deg, var(--c) 0 6px, color-mix(in srgb, var(--c) 62%, #fff) 6px 12px); background-size: 16.971px 16.971px;
+  animation: live-flow-bar 1.2s linear infinite;
+}
+@keyframes live-flow-bar { to { background-position: 16.971px 0; } }
+@media (prefers-reduced-motion: reduce) { .now-progress.live i { animation: none; } }
+.now-meta .over, .day-meta .over { font-style: normal; font-weight: 750; color: var(--run); }
 .now-actions { display: flex; gap: 8px; margin-top: 12px; }
 .now-actions .btn span { font-variant-numeric: tabular-nums; }
 .now-actions .btn { min-width: 0; padding: 0 14px; }
@@ -985,6 +1004,7 @@ body.ranging, body.ranging * { cursor: ns-resize !important; }
 .span-bar.cut-r { border-top-right-radius: 0; border-bottom-right-radius: 0; }
 .span-bar.done { background: linear-gradient(145deg, var(--c), color-mix(in srgb, var(--c) 70%, #fff)); box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, .5); }
 .span-bar.done::before { content: "✓ "; font-weight: 900; }
+.span-bar.done { text-decoration: line-through 1px rgba(255, 255, 255, .85); text-decoration-skip-ink: none; }
 .ev-note { margin: 0 0 8px; padding: 8px 12px; border-radius: 12px; background: var(--accent-soft); color: var(--accent); font-size: 13.5px; font-weight: 650; }
 
 /* Durée, « Plusieurs jours » et répétition (fiche d'un créneau, bloc « Planifier ») */
@@ -994,6 +1014,14 @@ body.ranging, body.ranging * { cursor: ns-resize !important; }
 .when:not(:has([name="rep"][value="weekly"]:checked)) .rep-detail { display: none; }
 .when .rep .seg2 { margin: 0; }
 .rep-detail { margin-top: 8px; }
+/* rythme : chaque semaine, une sur deux… */
+.rep-every { display: grid; grid-template-columns: 1.6fr 1fr 1fr 1fr; gap: 4px; margin-bottom: 8px; }
+.rep-every label { position: relative; }
+.rep-every input { position: absolute; left: 0; top: 0; width: 1px; height: 1px; margin: 0; opacity: 0; pointer-events: none; }
+.rep-every span { display: grid; place-items: center; height: 34px; padding: 0 3px; border-radius: 10px; border: 1.5px solid var(--line); background: var(--card); font-size: 12.5px; font-weight: 700; letter-spacing: -.01em; white-space: nowrap; overflow: hidden; cursor: pointer; }
+.rep-every input:checked + span { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.when-ask small { margin-left: 4px; color: var(--accent); font-weight: 600; text-transform: none; letter-spacing: 0; }
+.when-said:empty { display: none; }
 .rep-weeks { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 14.5px; font-weight: 650; }
 .when .rep-weeks input { width: 62px; min-height: 40px; padding: 0; text-align: center; font-size: 16px; font-weight: 750; background: var(--card); -moz-appearance: textfield; }
 .when .rep-weeks input::-webkit-inner-spin-button, .when .rep-weeks input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
@@ -1104,6 +1132,48 @@ form[data-auto*="s"] .pick-field:last-child > span::after { content: "✨ suggé
 .place-txt small { display: block; color: var(--muted); font-size: 12.5px; font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .place-btn > svg { width: 18px; height: 18px; flex: none; color: var(--accent); transition: transform .15s; }
 .place-btn:hover > svg { transform: translateX(3px); }
+
+/* Quand, en toutes lettres : champ et carte de la planification comprise (fiche de création) */
+.sched-ask {
+  display: flex; align-items: center; gap: 9px; min-height: 46px; margin-top: 8px; padding: 0 12px; border-radius: 14px; cursor: text;
+  border: 1.5px dashed color-mix(in srgb, var(--accent) 38%, var(--line)); background: var(--card-2); transition: border-color .15s, background .15s;
+}
+.sched-ask:focus-within { border-style: solid; border-color: var(--accent); background: var(--card); }
+.sa-ic { flex: none; font-size: 15px; }
+.sched-ask input { flex: 1; min-width: 0; height: 42px; padding: 0; border: 0; background: none; font-size: 15px; outline: none; }
+.sched-ask input::placeholder { color: var(--muted); opacity: .9; }
+.sched-miss { margin: 6px 2px 0; color: var(--muted); font-size: 13px; font-weight: 550; }
+.ag-block.has-sched .place-btn { display: none; }
+.ag-block.has-sched .sched-ask { margin-top: 0; }
+.sched-card {
+  display: flex; align-items: center; gap: 12px; margin-top: 8px; padding: 10px 8px 10px 10px; border-radius: 16px;
+  border: 1.5px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  background: linear-gradient(120deg, color-mix(in srgb, var(--accent) 14%, var(--card)), color-mix(in srgb, var(--accent) 4%, var(--card)) 70%);
+  animation: sug-in .18s ease-out;
+}
+.sched-card[hidden], .sched-miss[hidden] { display: none; }
+.sc-ic {
+  width: 42px; height: 42px; flex: none; display: grid; place-items: center; border-radius: 13px; color: #fff; font-size: 21px; font-weight: 800;
+  background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 65%, #ec4899)); box-shadow: 0 5px 14px color-mix(in srgb, var(--accent) 38%, transparent);
+}
+.sc-ic svg { width: 21px; height: 21px; }
+.sc-txt { flex: 1; min-width: 0; }
+.sc-txt b { display: block; font-size: 15px; line-height: 1.3; }
+.sc-txt small { display: block; margin-top: 2px; color: var(--muted); font-size: 12.5px; font-weight: 550; }
+.sc-txt small:empty { display: none; }
+.sc-time { display: flex; align-items: center; gap: 6px; margin-top: 4px; color: var(--muted); font-size: 14px; font-weight: 650; }
+.sc-time input { height: 34px; padding: 0 8px; border-radius: 9px; border: 1.5px solid var(--line); background: var(--card); color: var(--text); font-size: 15px; font-weight: 700; }
+.sc-x, .ws-x { flex: none; width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; color: var(--muted); }
+.sc-x svg, .ws-x svg { width: 16px; height: 16px; }
+.sc-x:hover, .ws-x:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
+/* fiche d'un créneau : ce qui a été compris, sous le champ « Quand » */
+.when-said { display: flex; align-items: flex-start; gap: 8px; margin: -4px 0 10px; padding: 9px 6px 9px 11px; border-radius: 12px; background: var(--accent-soft); color: var(--accent); font-size: 13.5px; animation: sug-in .16s ease-out; }
+.when-said.miss { padding: 0 2px; background: none; color: var(--muted); font-weight: 550; }
+.ws-ic { flex: none; line-height: 1.4; }
+.ws-txt { flex: 1; min-width: 0; padding-top: 1px; }
+.ws-txt b { display: block; font-weight: 750; line-height: 1.35; }
+.ws-txt small { display: block; margin-top: 1px; color: color-mix(in srgb, var(--accent) 65%, var(--muted)); font-size: 12.5px; font-weight: 600; }
+.ws-x { margin: -4px 0; color: inherit; }
 
 /* Note repliée */
 .tn-notes { margin: 6px 0 0; }
