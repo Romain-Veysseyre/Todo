@@ -941,6 +941,7 @@ body.is-sorting, body.is-sorting * { cursor: grabbing !important; user-select: n
 .swipe-bg span { display: inline-flex; align-items: center; gap: 6px; transition: transform .15s; }
 .swipe-bg svg { width: 18px; height: 18px; stroke-width: 3; }
 .swipe-wrap.armed .swipe-bg span { transform: scale(1.15); }
+.swipe-wrap > .task { touch-action: pan-y; transition: transform .22s cubic-bezier(.2, .8, .2, 1), opacity .2s; }
 .day-card {
   position: relative; display: flex; align-items: center; gap: 10px; padding: 10px 10px 10px 12px; border-radius: var(--radius);
   background: var(--card); box-shadow: var(--shadow); border-left: 4px solid var(--c); touch-action: pan-y;
@@ -1588,3 +1589,39 @@ body.placing .cal-col.due::before {
 .next-step.ticking span { color: var(--muted); text-decoration: line-through; }
 .day-card .next-step { margin-top: 4px; }
 @media (prefers-reduced-motion: reduce) { .step.new, .step.pop .step-check::before, .next-step.ticking .ns-box { animation: none; } }
+
+/* Poignées ⋮⋮ : étapes d'une tâche, sous-projets dans la fiche d'un projet */
+.step-grip, .sub-grip {
+  flex: none; display: grid; place-items: center; cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none;
+  color: color-mix(in srgb, var(--muted) 55%, transparent);
+}
+.step-grip { width: 18px; height: 36px; margin-right: -4px; }
+.step-grip svg { width: 15px; height: 15px; }
+.steps-list:has(> .step:only-child) .step-grip { visibility: hidden; }
+.sub-grip { width: 26px; height: 44px; }
+.sub-grip svg { width: 17px; height: 17px; }
+.step-grip:hover, .sub-grip:hover { color: var(--text); }
+@media (pointer: fine) { .step-grip { opacity: 0; } .step:hover .step-grip { opacity: 1; } }
+.step.sorting, .sub-row.sorting { position: relative; z-index: 5; border-radius: 12px; background: var(--card); box-shadow: 0 12px 28px rgba(15, 15, 30, .22); transition: none; }
+.steps-list .step, .subs .sub-row { transition: transform .18s ease; }
+body.is-sorting .steps-list .step.sorting, body.is-sorting .subs .sub-row.sorting { transition: none; }
+
+/* Rappel de sauvegarde (sans synchro) */
+.backup-hint { background: var(--warn-soft); }
+.bk-ic { width: 40px; height: 40px; flex: none; display: grid; place-items: center; border-radius: 12px; background: var(--card); font-size: 21px; }
+.backup-hint small { display: block; margin-top: 1px; color: var(--muted); font-size: 13px; line-height: 1.35; }
+.bk-actions { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 6px; }
+.bk-actions .link { padding: 2px 0; font-size: 14px; }
+
+/* Pomodoro (fiche Chrono) */
+.pomo { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px; margin: -2px 0 14px; }
+.pomo-lab { margin-right: 4px; font-size: 13.5px; font-weight: 700; color: var(--muted); }
+.pomo button {
+  height: 32px; padding: 0 12px; border-radius: 999px; border: 1.5px solid var(--line); background: var(--card-2);
+  font-size: 13px; font-weight: 700; color: var(--muted); font-variant-numeric: tabular-nums; transition: background .15s, color .15s, border-color .15s;
+}
+.pomo button.on { background: var(--text); border-color: var(--text); color: var(--bg); }
+.tm-ring.brk { background: conic-gradient(var(--run) calc(var(--p) * 1turn), color-mix(in srgb, var(--run) 14%, var(--card-2)) 0); }
+.tm-dial.is-pomo .tm-clock { font-size: clamp(38px, 12vw, 50px); }
+.tm-phase { display: block; margin-top: 2px; font-size: 13.5px; font-weight: 700; color: var(--text); }
+.tm-dial.is-pomo .tm-since { margin-top: 2px; font-variant-numeric: tabular-nums; }

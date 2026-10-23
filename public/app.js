@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.15.0';
+const VERSION = '2.16.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -200,7 +200,8 @@ function persistStorage() {
 const getProject = (id) => (id ? state.projects.find((p) => p.id === id) : undefined);
 const getSub = (id) => (id ? state.subprojects.find((s) => s.id === id) : undefined);
 const getTask = (id) => (id ? state.tasks.find((t) => t.id === id) : undefined);
-const subsOf = (projectId) => state.subprojects.filter((s) => s.projectId === projectId);
+// Sous-projets d'un projet, dans l'ordre choisi (glisser la poignée dans la fiche du projet).
+const subsOf = (projectId) => state.subprojects.filter((s) => s.projectId === projectId).sort((a, b) => (a.order ?? 1e9) - (b.order ?? 1e9));
 const colorOf = (projectId) => getProject(projectId)?.color || NO_COLOR;
 
 function pathLabel(projectId, subprojectId) {
@@ -357,6 +358,7 @@ function finishTimer(taskId, end = now()) {
   const a = timerOf(taskId);
   if (!a) return null;
   state.timers = state.timers.filter((x) => x !== a);
+  if (state.ui.pomo?.taskId === taskId) delete state.ui.pomo;
   stretchPlan(a, end);
   if (end - a.start < MIN_SESSION) return null;
   const t = getTask(a.taskId);
@@ -547,16 +549,20 @@ function tick() {
   }
   const tf = sheet.open && $('form[data-form="timer"]', sheet);
   if (tf) timerSheetRefresh(tf);
+  pomoTick();
   let long = false;
   for (const r of $$('#banner .bn')) {
-    const l = now() - Number(r.dataset.start) > LONG_SESSION;
+    const l = now() - Number(r.dataset.start) > LONG_SESSION && !r.querySelector('[data-pomo]'); // en pomodoro : on y travaille, pas un oubli
     r.classList.toggle('long', l);
     long ||= l;
   }
   $('#banner').classList.toggle('long', long);
   const list = runningTimers();
   const more = list.length > 1 ? ` +${list.length - 1}` : '';
-  document.title = list.length ? `${fmtClock(now() - list[0].start)} · ${getTask(list[0].taskId)?.title || 'Chrono Todo'}${more}` : 'Chrono Todo';
+  const p0 = list.length && pomoOf(list[0].taskId);
+  const ph0 = p0 && pomoPhase(p0);
+  const clock = ph0 ? `${ph0.focus ? '🍅' : '☕'} ${fmtClock(ph0.left)}` : list.length ? fmtClock(now() - list[0].start) : '';
+  document.title = list.length ? `${clock} · ${getTask(list[0].taskId)?.title || 'Chrono Todo'}${more}` : 'Chrono Todo';
 }
 
 // Bandeau des chronos en cours : une ligne par chrono, chacune avec son bouton « Arrêter ».
@@ -568,10 +574,12 @@ function renderBanner() {
   el.classList.toggle('multi', list.length > 1);
   el.innerHTML = list.map((a) => {
     const t = getTask(a.taskId);
-    const long = now() - a.start > LONG_SESSION;
+    const long = now() - a.start > LONG_SESSION && !pomoOf(a.taskId);
     return `<div class="bn${long ? ' long' : ''}" data-start="${a.start}">
       <div class="banner-info" role="button" tabindex="0" data-action="open-timer" data-id="${a.taskId}" title="Ajuster ce chrono">
-        <div class="banner-label"><span class="pulse"></span>${long ? 'Chrono oublié ? Touche pour corriger' : esc(t ? pathLabel(t.projectId, t.subprojectId) : 'En cours')}</div>
+        <div class="banner-label"><span class="pulse"></span>${long ? 'Chrono oublié ? Touche pour corriger'
+          : pomoOf(a.taskId) ? `<span data-pomo="${a.taskId}" data-pomo-kind="label">${esc(pomoLabel(pomoPhase(pomoOf(a.taskId))))}</span>`
+            : esc(t ? pathLabel(t.projectId, t.subprojectId) : 'En cours')}</div>
         <div class="banner-title">${esc(t?.title || 'Tâche')}</div>
       </div>
       <div class="banner-time" role="button" tabindex="0" data-action="open-timer" data-id="${a.taskId}"${tickAttr('clock', 0, [a.start])}>${fmtClock(now() - a.start)}</div>
@@ -585,6 +593,23 @@ function renderBanner() {
 
 const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+// Sans synchro, les données ne vivent que sur cet appareil : rappel discret si rien n'a été sauvegardé depuis 30 jours.
+function backupHint() {
+  if (syncConf.code || (state.ui.backupSnooze || 0) > now() || state.tasks.length + state.sessions.length < 5) return '';
+  let first = now();
+  for (const t of state.tasks) if (t.createdAt < first) first = t.createdAt;
+  for (const x of state.sessions) if (x.start < first) first = x.start;
+  const days = Math.floor((now() - (state.ui.lastBackup || first)) / 864e5);
+  if (days < 30) return '';
+  return `<div class="hint-card backup-hint">
+    <span class="bk-ic" aria-hidden="true">💾</span>
+    <div><b>Pense à sauvegarder tes données</b>
+      <small>${state.ui.lastBackup ? `Dernière sauvegarde il y a ${days} jours` : 'Aucune sauvegarde pour l’instant'} : elles ne sont que sur cet appareil.</small>
+      <span class="bk-actions"><button type="button" class="link" data-action="export-json">Sauvegarder</button><button type="button" class="link" data-action="open-settings">Activer la synchro</button></span></div>
+    <button type="button" class="icon-btn" data-action="backup-snooze" aria-label="Me le rappeler plus tard">${ICON.close}</button>
+  </div>`;
+}
 
 function installHint() {
   if (isStandalone() || state.ui.hideInstall) return '';
@@ -622,7 +647,8 @@ function taskCard(t, totals, { tag = true } = {}) {
   const plan = !t.done && nextPlanOf(t.id);
   const notes = (t.notes || '').split('\n').map((l) => l.replace(/^\s*[-•*]\s*/, '').trim()).filter(Boolean).join(' · ');
   const peek = stepsPeek(t); // avec des étapes : la prochaine, à cocher d'ici (à la place de l'aperçu de la note)
-  return `<article class="task${running ? ' running' : ''}${t.done ? ' done' : ''}${t.starred && !t.done ? ' starred' : ''}" style="--c:${colorOf(t.projectId)}">
+  // à faire : balayable (vers la droite = terminée, vers la gauche = demain), comme dans « Ma journée »
+  const card = `<article class="task${running ? ' running' : ''}${t.done ? ' done' : ''}${t.starred && !t.done ? ' starred' : ''}"${t.done ? '' : ` data-swipe="task" data-id="${t.id}"`} style="--c:${colorOf(t.projectId)}">
     <button type="button" class="check" data-action="toggle-done" data-id="${t.id}" aria-label="${t.done ? 'Rouvrir' : 'Marquer comme faite'}">${ICON.check}</button>
     <div class="task-main" role="button" tabindex="0" data-action="open-task" data-id="${t.id}">
       <div class="task-title">${esc(t.title)}</div>
@@ -638,6 +664,8 @@ function taskCard(t, totals, { tag = true } = {}) {
     ${t.done ? '' : `<button type="button" class="star${t.starred ? ' on' : ''}" data-action="toggle-star" data-id="${t.id}" aria-pressed="${!!t.starred}" aria-label="${t.starred ? 'Retirer des prioritaires' : 'Mettre en prioritaire'}">${ICON.star}</button>`}
     ${t.done ? '' : `<button type="button" class="play" data-action="toggle-timer" data-id="${t.id}" aria-label="${running ? 'Arrêter' : 'Lancer le chrono'}">${running ? ICON.stop : ICON.play}</button>`}
   </article>`;
+  return t.done ? card : `<div class="swipe-wrap">
+    <div class="swipe-bg" aria-hidden="true"><span class="sw-done">${ICON.check} Terminée</span><span class="sw-later">Demain ↷</span></div>${card}</div>`;
 }
 
 const cmpDeadline = (a, b) => {
@@ -1339,6 +1367,7 @@ function stepsPending(form) {
 }
 
 const stepLi = (s) => `<li class="step${s.done ? ' done' : ''}" data-step="${s.id}">
+    <span class="step-grip" title="Glisser pour changer l’ordre" aria-hidden="true">${ICON.grip}</span>
     <button type="button" class="step-check" data-action="step-toggle" aria-pressed="${!!s.done}" aria-label="${s.done ? 'Remettre à faire' : 'Marquer comme faite'}">${ICON.check}</button>
     <input class="step-text" value="${esc(s.text)}" maxlength="140" aria-label="Étape" enterkeyhint="done">
     <button type="button" class="step-del" data-action="step-del" aria-label="Supprimer l’étape">${ICON.close}</button>
@@ -1453,7 +1482,7 @@ function stepsPeek(t) {
 /* ----- Projet ----- */
 
 function subRow(name, value) {
-  return `<div class="sub-row"><div class="field" style="flex:1;margin:0">${emojiField(`<input name="${name}" value="${esc(value)}" placeholder="Nom du sous-projet" maxlength="60">`)}</div>
+  return `<div class="sub-row"><span class="sub-grip" title="Glisser pour changer l’ordre" aria-hidden="true">${ICON.grip}</span><div class="field" style="flex:1;margin:0">${emojiField(`<input name="${name}" value="${esc(value)}" placeholder="Nom du sous-projet" maxlength="60">`)}</div>
     <button type="button" class="icon-btn danger" data-action="remove-sub-row" aria-label="Supprimer le sous-projet">${ICON.trash}</button></div>`;
 }
 
@@ -1493,11 +1522,18 @@ function saveProject(form) {
   if (!name) return;
   const p = getProject(form.dataset.id) || addProject(name, fd.get('color'));
   Object.assign(p, { name, color: fd.get('color') || p.color, archived: fd.get('archived') === 'on' });
+  let order = 0; // les lignes, dans l'ordre affiché (réglé à la poignée)
   for (const [k, v] of fd.entries()) {
     const val = String(v).trim();
     if (k === 'del') deleteSub(val);
-    else if (k.startsWith('sub:new')) { if (val) addSub(p.id, val); }
-    else if (k.startsWith('sub:')) { const s = getSub(k.slice(4)); if (s && val) s.name = val; }
+    else if (k.startsWith('sub:new')) { if (val) addSub(p.id, val).order = order++; }
+    else if (k.startsWith('sub:')) {
+      const s = getSub(k.slice(4));
+      if (!s) continue;
+      if (val) s.name = val;
+      if (s.order !== order) s.order = order;
+      order++;
+    }
   }
   if (p.archived && state.ui.filter === p.id) Object.assign(state.ui, { filter: 'all', subfilter: 'all' });
   save(); closeSheet(); render();
@@ -1670,6 +1706,68 @@ function saveSession(form) {
 
 /* ----- Chrono en cours : vue « focus », début corrigé, arrêt à une heure passée ----- */
 
+// Pomodoro : des périodes de concentration (25 ou 50 min) et de pause (5 ou 10 min), au rythme du chrono d'une tâche.
+// Réglé sur cet appareil (state.ui.pomo) ; le temps de la tâche, lui, continue d'être compté normalement.
+const POMOS = [[25, 5], [50, 10]];
+const pomoOf = (taskId) => { const p = state.ui.pomo; return p && p.taskId === taskId && timerOf(taskId) ? p : null; };
+function pomoPhase(p, t = now()) {
+  const len = p.len * 60e3;
+  const cyc = len + p.brk * 60e3;
+  const el = Math.max(0, t - p.start);
+  const n = Math.floor(el / cyc);
+  const into = el - n * cyc;
+  const focus = into < len;
+  return { focus, done: n + (focus ? 0 : 1), left: focus ? len - into : cyc - into, since: focus ? into : into - len, frac: focus ? into / len : (into - len) / (cyc - len), key: `${n}${focus ? 'f' : 'b'}` };
+}
+const pomoLabel = (ph) => `${ph.focus ? '🍅 Concentration' : '☕ Pause'} · reste ${Math.max(1, Math.ceil(ph.left / 60e3))} min`;
+
+let audioCtx = null;
+// Petit carillon (trois notes, montantes pour reprendre, descendantes pour la pause).
+function chime(up) {
+  try {
+    audioCtx ||= new (window.AudioContext || window.webkitAudioContext)();
+    const t0 = audioCtx.currentTime;
+    (up ? [523.25, 659.25, 783.99] : [783.99, 659.25, 523.25]).forEach((f, i) => {
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      const at = t0 + i * 0.16;
+      o.type = 'sine';
+      o.frequency.value = f;
+      g.gain.setValueAtTime(0, at);
+      g.gain.linearRampToValueAtTime(0.16, at + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, at + 0.5);
+      o.connect(g).connect(audioCtx.destination);
+      o.start(at);
+      o.stop(at + 0.55);
+    });
+  } catch (_) { /* pas de son : tant pis */ }
+}
+
+// Chaque seconde : anneau, compte à rebours et libellés ; à chaque changement de phase, un signal (s'il vient d'avoir lieu).
+function pomoTick() {
+  for (const el of $$('[data-pomo]')) {
+    const p = pomoOf(el.dataset.pomo);
+    if (!p) continue;
+    const ph = pomoPhase(p);
+    const kind = el.dataset.pomoKind;
+    if (kind === 'ring') { el.style.setProperty('--p', ph.frac.toFixed(4)); el.classList.toggle('brk', !ph.focus); }
+    else if (kind === 'clock') el.textContent = fmtClock(ph.left);
+    else if (kind === 'phase') el.textContent = `${ph.focus ? '🍅 Concentration' : '☕ Pause'}${ph.done ? ` · ${ph.done} pomodoro${ph.done > 1 ? 's' : ''} ✓` : ''}`;
+    else el.textContent = pomoLabel(ph);
+  }
+  const p = state.ui.pomo;
+  if (!p || !timerOf(p.taskId)) { temp.pomoKey = ''; return; }
+  const ph = pomoPhase(p);
+  const changed = temp.pomoKey && temp.pomoKey !== ph.key;
+  temp.pomoKey = ph.key; // (avant render, qui rappelle tick)
+  if (changed && ph.since < 15e3) {
+    haptic();
+    chime(ph.focus);
+    toast(ph.focus ? `🍅 C’est reparti : ${p.len} min de concentration` : `☕ Pause de ${p.brk} min · ${ph.done} pomodoro${ph.done > 1 ? 's' : ''} ✓`);
+    render();
+  }
+}
+
 // Créneau de la tâche qui recouvre ce chrono (le dernier commencé), s'il y en a un.
 function timerPlan(a, t = now()) {
   let p = null;
@@ -1685,13 +1783,22 @@ function openTimerSheet(taskId, { forgot = false, back = '' } = {}) {
   if (!a || !t) return;
   const plan = timerPlan(a);
   const pick = forgot && plan && plan.end < now() ? 'plan' : '0';
+  const pomo = pomoOf(t.id);
   openSheet(`<form class="sheet-body tm-sheet" data-form="timer" data-task="${t.id}" data-back="${esc(back)}" style="--c:${colorOf(t.projectId)}">
     ${head(forgot ? 'Oublié de l’arrêter ?' : 'Chrono en cours')}
     ${forgot ? `<p class="warn">⏰ Le chrono tourne depuis ${fmtDur(now() - a.start)}. Choisis quand tu as vraiment arrêté : le reste ne sera pas compté.</p>` : ''}
     <button type="button" class="tm-task" data-action="open-task" data-id="${t.id}"><span class="dot"></span><span class="tm-task-name">${esc(t.title)}<small>${esc(pathLabel(t.projectId, t.subprojectId))}</small></span>${ICON.right}</button>
-    <div class="tm-dial">
-      <div class="tm-ring" data-ring="${a.start}"${plan ? ` data-len="${plan.end - plan.start}"` : ''}></div>
-      <div class="tm-center"><b class="tm-clock"${tickAttr('clock', 0, [a.start])}>${fmtClock(now() - a.start)}</b><small class="tm-since"></small></div>
+    <div class="tm-dial${pomo ? ' is-pomo' : ''}">
+      ${pomo ? `<div class="tm-ring" data-pomo="${t.id}" data-pomo-kind="ring"></div>
+      <div class="tm-center"><b class="tm-clock" data-pomo="${t.id}" data-pomo-kind="clock">${fmtClock(pomoPhase(pomo).left)}</b>
+        <small class="tm-phase" data-pomo="${t.id}" data-pomo-kind="phase"></small>
+        <small class="tm-since"><span${tickAttr('clock', 0, [a.start])}>${fmtClock(now() - a.start)}</span> au total</small></div>`
+    : `<div class="tm-ring" data-ring="${a.start}"${plan ? ` data-len="${plan.end - plan.start}"` : ''}></div>
+      <div class="tm-center"><b class="tm-clock"${tickAttr('clock', 0, [a.start])}>${fmtClock(now() - a.start)}</b><small class="tm-since"></small></div>`}
+    </div>
+    <div class="pomo" role="radiogroup" aria-label="Pomodoro">
+      <span class="pomo-lab">🍅 Pomodoro</span>
+      ${[[0, 'Non'], ...POMOS.map(([f, b]) => [f, `${f} / ${b}`])].map(([v, l]) => `<button type="button" role="radio" aria-checked="${(pomo?.len || 0) === v}" class="${(pomo?.len || 0) === v ? 'on' : ''}" data-action="pomo" data-value="${v}">${l}</button>`).join('')}
     </div>
     <div class="tm-start">
       <label><span>Commencé à</span><input type="time" name="start_at" value="${hm(new Date(a.start))}" step="60"></label>
@@ -1740,7 +1847,7 @@ function timerSheetRefresh(form) {
   for (const l of form.querySelectorAll('.tm-opts label[data-min]')) l.hidden = Number(l.dataset.min) > 0 && t - Number(l.dataset.min) * 60e3 <= a.start;
   if (form.querySelector('[name="stop"]:checked')?.closest('label').hidden) form.querySelector('[name="stop"][value="0"]').checked = true;
   const plan = timerPlan(a, t);
-  form.querySelector('.tm-since').textContent = `depuis ${clockLabel(a.start)}${plan ? ` · prévu ${fmtDur(plan.end - plan.start)}` : ''}`;
+  if (!pomoOf(a.taskId)) form.querySelector('.tm-since').textContent = `depuis ${clockLabel(a.start)}${plan ? ` · prévu ${fmtDur(plan.end - plan.start)}` : ''}`;
   const end = timerStopAt(form, a);
   const keep = end ? end - a.start : 0;
   const cut = end ? t - end : 0;
@@ -1898,7 +2005,7 @@ async function exportJson() {
   const data = JSON.stringify({ ...state, app: 'chrono-todo', exportedAt: new Date().toISOString() });
   if (await shareOrDownload(`chrono-todo-${profile}-${ymd(new Date())}.json`, data, 'application/json')) {
     state.ui.lastBackup = now();
-    writeLocal(); closeSheet(); toast('Sauvegarde créée');
+    writeLocal(); closeSheet(); render(); toast('Sauvegarde créée');
   }
 }
 
@@ -3552,7 +3659,7 @@ function placeHere(el, e) {
 
 // Avant le reste : un relâchement de glisser-déposer ne doit pas déclencher d'action.
 document.addEventListener('click', (e) => {
-  if (temp.suppressClick && e.target.closest('.cal, .side, .day-card')) { e.preventDefault(); e.stopPropagation(); }
+  if (temp.suppressClick && e.target.closest('.cal, .side, .day-card, .task')) { e.preventDefault(); e.stopPropagation(); }
 }, true);
 // Un nouveau toucher n'est jamais ignoré.
 document.addEventListener('pointerdown', () => { temp.suppressClick = false; }, true);
@@ -4467,22 +4574,44 @@ sheet.addEventListener('keydown', (e) => {
   }
 });
 
-/* ---------- Ordre des projets (glisser la poignée ⋮⋮) ---------- */
+/* ---------- Ordre par glisser-déposer (poignée ⋮⋮) : projets, étapes d'une tâche, sous-projets ---------- */
+
+// grip : la poignée ; item : l'élément déplacé ; done(ids, item) : l'ordre final (identifiants dans l'ordre).
+const SORTABLES = [
+  { grip: '.proj-grip', item: '.proj-item', done: (ids) => { // projets : ordre synchronisé
+    const queue = ids.map(getProject);
+    const set = new Set(ids);
+    state.projects = state.projects.map((x) => (set.has(x.id) ? queue.shift() : x));
+    state.projects.forEach((x, i) => { x.order = i; });
+    save(); render();
+  } },
+  { grip: '.step-grip', item: '.step', key: 'step', done: (ids, item) => { // étapes : dans l'ordre choisi
+    const form = item.closest('form');
+    const list = stepsList(form);
+    stepsSet(form, ids.map((id) => list.find((x) => x.id === id)).filter(Boolean));
+  } },
+  { grip: '.sub-grip', item: '.sub-row', done: () => {} }, // sous-projets : l'ordre des lignes est enregistré avec la fiche
+];
 
 const sortDrag = { active: null };
 
 document.addEventListener('pointerdown', (e) => {
-  const grip = e.target.closest('.proj-grip');
-  if (!grip || (e.pointerType === 'mouse' && e.button !== 0)) return;
+  const cfg = SORTABLES.find((c) => e.target.closest(c.grip));
+  if (!cfg || (e.pointerType === 'mouse' && e.button !== 0)) return;
+  const item = e.target.closest(cfg.grip).closest(cfg.item);
+  if (!item) return;
   e.preventDefault();
-  const item = grip.closest('.proj-item');
-  const items = $$('.proj-item', item.parentElement);
-  const from = items.indexOf(item);
+  const items = $$(cfg.item, item.parentElement).filter((el) => el.parentElement === item.parentElement);
+  if (items.length < 2) return;
+  const box = item.closest('dialog'); // dans une fiche : c'est elle qui défile
+  const sy = () => (box ? box.scrollTop : scrollY);
+  const tops = items.map((el) => el.getBoundingClientRect().top + sy());
   sortDrag.active = {
-    item, items, from, to: from, y0: e.clientY + scrollY,
-    centers: items.map((el) => { const r = el.getBoundingClientRect(); return r.top + scrollY + r.height / 2; }),
-    h: item.getBoundingClientRect().height,
+    cfg, item, items, box, sy, from: items.indexOf(item), y0: e.clientY + sy(),
+    centers: items.map((el, j) => tops[j] + el.getBoundingClientRect().height / 2),
+    step: tops[1] - tops[0] || item.getBoundingClientRect().height, // hauteur d'une ligne, marge comprise
   };
+  sortDrag.active.to = sortDrag.active.from;
   item.classList.add('sorting');
   document.body.classList.add('is-sorting');
   buzz();
@@ -4491,14 +4620,16 @@ document.addEventListener('pointerdown', (e) => {
 window.addEventListener('pointermove', (e) => {
   const s = sortDrag.active;
   if (!s) return;
-  if (e.clientY < 110) scrollBy(0, -10); else if (e.clientY > innerHeight - 120) scrollBy(0, 10);
-  const dy = e.clientY + scrollY - s.y0;
+  const view = s.box ? s.box.getBoundingClientRect() : { top: 0, bottom: innerHeight };
+  if (e.clientY < view.top + 90) (s.box || window).scrollBy(0, -10);
+  else if (e.clientY > view.bottom - 100) (s.box || window).scrollBy(0, 10);
+  const dy = e.clientY + s.sy() - s.y0;
   s.item.style.transform = `translateY(${dy}px)`;
   const center = s.centers[s.from] + dy;
   s.to = s.centers.filter((c, j) => j !== s.from && c < center).length;
   s.items.forEach((el, j) => {
     if (j === s.from) return;
-    const off = s.from < s.to && j > s.from && j <= s.to ? -s.h : s.to < s.from && j >= s.to && j < s.from ? s.h : 0;
+    const off = s.from < s.to && j > s.from && j <= s.to ? -s.step : s.to < s.from && j >= s.to && j < s.from ? s.step : 0;
     el.style.transform = off ? `translateY(${off}px)` : '';
   });
 });
@@ -4508,16 +4639,16 @@ function endSort() {
   if (!s) return;
   sortDrag.active = null;
   document.body.classList.remove('is-sorting');
+  s.item.classList.remove('sorting');
+  for (const el of s.items) { el.style.transition = 'none'; el.style.transform = ''; } // en place sans rebond
+  requestAnimationFrame(() => { for (const el of s.items) el.style.transition = ''; });
   if (s.to !== s.from) {
-    const ids = s.items.map((el) => el.dataset.id);
-    ids.splice(s.to, 0, ids.splice(s.from, 1)[0]);
-    const queue = ids.map(getProject);
-    const set = new Set(ids);
-    state.projects = state.projects.map((x) => (set.has(x.id) ? queue.shift() : x));
-    state.projects.forEach((x, i) => { x.order = i; });
-    save(); buzz();
-  }
-  render();
+    const moved = s.items.slice();
+    moved.splice(s.to, 0, moved.splice(s.from, 1)[0]);
+    for (const el of moved) el.parentElement.appendChild(el); // la liste prend tout de suite le nouvel ordre
+    s.cfg.done(moved.map((el) => el.dataset[s.cfg.key || 'id']), s.item);
+    buzz();
+  } else if (s.cfg.item === '.proj-item') render();
 }
 window.addEventListener('pointerup', endSort);
 window.addEventListener('pointercancel', endSort);
@@ -4776,7 +4907,7 @@ function viewToday() {
     ? `<div class="swipe-hint"><span>👆 Balaie une tâche <b>vers la droite</b> pour la valider, <b>vers la gauche</b> pour la reporter à demain.</span><button type="button" class="icon-btn" data-action="hide-swipe-hint" aria-label="Masquer l’astuce">${ICON.close}</button></div>`
     : '';
 
-  return `${installHint()}${hero}${nowCard}${hint}${spansHtml}${agendaHtml}${dueHtml}${prioHtml}${doneHtml}${tomorrow}`;
+  return `${installHint()}${backupHint()}${hero}${nowCard}${hint}${spansHtml}${agendaHtml}${dueHtml}${prioHtml}${doneHtml}${tomorrow}`;
 }
 
 /* ---------- Journal : les tâches réalisées, jour par jour ---------- */
@@ -5141,7 +5272,7 @@ function postponeToday(kind, id) {
   }
 }
 
-/* ----- Balayer une tâche : vers la droite = valider, vers la gauche = reporter ----- */
+/* ----- Balayer une tâche (Ma journée, Tâches, page d'un projet) : vers la droite = valider, vers la gauche = reporter ----- */
 
 const cs = { card: null };
 
@@ -5155,9 +5286,9 @@ function resetCardSwipe(c) {
 
 document.addEventListener('touchstart', (e) => {
   cs.card = null;
-  if (state.ui.tab !== 'today' || !profile || e.touches.length !== 1) return;
-  const card = e.target.closest('.day-card[data-swipe]');
-  if (!card || card.classList.contains('done') || e.target.closest('.play, .check, .mini-btn')) return;
+  if (!['today', 'tasks', 'projects'].includes(state.ui.tab) || !profile || e.touches.length !== 1) return;
+  const card = e.target.closest('.day-card[data-swipe], .task[data-swipe]');
+  if (!card || card.classList.contains('done') || e.target.closest('.play, .check, .mini-btn, .star, .next-step')) return;
   Object.assign(cs, { card, x0: e.touches[0].clientX, y0: e.touches[0].clientY, lock: null, dx: 0 });
 }, { passive: true });
 
@@ -5810,6 +5941,21 @@ const actions = {
     if (timerOf(el.dataset.id)) openTimerSheet(el.dataset.id, { back: el.dataset.back || '' });
     else openTaskSheet(el.dataset.id);
   },
+  pomo(el) { // pomodoro : 25 / 5, 50 / 10, ou non
+    const form = el.closest('form');
+    const id = form.dataset.task;
+    const v = Number(el.dataset.value);
+    const pair = POMOS.find(([f]) => f === v);
+    if (pair) {
+      state.ui.pomo = { taskId: id, start: now(), len: pair[0], brk: pair[1] };
+      try { audioCtx ||= new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume?.(); } catch (_) { /* sans son */ }
+    } else if (state.ui.pomo?.taskId === id) delete state.ui.pomo;
+    temp.pomoKey = '';
+    writeLocal(); buzz();
+    openTimerSheet(id, { back: form.dataset.back || '' });
+    render();
+    if (pair) toast(`🍅 ${pair[0]} min de concentration, puis ${pair[1]} min de pause`);
+  },
   'timer-shift'(el) {
     const form = el.closest('form');
     const a = timerOf(form.dataset.task);
@@ -5819,6 +5965,7 @@ const actions = {
     const a = timerOf(el.closest('form').dataset.task);
     if (!a) return;
     state.timers = state.timers.filter((x) => x !== a);
+    if (state.ui.pomo?.taskId === a.taskId) delete state.ui.pomo;
     save(); closeSheet(); render(); buzz();
     toast('Chrono annulé · rien n’a été compté', { label: 'Annuler', fn: () => { delete state.deleted[timerKey(a)]; state.timers.unshift(a); save(); render(); } });
   },
@@ -6216,6 +6363,7 @@ const actions = {
   },
   'hide-install'() { state.ui.hideInstall = true; writeLocal(); render(); },
   'export-json'() { exportJson(); },
+  'backup-snooze'() { state.ui.backupSnooze = now() + 7 * 864e5; writeLocal(); render(); toast('Rappel dans une semaine'); },
   'import-json'() { importJson(); },
   'export-csv'() { exportCsv(); },
   'reset-all'() { resetAll(); },
