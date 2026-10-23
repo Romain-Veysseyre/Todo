@@ -33,34 +33,26 @@
 
   <main id="view" class="wrap"></main>
 
-  <button class="fab" type="button" data-action="new-task" aria-label="Nouvelle tâche">
-    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-  </button>
-
+  <!-- Quatre onglets, « + » au centre (créer une tâche depuis partout) -->
   <nav class="tabbar" aria-label="Navigation">
     <button type="button" data-action="tab" data-value="today">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.8v2.4M12 18.8v2.4M2.8 12h2.4M18.8 12h2.4M5.5 5.5l1.7 1.7M16.8 16.8l1.7 1.7M5.5 18.5l1.7-1.7M16.8 7.2l1.7-1.7"/></svg>
-      <span>Aujourd’hui</span>
+      <span class="tb-ic"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.8v2.4M12 18.8v2.4M2.8 12h2.4M18.8 12h2.4M5.5 5.5l1.7 1.7M16.8 16.8l1.7 1.7M5.5 18.5l1.7-1.7M16.8 7.2l1.7-1.7"/></svg><i class="tb-badge" hidden></i></span>
+      <span class="tb-lab">Aujourd’hui</span>
     </button>
     <button type="button" data-action="tab" data-value="tasks">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 6h10M10 12h10M10 18h10M3.5 6l1.5 1.5L7.5 5M3.5 12l1.5 1.5 2.5-2.5M3.5 18l1.5 1.5 2.5-2.5"/></svg>
-      <span>Tâches</span>
+      <span class="tb-ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 6h10M10 12h10M10 18h10M3.5 6l1.5 1.5L7.5 5M3.5 12l1.5 1.5 2.5-2.5M3.5 18l1.5 1.5 2.5-2.5"/></svg><i class="tb-badge dot" hidden></i></span>
+      <span class="tb-lab">Tâches</span>
     </button>
-    <button type="button" data-action="tab" data-value="projects">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.6l2 2h7.4A2.5 2.5 0 0 1 21 9.5v7a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5z"/></svg>
-      <span>Projets</span>
+    <button type="button" class="tb-add" data-action="new-task" aria-label="Nouvelle tâche" title="Nouvelle tâche (N)">
+      <span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></span>
     </button>
     <button type="button" data-action="tab" data-value="plan">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg>
-      <span>Planning</span>
+      <span class="tb-ic"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg></span>
+      <span class="tb-lab">Planning</span>
     </button>
-    <button type="button" data-action="tab" data-value="journal">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 3.5h11A1.5 1.5 0 0 1 19 5v15.5H7A2 2 0 0 1 5 18.5V5a1.5 1.5 0 0 1 1.5-1.5z"/><path d="M5 18.5a2 2 0 0 1 2-2h12"/><path d="M9.2 9.4l1.9 1.9 3.7-3.7"/></svg>
-      <span>Journal</span>
-    </button>
-    <button type="button" data-action="tab" data-value="stats">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 20v-8M12 20V5M19 20v-5"/></svg>
-      <span>Stats</span>
+    <button type="button" data-action="tab" data-value="review">
+      <span class="tb-ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 20h15"/><path d="M7 16.5v-4M11.5 16.5v-7M16 16.5V13"/><path d="M14.2 6.6l1.9 1.9 3.6-3.6"/></svg></span>
+      <span class="tb-lab">Bilan</span>
     </button>
   </nav>
 

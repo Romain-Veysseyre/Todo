@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.16.0';
+const VERSION = '2.17.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -504,25 +504,68 @@ function render() {
   pill.style.setProperty('--c', me.color);
   pill.innerHTML = `<i></i>${esc(me.name)}`;
   syncBadge();
-  const tab = state.ui.tab;
-  const openP = tab === 'projects' ? getProject(temp.openProject) : null;
+  const tab = normalizeTab(state.ui);
+  const openP = tab === 'tasks' ? getProject(temp.openProject) : null;
   if (!openP) temp.openProject = null;
   document.body.dataset.tab = tab;
   if (openP) document.body.dataset.inProject = '1'; else delete document.body.dataset.inProject;
   if (tab !== 'plan') temp.placing = null;
   document.body.classList.toggle('placing', !!temp.placing);
   if (!temp.placing) $('.carry-ghost')?.remove();
-  $('#title').textContent = openP ? openP.name : { today: 'Ma journée', tasks: 'Tâches', plan: 'Planning', projects: 'Projets', journal: 'Journal', stats: 'Statistiques' }[tab];
-  $$('.tabbar button').forEach((b) => b.classList.toggle('on', b.dataset.value === tab));
+  $('#title').textContent = openP ? openP.name : { today: 'Ma journée', tasks: 'Tâches', plan: 'Planning', review: 'Bilan' }[tab];
+  $$('.tabbar button[data-value]').forEach((b) => b.classList.toggle('on', b.dataset.value === tab));
+  tabBadges();
   renderBanner();
   const sideScroll = $('.side-list')?.scrollTop || 0;
-  $('#view').innerHTML = openP ? viewProject(openP) : tab === 'projects' ? viewProjects() : tab === 'stats' ? viewStats() : tab === 'plan' ? viewPlan() : tab === 'today' ? viewToday() : tab === 'journal' ? viewJournal() : viewTasks();
+  const sub = state.ui[SUBVIEWS[tab]?.key];
+  $('#view').innerHTML = openP ? viewProject(openP)
+    : tab === 'tasks' ? viewSwitch('tasks') + (sub === 'projects' ? viewProjects() : viewTasks())
+      : tab === 'review' ? viewSwitch('review') + (sub === 'time' ? viewStats() : viewJournal())
+        : tab === 'plan' ? viewPlan() : viewToday();
   if (sideScroll && $('.side-list')) $('.side-list').scrollTop = sideScroll;
   tick();
 }
 
+// Quatre onglets : la journée (agir), les tâches et projets (organiser), le planning (prévoir), le bilan (regarder
+// ce qui a été fait). « + » au centre de la barre crée une tâche depuis partout.
+const TAB_ORDER = ['today', 'tasks', 'plan', 'review'];
+// Sous-vues d'un onglet (la dernière choisie est gardée).
+const SUBVIEWS = {
+  tasks: { key: 'tasksView', items: [['list', 'Liste', ICON.list], ['projects', 'Projets', svg('<path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.6l2 2h7.4A2.5 2.5 0 0 1 21 9.5v7a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5z"/>')]] },
+  review: { key: 'reviewView', items: [['done', 'Réalisées', ICON.check], ['time', 'Temps', ICON.clock]] },
+};
+// Anciens onglets (Projets, Journal, Stats) : rangés dans Tâches et Bilan.
+const LEGACY_TABS = { projects: ['tasks', 'tasksView', 'projects'], journal: ['review', 'reviewView', 'done'], stats: ['review', 'reviewView', 'time'] };
+function normalizeTab(ui) {
+  const old = LEGACY_TABS[ui.tab];
+  if (old) { ui.tab = old[0]; ui[old[1]] = old[2]; }
+  if (!TAB_ORDER.includes(ui.tab)) ui.tab = 'today';
+  return ui.tab;
+}
+
+// Commutateur en haut d'un onglet (Liste · Projets, Réalisées · Temps) : la pastille glisse sous le choix.
+function viewSwitch(tab) {
+  const cfg = SUBVIEWS[tab];
+  const cur = Math.max(0, cfg.items.findIndex(([v]) => v === state.ui[cfg.key]));
+  return `<div class="vswitch" role="tablist" style="--n:${cfg.items.length};--i:${cur}">
+    <span class="vs-pill" aria-hidden="true"></span>
+    ${cfg.items.map(([v, l, ic], i) => `<button type="button" role="tab" aria-selected="${i === cur}" class="${i === cur ? 'on' : ''}" data-action="subview" data-tab="${tab}" data-value="${v}">${ic}<span>${l}</span></button>`).join('')}
+  </div>`;
+}
+
+// Pastilles de la barre : ce qui reste à faire aujourd'hui ; un point rouge s'il y a des tâches en retard.
+function tabBadges() {
+  const m = todayModel();
+  const left = Math.max(0, m.total - m.doneN);
+  const b = $('.tabbar [data-value="today"] .tb-badge');
+  if (b) { b.hidden = !left; b.textContent = left > 9 ? '9+' : String(left); }
+  const today = ymd(new Date());
+  const late = state.tasks.some((t) => !t.done && t.deadline && t.deadline < today);
+  const d = $('.tabbar [data-value="tasks"] .tb-badge');
+  if (d) d.hidden = !late;
+}
+
 // Changement de page en douceur : fondu et léger glissement dans le sens de la navigation (si le navigateur le permet).
-const TAB_ORDER = ['today', 'tasks', 'projects', 'plan', 'journal', 'stats'];
 function pageTransition(dir, update) {
   window.scrollTo(0, 0);
   if (!document.startViewTransition || matchMedia('(prefers-reduced-motion: reduce)').matches) { update(); return; }
@@ -594,6 +637,16 @@ function renderBanner() {
 const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
+// Après la mise à jour de la navigation : une fois, où sont passés Projets, Journal et Stats.
+function navTip() {
+  if (state.ui.navTip || !state.tasks.length) return '';
+  return `<div class="hint-card nav-tip">
+    <span class="bk-ic" aria-hidden="true">🧭</span>
+    <div><b>Navigation simplifiée</b><small><b>+</b> est au centre de la barre · <b>Projets</b> est dans Tâches · <b>Journal</b> et <b>Stats</b> sont réunis dans <b>Bilan</b>.</small></div>
+    <button type="button" class="icon-btn" data-action="nav-tip-ok" aria-label="Compris">${ICON.close}</button>
+  </div>`;
+}
+
 // Sans synchro, les données ne vivent que sur cet appareil : rappel discret si rien n'a été sauvegardé depuis 30 jours.
 function backupHint() {
   if (syncConf.code || (state.ui.backupSnooze || 0) > now() || state.tasks.length + state.sessions.length < 5) return '';
@@ -627,17 +680,6 @@ function liveTotal(a, b) {
   for (const s of state.sessions) closed += overlap(s, a, b);
   for (const x of state.timers) closed -= Math.max(0, a - x.start); // partie d'avant la période
   return { base: closed, since: state.timers.map((x) => x.start) };
-}
-
-function summaryCard() {
-  const n = new Date();
-  const day = +startOfDay(n);
-  const week = +new Date(n.getFullYear(), n.getMonth(), n.getDate() - ((n.getDay() + 6) % 7));
-  const end = day + 2 * 864e5;
-  const cell = (label, { base, since }) => `<div><small>${label}</small>${liveDur(base, since)}</div>`;
-  return `<button type="button" class="card summary" data-action="go-stats">
-    ${cell('Aujourd’hui', liveTotal(day, end))}${cell('Cette semaine', liveTotal(week, end))}
-  </button>`;
 }
 
 function taskCard(t, totals, { tag = true } = {}) {
@@ -701,7 +743,7 @@ function tasksModel() {
 function viewTasks() {
   const m = tasksModel();
   const { filter, subfilter, subCounts } = m;
-  let html = summaryCard();
+  let html = '';
   if (m.open.length >= 6 || m.words.length) {
     html += `<label class="jr-search tk-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
       <input type="search" value="${esc(temp.taskQuery || '')}" placeholder="Rechercher une tâche" aria-label="Rechercher une tâche" autocomplete="off" enterkeyhint="search"></label>`;
@@ -1051,7 +1093,7 @@ function viewStats() {
       ${compare || avg ? `<div class="tc-more">${compare}${avg}</div>` : ''}</div>
     ${chart}
     ${sorted.length ? `<div class="card bars">${bars}</div><p class="hint center">Touche un projet pour voir le détail.</p>` : ''}
-    ${journal ? `<div class="section-title">Journal</div>${journal}` : ''}`;
+    ${journal ? `<div class="section-title">Sessions</div>${journal}` : ''}`;
 }
 
 /* ---------- Feuilles (dialogues) ---------- */
@@ -1099,7 +1141,7 @@ sheet.addEventListener('close', () => {
 window.addEventListener('popstate', () => {
   if (sheet.open) { sheet.close(); return; }
   // Bouton retour du téléphone sur la page d'un projet : revient à la liste des projets.
-  if (temp.openProject && !history.state?.project) pageTransition('back', () => { temp.openProject = null; render(); });
+  if (temp.openProject && history.state?.project !== temp.openProject) pageTransition('back', () => { temp.openProject = null; render(); });
 });
 sheet.addEventListener('click', (e) => { if (e.target === sheet) closeSheet(); });
 
@@ -4763,21 +4805,23 @@ function viewToday() {
   const mood = allDone ? '🎉' : nm < 12 * 60 ? '☀️' : nm < 18 * 60 ? '👋' : '🌙';
 
   const hero = `<section class="today-hero">
-      <div class="hero-text">
-        <p class="hero-date">${esc(cap(fmt(today, { weekday: 'long', day: 'numeric', month: 'long' })))}</p>
-        <h2>${greeting()} ${esc(me.name)} ${mood}</h2>
-        <p class="hero-sub">${allDone ? 'Journée bouclée, bravo !' : m.total ? `${m.total - m.doneN} à faire · ${m.doneN} ${m.doneN > 1 ? 'faites' : 'faite'}` : 'Rien de prévu pour l’instant'}</p>
+      <div class="hero-top">
+        <div class="hero-text">
+          <p class="hero-date">${esc(cap(fmt(today, { weekday: 'long', day: 'numeric', month: 'long' })))}</p>
+          <h2>${greeting()} ${esc(me.name)} ${mood}</h2>
+          <p class="hero-sub">${allDone ? 'Journée bouclée, bravo !' : m.total ? `${m.total - m.doneN} à faire · ${m.doneN} ${m.doneN > 1 ? 'faites' : 'faite'}` : 'Rien de prévu pour l’instant'}</p>
+        </div>
+        <div class="ring${allDone ? ' full' : ''}" role="img" aria-label="${m.doneN} sur ${m.total} faites">
+          <svg viewBox="0 0 36 36"><circle class="bg" cx="18" cy="18" r="15.9155"/><circle class="fg" cx="18" cy="18" r="15.9155" stroke-dasharray="${pct} 100"/></svg>
+          <b>${m.total ? `${m.doneN}/${m.total}` : '–'}</b>
+        </div>
       </div>
-      <div class="ring${allDone ? ' full' : ''}" role="img" aria-label="${m.doneN} sur ${m.total} faites">
-        <svg viewBox="0 0 36 36"><circle class="bg" cx="18" cy="18" r="15.9155"/><circle class="fg" cx="18" cy="18" r="15.9155" stroke-dasharray="${pct} 100"/></svg>
-        <b>${m.total ? `${m.doneN}/${m.total}` : '–'}</b>
-      </div>
-    </section>
-    <div class="card today-time">
-      <div class="tt-head">${ICON.clock}${liveDur(lt.base, lt.since)} chronométrées aujourd’hui</div>
-      ${perSorted.length ? `<div class="mix">${perSorted.map(([k, ms]) => `<i style="flex:${ms} 0 0;background:${colorOf(k)}"></i>`).join('')}</div>
-      <div class="mix-legend">${perSorted.slice(0, 3).map(([k, ms]) => `<span style="--c:${colorOf(k)}"><i></i>${esc(getProject(k)?.name || 'Sans projet')} · ${fmtDur(ms)}</span>`).join('')}</div>` : ''}
-    </div>`;
+      <button type="button" class="hero-time" data-action="go-stats" title="Voir le temps de la journée">
+        <span class="tt-head">${ICON.clock}${liveDur(lt.base, lt.since)} chronométrées${perSorted.length ? '' : ' aujourd’hui'}</span>
+        ${perSorted.length ? `<span class="mix">${perSorted.map(([k, ms]) => `<i style="flex:${ms} 0 0;background:${colorOf(k)}"></i>`).join('')}</span>
+        <span class="mix-legend">${perSorted.slice(0, 3).map(([k, ms]) => `<span style="--c:${colorOf(k)}"><i></i>${esc(getProject(k)?.name || 'Sans projet')} · ${fmtDur(ms)}</span>`).join('')}</span>` : ''}
+      </button>
+    </section>`;
 
   // Chrono lancé sur un créneau déjà fini : il reste « en cours » jusqu'à maintenant (ou se recale sur l'heure réelle).
   const live = new Map();
@@ -4888,7 +4932,7 @@ function viewToday() {
           <button type="button" class="dt-undo" data-action="today-done" data-kind="${p ? 'plan' : 'task'}" data-id="${p ? p.id : t.id}" title="Remettre à faire" aria-label="Remettre à faire">↺</button>
         </li>`;
       }).join('')}
-        <li class="dt-more"><button type="button" data-action="tab" data-value="journal">Tout le journal ${ICON.right}</button></li>
+        <li class="dt-more"><button type="button" data-action="tab" data-value="review" data-sub="done">Tout le bilan ${ICON.right}</button></li>
       </ul>
     </details>` : '';
 
@@ -4907,7 +4951,8 @@ function viewToday() {
     ? `<div class="swipe-hint"><span>👆 Balaie une tâche <b>vers la droite</b> pour la valider, <b>vers la gauche</b> pour la reporter à demain.</span><button type="button" class="icon-btn" data-action="hide-swipe-hint" aria-label="Masquer l’astuce">${ICON.close}</button></div>`
     : '';
 
-  return `${installHint()}${backupHint()}${hero}${nowCard}${hint}${spansHtml}${agendaHtml}${dueHtml}${prioHtml}${doneHtml}${tomorrow}`;
+  const meta = navTip() || installHint() || backupHint(); // une seule carte d'aide à la fois, au-dessus de la journée
+  return `${meta}${hero}${nowCard}${hint}${spansHtml}${agendaHtml}${dueHtml}${prioHtml}${doneHtml}${tomorrow}`;
 }
 
 /* ---------- Journal : les tâches réalisées, jour par jour ---------- */
@@ -5286,7 +5331,7 @@ function resetCardSwipe(c) {
 
 document.addEventListener('touchstart', (e) => {
   cs.card = null;
-  if (!['today', 'tasks', 'projects'].includes(state.ui.tab) || !profile || e.touches.length !== 1) return;
+  if (!['today', 'tasks'].includes(state.ui.tab) || !profile || e.touches.length !== 1) return;
   const card = e.target.closest('.day-card[data-swipe], .task[data-swipe]');
   if (!card || card.classList.contains('done') || e.target.closest('.play, .check, .mini-btn, .star, .next-step')) return;
   Object.assign(cs, { card, x0: e.touches[0].clientX, y0: e.touches[0].clientY, lock: null, dx: 0 });
@@ -5746,7 +5791,7 @@ document.addEventListener('pointermove', (e) => {
 });
 
 // Raccourcis : Échap repose la tâche « en main », N crée une tâche, Ctrl / ⌘ + Entrée valide la fiche de création,
-// 1 à 6 changent d'onglet, / cherche une tâche.
+// 1 à 4 changent d'onglet, / cherche une tâche.
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && temp.placing && !sheet.open && !$('#ask').open) { actions['cancel-placing'](); return; }
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
@@ -5760,7 +5805,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'n' || e.key === 'N') {
     e.preventDefault();
     actions['new-task']({ dataset: {} });
-  } else if (/^[1-6]$/.test(e.key)) { // 1 à 6 : les onglets
+  } else if (/^[1-4]$/.test(e.key)) { // 1 à 4 : les onglets
     e.preventDefault();
     actions.tab({ dataset: { value: TAB_ORDER[Number(e.key) - 1] } });
   } else if (e.key === '/') { // rechercher (Tâches, Journal)
@@ -5911,17 +5956,36 @@ const actions = {
     save(); closeSheet(); render();
   },
   tab(el) {
+    const want = { tab: el.dataset.value };
+    normalizeTab(want); // (anciens noms : projets, journal, stats)
+    const cfg = SUBVIEWS[want.tab];
+    if (cfg && (el.dataset.sub || want[cfg.key])) want[cfg.key] = el.dataset.sub || want[cfg.key];
     const from = TAB_ORDER.indexOf(state.ui.tab);
-    const to = TAB_ORDER.indexOf(el.dataset.value);
-    if (from === to && !temp.openProject && window.scrollY > 0) { window.scrollTo({ top: 0, behavior: 'smooth' }); return; } // onglet déjà ouvert : remonter
+    const to = TAB_ORDER.indexOf(want.tab);
+    const same = from === to && !temp.openProject && (!cfg || !want[cfg.key] || want[cfg.key] === state.ui[cfg.key]);
+    if (same) { if (window.scrollY > 0) window.scrollTo({ top: 0, behavior: 'smooth' }); return; } // onglet déjà ouvert : remonter
+    if (temp.openProject && history.state?.project) history.replaceState(null, ''); // on quitte la page du projet : le retour ne doit plus y mener
     pageTransition(to >= from ? 'fwd' : 'back', () => {
-      state.ui.tab = el.dataset.value;
+      Object.assign(state.ui, want);
       Object.assign(temp, { openProject: null, placing: null });
       writeLocal(); render();
       if (state.ui.tab === 'plan') scrollPlanToHour();
     });
   },
-  'go-stats'() { Object.assign(state.ui, { tab: 'stats', period: 'day', offset: 0 }); writeLocal(); render(); window.scrollTo(0, 0); },
+  subview(el) { // Liste · Projets, Réalisées · Temps : la pastille glisse, puis la page suit
+    const cfg = SUBVIEWS[el.dataset.tab];
+    const from = cfg.items.findIndex(([v]) => v === state.ui[cfg.key]);
+    const to = cfg.items.findIndex(([v]) => v === el.dataset.value);
+    if (from === to && !temp.openProject) return;
+    const sw = el.closest('.vswitch');
+    sw.style.setProperty('--i', to);
+    for (const b of sw.querySelectorAll('button')) { b.classList.toggle('on', b === el); b.setAttribute('aria-selected', String(b === el)); }
+    state.ui[cfg.key] = el.dataset.value;
+    writeLocal(); buzz();
+    setTimeout(() => pageTransition(to > from ? 'fwd' : 'back', () => { temp.openProject = null; render(); }), 140);
+  },
+  'go-stats'() { pageTransition('fwd', () => { Object.assign(state.ui, { tab: 'review', reviewView: 'time', period: 'day', offset: 0 }); writeLocal(); render(); }); },
+  'nav-tip-ok'() { state.ui.navTip = 1; writeLocal(); render(); },
   filter(el) { Object.assign(state.ui, { filter: el.dataset.value, subfilter: 'all' }); writeLocal(); render(); },
   subfilter(el) { state.ui.subfilter = el.dataset.value; writeLocal(); render(); },
 
@@ -6222,8 +6286,8 @@ const actions = {
     });
   },
   'close-project'() {
-    if (history.state?.project) history.back(); // le popstate referme la page
-    else { temp.openProject = null; render(); }
+    if (history.state?.project === temp.openProject) history.back(); // le popstate referme la page
+    else pageTransition('back', () => { temp.openProject = null; render(); });
   },
   'edit-project'(el) { openProjectSheet(el.dataset.id); },
   'toggle-project-done'() { temp.showProjectDone = !temp.showProjectDone; render(); },
@@ -6282,7 +6346,7 @@ const actions = {
     if (!ok) return;
     const p = promoteSub(s.id);
     save(); afterSubSheet(form);
-    toast(`« ${p.name} » est maintenant un projet`, { label: 'Voir', fn: () => { state.ui.tab = 'projects'; actions['open-project']({ dataset: { id: p.id } }); } });
+    toast(`« ${p.name} » est maintenant un projet`, { label: 'Voir', fn: () => { state.ui.tab = 'tasks'; actions['open-project']({ dataset: { id: p.id } }); } });
   },
   'add-sub'(el) {
     const box = $('.subs', el.closest('.field'));
