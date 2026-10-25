@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.18.0';
+const VERSION = '2.19.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -2806,9 +2806,12 @@ function viewPlan() {
   temp.slideFrom = null;
   const dockOpen = !!ui.dockOpen; // téléphone : bandeau du bas agrandi
 
-  // Catégories de la barre : ★ Favoris d'abord, puis Tout, puis chaque projet qui a des tâches à faire.
+  // Catégories de la barre : ⏳ Échéances d'abord (les plus proches en tête, choisies par défaut), ★ Favoris, Tout,
+  // puis chaque projet qui a des tâches à faire.
+  const dueN = tray.filter((x) => x.t.deadline).length;
   const starredN = tray.filter((x) => x.t.starred).length;
   const cats = [];
+  if (dueN) cats.push({ key: 'due', label: '⏳ Échéances', n: dueN });
   if (starredN) cats.push({ key: 'star', label: '★ Favoris', n: starredN });
   cats.push({ key: 'all', label: 'Tout', n: tray.length });
   for (const pr of state.projects) {
@@ -2817,18 +2820,27 @@ function viewPlan() {
   }
   const noneN = tray.filter((x) => !getProject(x.t.projectId)).length;
   if (noneN) cats.push({ key: 'none', label: 'Sans projet', n: noneN });
-  const cat = cats.some((c) => c.key === ui.sideCat) ? ui.sideCat : starredN ? 'star' : 'all';
-  const projCat = cat !== 'star' && cat !== 'all' ? cats.find((c) => c.key === cat) : null;
-  const inCat = ({ t }) => (cat === 'all' ? true : cat === 'star' ? t.starred : cat === 'none' ? !getProject(t.projectId) : t.projectId === cat);
+  const cat = cats.some((c) => c.key === ui.trayCat) ? ui.trayCat : dueN ? 'due' : starredN ? 'star' : 'all';
+  const MAIN_CATS = ['due', 'star', 'all'];
+  const projCat = !MAIN_CATS.includes(cat) ? cats.find((c) => c.key === cat) : null;
+  const inCat = ({ t }) => (cat === 'all' ? true : cat === 'due' ? !!t.deadline : cat === 'star' ? t.starred : cat === 'none' ? !getProject(t.projectId) : t.projectId === cat);
   const list = tray.filter(inCat);
+  if (cat === 'due') list.sort((a, b) => (a.t.deadline < b.t.deadline ? -1 : a.t.deadline > b.t.deadline ? 1 : 0) || a.planned - b.planned || !!b.t.starred - !!a.t.starred);
+  // échéance en bref, à droite de chaque tâche : « En retard », « Auj. », « Demain », « Jeu. », « 12 nov. »
+  const dueTag = (t) => {
+    if (!t.deadline) return '';
+    const diff = Math.round((parseYmd(t.deadline) - startOfDay(new Date())) / 864e5);
+    const txt = diff < 0 ? 'En retard' : diff === 0 ? 'Auj.' : diff === 1 ? 'Demain' : diff < 7 ? cap(fmt(parseYmd(t.deadline), { weekday: 'short' })) : fmt(parseYmd(t.deadline), { day: 'numeric', month: 'short' });
+    return `<span class="side-due${diff < 0 ? ' late' : diff === 0 ? ' today' : diff < 7 ? ' soon' : ''}" title="Échéance : ${esc(dShort(t.deadline))}">${esc(txt)}</span>`;
+  };
 
   const row = ({ t, planned }) => `<button type="button" class="side-row${planned ? ' planned' : ''}${temp.placing === t.id ? ' on' : ''}" data-action="pick-tray" data-drag-task="${t.id}" style="--c:${colorOf(t.projectId)}" title="${esc(t.title)} · ${esc(pathLabel(t.projectId, t.subprojectId))}">
       <i class="side-dot"></i><span class="side-row-title">${esc(t.title)}</span>
-      ${t.starred && cat !== 'star' ? `<span class="side-star">${ICON.star}</span>` : ''}${planned ? '<em title="Déjà planifiée cette semaine">✓</em>' : ''}</button>`;
+      ${t.starred && cat !== 'star' ? `<span class="side-star">${ICON.star}</span>` : ''}${dueTag(t)}${planned ? '<em title="Déjà planifiée cette semaine">✓</em>' : ''}</button>`;
 
   // Téléphone (bandeau réduit) : une ligne de pastilles qui défile au doigt.
   const chip = ({ t, planned }) => `<button type="button" class="strip-task${planned ? ' planned' : ''}${temp.placing === t.id ? ' on' : ''}" data-action="pick-tray" data-drag-task="${t.id}" style="--c:${colorOf(t.projectId)}">
-      ${t.starred && cat !== 'star' ? ICON.star : ''}<span>${esc(t.title)}</span>${planned ? '<em>✓</em>' : ''}</button>`;
+      ${t.starred && cat !== 'star' ? ICON.star : ''}<span>${esc(t.title)}</span>${cat === 'due' ? dueTag(t) : ''}${planned ? '<em>✓</em>' : ''}</button>`;
   const curCat = cats.find((c) => c.key === cat);
   const strip = `<div class="side-strip">
       <button type="button" class="strip-cat${temp.catMenu ? ' open' : ''}" data-action="cat-menu" aria-haspopup="menu"${curCat.color ? ` style="--c:${curCat.color}"` : ''}>
@@ -2842,11 +2854,11 @@ function viewPlan() {
       <button type="button" class="dock-grab" data-action="dock-toggle" aria-label="${dockOpen ? 'Réduire la liste' : 'Agrandir la liste'}"><span></span></button>
       <div class="side-head"><b>À planifier</b><small>${tray.length}</small></div>
       ${tray.length ? `<div class="side-cats">
-        ${cats.filter((c) => c.key === 'star' || c.key === 'all').map((c) => `<button type="button" class="side-cat${c.key === cat ? ' on' : ''}" data-action="side-cat" data-value="${c.key}">${esc(c.label)}<small>${c.n}</small></button>`).join('')}
+        ${cats.filter((c) => MAIN_CATS.includes(c.key)).map((c) => `<button type="button" class="side-cat${c.key === cat ? ' on' : ''}" data-action="side-cat" data-value="${c.key}">${esc(c.label)}<small>${c.n}</small></button>`).join('')}
         <div class="proj-pick">
           <button type="button" class="side-cat side-proj${projCat ? ' on' : ''}${temp.projMenu ? ' open' : ''}" data-action="proj-menu" aria-haspopup="menu" aria-expanded="${!!temp.projMenu}"${projCat?.color ? ` style="--c:${projCat.color}"` : ''}>
             ${projCat?.color ? '<i></i>' : ''}<span>${esc(projCat ? projCat.label : 'Projets')}</span>${projCat ? `<small>${projCat.n}</small>` : ''}${ICON.down}</button>
-          ${temp.projMenu ? `<div class="proj-menu" role="menu">${cats.filter((c) => c.key !== 'star' && c.key !== 'all').map((c) => `<button type="button" role="menuitemradio" aria-checked="${c.key === cat}" class="proj-opt${c.key === cat ? ' on' : ''}" data-action="side-cat" data-value="${c.key}" style="--c:${c.color || NO_COLOR}">
+          ${temp.projMenu ? `<div class="proj-menu" role="menu">${cats.filter((c) => !MAIN_CATS.includes(c.key)).map((c) => `<button type="button" role="menuitemradio" aria-checked="${c.key === cat}" class="proj-opt${c.key === cat ? ' on' : ''}" data-action="side-cat" data-value="${c.key}" style="--c:${c.color || NO_COLOR}">
             <i></i><span>${esc(c.label)}</span><small>${c.n}</small></button>`).join('')}</div>` : ''}
         </div>
       </div>
@@ -5895,7 +5907,7 @@ const actions = {
   'cat-menu'() { temp.catMenu = !temp.catMenu; render(); },
   'side-cat'(el) {
     Object.assign(temp, { projMenu: false, catMenu: false });
-    state.ui.sideCat = el.dataset.value;
+    state.ui.trayCat = el.dataset.value; // (nouveau nom : par défaut, les échéances)
     writeLocal(); render();
     $('.side-list')?.scrollTo(0, 0);
     $('.side-strip')?.scrollTo(0, 0);

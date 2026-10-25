@@ -653,6 +653,14 @@ body.is-dragging, body.is-dragging * { cursor: grabbing !important; }
 .side-row-title { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .side-star svg { width: 13px; height: 13px; color: #f59e0b; fill: currentColor; stroke-width: 1.5; display: block; }
 .side-row em { font-style: normal; font-size: 13px; font-weight: 800; color: var(--run); }
+/* échéance en bref dans « À planifier » */
+.side-due { flex: none; padding: 1px 6px; border-radius: 6px; font-size: 11.5px; font-weight: 750; color: var(--muted); background: var(--card-2); white-space: nowrap; }
+.side-due.soon { color: var(--accent); background: var(--accent-soft); }
+.side-due.today { color: var(--warn); background: var(--warn-soft); }
+.side-due.late { color: var(--late); background: var(--late-soft); }
+.side-row.on .side-due { color: #fff; background: rgba(255, 255, 255, .22); }
+.strip-task .side-due { font-size: 11px; padding: 0 5px; }
+.strip-task.on .side-due { color: #fff; background: rgba(255, 255, 255, .22); }
 .side-row.planned .side-row-title { color: var(--muted); }
 .side-row.on { background: var(--c); color: #fff; }
 .side-row.on .side-row-title { color: #fff; }
@@ -796,9 +804,9 @@ body.drag-move.drop-hover .drop-remove { background: var(--late); color: #fff; }
 .daypick span { display: grid; place-items: center; height: 42px; border-radius: 12px; border: 1.5px solid var(--line); background: var(--card-2); font-weight: 750; cursor: pointer; }
 .daypick input:checked + span { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 
-/* Catégories sur une ligne : ★ Favoris · Tout · [Projets ▾] */
-.side-cats { flex-wrap: nowrap; }
-.proj-pick { position: relative; flex: 1; min-width: 0; display: flex; }
+/* Catégories : ⏳ Échéances · ★ Favoris · Tout · [Projets ▾] (le menu des projets passe à la ligne s'il manque de place) */
+.side-cats { flex-wrap: wrap; }
+.proj-pick { position: relative; flex: 1 1 110px; min-width: 0; display: flex; }
 .side-proj { width: 100%; }
 .side-proj span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: left; }
 .side-proj svg { width: 15px; height: 15px; flex: none; margin-right: -2px; transition: transform .2s; }
