@@ -1099,7 +1099,7 @@ function viewStats() {
 /* ---------- Feuilles (dialogues) ---------- */
 
 const sheet = $('#sheet');
-const head = (title) => `<div class="grabber"></div><div class="sheet-head"><h2>${esc(title)}</h2><button type="button" class="icon-btn" data-action="close-sheet" aria-label="Fermer">${ICON.close}</button></div>`;
+const head = (title, extra = '') => `<div class="grabber"></div><div class="sheet-head"><h2>${esc(title)}</h2>${extra}<button type="button" class="icon-btn" data-action="close-sheet" aria-label="Fermer">${ICON.close}</button></div>`;
 const taskFormOpen = () => (sheet.open ? $('form[data-form="task"]', sheet) : null);
 
 let sheetClosing = 0;
@@ -1245,6 +1245,8 @@ function openTaskSheet(id, preset) {
   const total = sessions.reduce((n, s) => n + (s.end - s.start), 0);
 
   // Création : « Créer » est le bouton principal (et le seul validé par Entrée) ; « Lancer » crée et démarre le chrono.
+  // « Maintenant », en haut (visible même clavier ouvert) : crée, place dans l'agenda à partir de maintenant et lance le chrono.
+  const nowBtn = `<button type="button" class="btn tn-now" data-action="new-now" title="Créer, placer dans l’agenda à partir de maintenant et lancer le chrono">${ICON.play} Maintenant</button>`;
   const footer = isNew
     ? `<div class="tn-actions">
         <button type="button" class="btn tn-start" data-action="new-start" title="Créer la tâche et lancer son chrono">${ICON.play} Lancer</button>
@@ -1268,7 +1270,7 @@ function openTaskSheet(id, preset) {
       </div>`;
 
   openSheet(`<form class="sheet-body task-sheet${isNew ? ' is-new' : ''}" data-form="task" data-id="${id || ''}" autocomplete="off">
-    ${head(isNew ? 'Nouvelle tâche' : 'Tâche')}
+    ${isNew ? head('Nouvelle tâche', nowBtn) : head('Tâche')}
     <div class="tn-title">
       <label class="star-pick" title="Prioritaire : affichée en premier"><input type="checkbox" name="starred"${t.starred ? ' checked' : ''} aria-label="Prioritaire"><span>${ICON.star}</span></label>
       <label class="field"><span class="sr-only">Tâche</span>${emojiField(`<input class="big" name="title" value="${esc(t.title)}" placeholder="${isNew ? 'Que faut-il faire ?' : 'Nom de la tâche'}" maxlength="200" required enterkeyhint="done"${isNew ? ' autofocus' : ''}>`)}</label>
@@ -1319,7 +1321,8 @@ function commitTaskForm(form) {
   save();
 }
 
-// how : « create » (Créer), « start » (Lancer : crée et démarre le chrono), « place » (placer dans l'agenda).
+// how : « create » (Créer), « start » (Lancer : crée et démarre le chrono), « place » (placer dans l'agenda),
+// « now » (Maintenant : un créneau qui commence tout de suite, comme « maintenant » écrit dans « Quand », et le chrono lancé).
 function createTask(form, how = 'create') {
   clearTimeout(whenTimer);
   whenDetect(form); // (le texte vient peut-être d'être tapé)
@@ -1332,7 +1335,7 @@ function createTask(form, how = 'create') {
   const when = slotDay ? whenValues($('.when', form), slotDay) : null;
   if (when && whenInvalid($('.when', form), when)) return;
   // Fiche de création : planifiée comme écrit (« vendredi 14h », « un lundi sur deux à 9h »…)
-  const plan = slotDay ? null : schedPlan(form);
+  const plan = slotDay ? null : how === 'now' ? nowPlan(form) : schedPlan(form);
   const t = { id: uid(), ...v, done: false, doneAt: null, createdAt: now() };
   stepsPending(form);
   const steps = stepDrafts.get(form);
@@ -1350,10 +1353,10 @@ function createTask(form, how = 'create') {
   if (plan?.dates.length) {
     const w = { weekly: plan.repeat && plan.dates.length > 1, days: plan.days, every: plan.every, dur: plan.dur, dates: plan.dates };
     const made = addPlans(t.id, plan.dates[0], plan.start, w);
-    if (how === 'start') startTimer(t.id);
+    if (how === 'start' || how === 'now') startTimer(t.id);
     else { save(); render(); buzz(); }
     const ids = new Set(made.map((p) => p.id));
-    toast(whenDone(w, plan.dates[0], plan.start, made.length), {
+    toast(how === 'now' ? 'C’est parti, chrono lancé' : whenDone(w, plan.dates[0], plan.start, made.length), {
       label: 'Annuler',
       fn: () => {
         state.tasks = state.tasks.filter((x) => x !== t);
@@ -1369,6 +1372,11 @@ function createTask(form, how = 'create') {
   if (how === 'place') { placeInAgenda(t.id); return; }
   render();
   toast('Tâche ajoutée', { label: 'Planifier', fn: () => placeInAgenda(t.id) });
+}
+
+// « Maintenant » : un créneau d'aujourd'hui qui commence tout de suite (durée écrite, sinon celle par défaut).
+function nowPlan(form) {
+  return { repeat: false, start: Math.floor(nowMin() / 5) * 5, dur: schedForms.get(form)?.s?.dur || PLAN_DUR, dates: [ymd(new Date())] };
 }
 
 // Fiche d'une tâche existante : chaque modification est enregistrée aussitôt.
@@ -5944,9 +5952,10 @@ const actions = {
   'emoji-close'(el) { el.closest('.emoji-panel')?.remove(); },
   'cancel-placing'() { temp.placing = null; document.body.classList.remove('placing'); $('.carry-ghost')?.remove(); render(); },
   'place-dur'(el) { temp.placeDur = Number(el.dataset.value); $$('.pb-durs button').forEach((b) => b.classList.toggle('on', b === el)); },
-  // Fiche de création : « Lancer » et « Placer dans l'agenda » créent aussi la tâche (le titre est requis).
+  // Fiche de création : « Lancer », « Maintenant » et « Placer dans l'agenda » créent aussi la tâche (le titre est requis).
   'new-start'(el) { const form = el.closest('form'); if (form.reportValidity()) createTask(form, 'start'); },
   'new-place'(el) { const form = el.closest('form'); if (form.reportValidity()) createTask(form, 'place'); },
+  'new-now'(el) { const form = el.closest('form'); if (form.reportValidity()) createTask(form, 'now'); },
   'place-task'(el) { closeSheet(); placeInAgenda(el.dataset.id); },
   slot(el, e) {
     if (placeHere(el, e)) return;
