@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.19.0';
+const VERSION = '2.20.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -148,10 +148,31 @@ const withoutDate = ({ updatedAt, ...rest }) => rest;
 
 let shadow; // contenu de chaque élément au dernier enregistrement, pour repérer ce qui change
 
+// Retour en arrière (Ctrl / ⌘ + Z) : l'état des données avant chaque modification (les enregistrements rapprochés
+// d'un même geste ne font qu'une étape). Rétablir : Ctrl / ⌘ + Maj + Z, ou Ctrl + Y.
+const UNDO_KEYS = ['projects', 'subprojects', 'tasks', 'sessions', 'plans', 'events', 'timers'];
+const undo = { past: [], future: [], last: null, at: 0, who: null, busy: false };
+const dataSnap = () => JSON.stringify(UNDO_KEYS.map((k) => state[k]));
+
 function snapshot() {
   const items = new Map();
   for (const c of SYNCED) for (const x of state[c]) items.set(x.id, withoutDate(x));
   shadow = { items, timers: new Set(state.timers.map(timerKey)) };
+  // nouveau point de départ (chargement, synchro) ; autre profil : on repart de zéro
+  if (undo.who !== profile) Object.assign(undo, { past: [], future: [], who: profile });
+  undo.last = dataSnap();
+}
+
+// Appelé à chaque enregistrement : garde l'état d'avant, pour pouvoir y revenir.
+function undoTrack() {
+  if (undo.busy) return; // (retour en arrière en cours)
+  const snap = dataSnap();
+  if (snap === undo.last) return;
+  if (undo.last !== null && (now() - undo.at > 700 || !undo.past.length)) {
+    undo.past.push(undo.last);
+    if (undo.past.length > 80) undo.past.shift();
+  }
+  Object.assign(undo, { last: snap, at: now(), future: [] });
 }
 snapshot();
 
@@ -179,6 +200,7 @@ function stamp() {
 
 // À appeler après chaque modification des données.
 function save() {
+  undoTrack();
   if (stamp()) {
     state.ui.pristine = false;
     if (syncConf.code) { state.ui.syncDirty = true; scheduleSync(); }
@@ -1277,6 +1299,7 @@ function openTaskSheet(id, preset) {
     </div>
     ${pickFields(t.projectId, t.subprojectId)}
     <div class="field due-field"><span>Échéance</span>${dueChips(t.deadline)}</div>
+    <div class="field due-field dur-field"><span>Durée prévue</span>${durChips(t.dur)}</div>
     ${agendaBlock(isNew ? '' : id)}
     ${stepsBlock(isNew ? [] : taskSteps(t), t)}
     <details class="tn-notes"${t.notes ? ' open' : ''}><summary>${ICON.plus} ${t.notes ? 'Note' : 'Ajouter une note'}</summary>
@@ -1299,6 +1322,7 @@ function readTaskForm(form) {
     projectId,
     subprojectId: projectId ? clean(fd.get('subprojectId')) : null,
     deadline: fd.get('deadline') || null,
+    dur: Number(fd.get('dur_task')) || null,
     notes: String(fd.get('notes') || '').trim(),
     starred: fd.get('starred') === 'on',
   };
@@ -1337,6 +1361,8 @@ function createTask(form, how = 'create') {
   // Fiche de création : planifiée comme écrit (« vendredi 14h », « un lundi sur deux à 9h »…)
   const plan = slotDay ? null : how === 'now' ? nowPlan(form) : schedPlan(form);
   const t = { id: uid(), ...v, done: false, doneAt: null, createdAt: now() };
+  if (!t.dur && when && !when.multi) t.dur = when.dur; // créée depuis un créneau : la durée choisie devient sa durée prévue
+  if (!t.dur) delete t.dur;
   stepsPending(form);
   const steps = stepDrafts.get(form);
   if (steps?.length) t.checklist = steps;
@@ -2759,7 +2785,8 @@ function viewPlan() {
         const split = it.live ? `;--split:${(((it.e0 - it.s) / (it.e - it.s)) * 100).toFixed(1)}%` : '';
         const when = !it.live ? `${shortLabel(it.s0)}–${shortLabel(it.e)}`
           : it.live.moved ? `${shortLabel(it.s0)} · en cours` : `${shortLabel(it.s0)}–${shortLabel(it.e0)} <em class="pb-over">+${fmtDur((nowMin - it.e0) * 60e3)}</em>`;
-        return `<div class="plan-block${done ? ' done' : ''}${running ? ' running' : ''}${grow}" data-action="open-plan" data-id="${it.p.id}" style="${boxStyle(it)};--c:${colorOf(t.projectId)}${split}">
+        const moving = drag.active?.kind === 'move' && !drag.active.copy && drag.active.plan?.id === it.p.id;
+        return `<div class="plan-block${done ? ' done' : ''}${running ? ' running' : ''}${moving ? ' dragging' : ''}${grow}" data-action="open-plan" data-id="${it.p.id}" style="${boxStyle(it)};--c:${colorOf(t.projectId)}${split}">
           ${done ? `<i class="pb-done" aria-hidden="true">${ICON.check}</i>` : ''}<b>${t.starred ? '★ ' : ''}${esc(t.title)}</b><span>${done ? 'Fait · ' : it.p.series ? '↻ ' : ''}${when}${spent ? `<em class="pb-spent"> · ⏱ ${fmtDur(spent)}</em>` : ''}</span>
           <i class="plan-resize" aria-hidden="true"></i></div>`;
       }).join('')}
@@ -2878,7 +2905,7 @@ function viewPlan() {
   const floating = placing
     ? `<div class="place-bar" style="--c:${colorOf(placing.projectId)}">
         <span class="pb-text"><i></i><span>${matchMedia('(pointer: fine)').matches ? 'Clique sur' : 'Touche'} un créneau pour placer <b>« ${esc(placing.title)} »</b><small> · ou un jour, en haut, pour son échéance</small></span></span>
-        <span class="pb-durs" role="group" aria-label="Durée">${[30, 60, 90, 120].map((d) => `<button type="button" class="${d === (temp.placeDur || PLAN_DUR) ? 'on' : ''}" data-action="place-dur" data-value="${d}">${fmtDur(d * 60e3)}</button>`).join('')}</span>
+        <span class="pb-durs" role="group" aria-label="Durée">${[...new Set([15, 30, 60, 90, 120, temp.placeDur || PLAN_DUR])].sort((x, y) => x - y).map((d) => `<button type="button" class="${d === (temp.placeDur || PLAN_DUR) ? 'on' : ''}" data-action="place-dur" data-value="${d}">${durLabel(d)}</button>`).join('')}</span>
         <button type="button" class="btn small" data-action="cancel-placing">Annuler</button></div>`
     : '';
 
@@ -2905,7 +2932,10 @@ function viewPlan() {
     ${side}
     </div>
     ${floating}
-    <div class="drop-remove">${ICON.trash} Déposer ici pour retirer du planning</div>`;
+    <div class="drop-remove">
+      <span class="dr-move">${ICON.trash}<span>Déposer ici pour retirer du planning${matchMedia('(pointer: fine)').matches ? '<small>Maintiens <kbd>Alt</kbd> en glissant pour <b>dupliquer</b> le créneau</small>' : ''}</span></span>
+      <span class="dr-copy"><b class="dr-ic">⧉</b><span>Double : lâche-le dans le planning, l’original reste en place<small>Relâche <kbd>Alt</kbd> pour simplement déplacer</small></span></span>
+    </div>`;
 }
 
 // Fait défiler la grille vers le début de journée (ou l'heure actuelle cette semaine).
@@ -2973,7 +3003,7 @@ function whenFields(day, durs, pick, { days = isoDay(day), weekly = false, auto 
     <label class="field when-ask"><span>Quand <small>✨ en toutes lettres</small></span>
       <input name="when_text" placeholder="Ex. tous les lundis de 8h30 à 10h30" maxlength="140" autocomplete="off" enterkeyhint="done"></label>
     <p class="when-said" aria-live="polite"></p>
-    <div class="field"><span>Durée</span><div class="dur-pick">${durs.map((x) => `<label><input type="radio" name="dur" value="${x}"${x === pick ? ' checked' : ''}><span>${fmtDur(x * 60e3)}</span></label>`).join('')}
+    <div class="field"><span>Durée</span><div class="dur-pick">${durs.map((x) => `<label><input type="radio" name="dur" value="${x}"${x === pick ? ' checked' : ''}><span>${durLabel(x)}</span></label>`).join('')}
       <label class="multi"><input type="radio" name="dur" value="days"><span>📅 Plusieurs jours (voyage…)</span></label></div></div>
     <label class="field when-days"><span>Jusqu’au (inclus)</span><input type="date" name="span_to" min="${day}" value="${addDays(day, 2)}"></label>
     <div class="field rep"><span>Répéter</span>
@@ -3233,7 +3263,7 @@ function schedPlan(form) {
   const s = st?.s;
   if (!s || (!s.repeat && !s.date && s.start < 0)) return null; // une durée seule ne se place pas
   const start = s.start >= 0 ? s.start : toMin(st.time || '09:00');
-  const dur = Math.max(SNAP, Math.min(s.dur || PLAN_DUR, DAY_MIN - start));
+  const dur = Math.max(5, Math.min(s.dur || Number(form.elements.dur_task?.value) || PLAN_DUR, DAY_MIN - start));
   const today = ymd(new Date());
   const day0 = start > nowMin() ? today : addDays(today, 1); // heure passée : à partir de demain
   return s.repeat ? schedResolve(s, day0, start, dur) : { ...s, start, dur, date: s.date || day0, dates: [s.date || day0] };
@@ -3458,13 +3488,13 @@ document.addEventListener('pointerdown', (e) => {
   const col = !chip && !block && !temp.placing ? e.target.closest('.cal-col') : null;
   if (!chip && !block && !col) return;
   const kind = chip ? 'new' : block ? (e.target.closest('.plan-resize') ? 'resize' : 'move') : 'range';
-  drag.pending = { kind, el: chip || block || col, id: chip ? chip.dataset.dragTask : block?.dataset.id, type: e.pointerType, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY };
+  drag.pending = { kind, el: chip || block || col, id: chip ? chip.dataset.dragTask : block?.dataset.id, type: e.pointerType, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, alt: e.altKey || e.ctrlKey };
   if (e.pointerType !== 'mouse') drag.pending.timer = setTimeout(beginDrag, kind === 'range' ? 350 : 260); // appui long
   else e.preventDefault(); // pas de sélection de texte à la souris
 });
 
 window.addEventListener('pointermove', (e) => {
-  if (drag.active) { moveDrag(e.clientX, e.clientY); return; }
+  if (drag.active) { dragCopy(e.altKey || e.ctrlKey); moveDrag(e.clientX, e.clientY); return; }
   const p = drag.pending;
   if (!p) return;
   Object.assign(p, { x: e.clientX, y: e.clientY });
@@ -3478,6 +3508,25 @@ window.addEventListener('pointercancel', () => { if (drag.active) endDrag(false)
 // Pendant un glisser au doigt, la page ne doit pas défiler.
 document.addEventListener('touchmove', (e) => { if (drag.active) e.preventDefault(); }, { passive: false });
 document.addEventListener('contextmenu', (e) => { if (drag.active || drag.pending || e.target.closest('.cal, .side')) e.preventDefault(); });
+
+// Alt (ou Ctrl) pendant qu'on glisse un créneau : on en pose un double, l'original reste en place.
+function dragCopy(on) {
+  const a = drag.active;
+  if (!a || a.kind !== 'move' || !!a.copy === on) return;
+  a.copy = on;
+  a.el.classList.toggle('dragging', !on);
+  document.body.classList.toggle('drag-copy', on);
+  moveDrag(a.x, a.y);
+}
+document.addEventListener('keydown', (e) => {
+  if (!drag.active || (e.key !== 'Alt' && e.key !== 'Control')) return;
+  e.preventDefault(); // (Alt seul ouvrirait le menu du navigateur)
+  dragCopy(true);
+});
+document.addEventListener('keyup', (e) => {
+  if (e.key !== 'Alt' && e.key !== 'Control') return;
+  if (drag.active) { e.preventDefault(); dragCopy(false); } else if (now() - (temp.dragEnd || 0) < 1500) e.preventDefault();
+});
 
 function cancelPending() {
   if (drag.pending) clearTimeout(drag.pending.timer);
@@ -3499,6 +3548,7 @@ function beginDrag() {
   } else if (p.kind === 'new') {
     const t = getTask(p.id);
     if (!t) return;
+    a.dur = t.dur || PLAN_DUR; // sa durée prévue
     a.color = colorOf(t.projectId);
     a.ghost = Object.assign(document.createElement('div'), { className: 'drag-ghost', textContent: t.title });
     a.ghost.style.setProperty('--c', a.color);
@@ -3521,6 +3571,7 @@ function beginDrag() {
     if (p.kind === 'move') document.body.classList.add('drag-move');
   }
   drag.active = a;
+  if (p.kind === 'move' && p.alt) dragCopy(true);
   document.body.classList.add('is-dragging');
   buzz();
   moveDrag(a.x, a.y);
@@ -3543,7 +3594,7 @@ function dropTarget(x, y) {
   // Bloc déposé sur la zone « retirer » (ou sur la barre latérale fixe) : on le retire du planning.
   // (sur téléphone, le volet s'efface pendant le glisser : on n'en tient pas compte)
   const overSide = sideDocked() && inside($('.side'));
-  if (a.kind === 'move' && (inside($('.drop-remove')) || overSide)) return { tray: true };
+  if (a.kind === 'move' && (inside($('.drop-remove')) || overSide)) return a.copy ? null : { tray: true }; // un double ne se « retire » pas
   if (overSide || y >= gridBottom()) return null;
   const headBottom = $('.cal-head')?.getBoundingClientRect().bottom ?? 0;
   if (y < headBottom) return null;
@@ -3582,9 +3633,10 @@ function moveDrag(x, y) {
   pv.classList.toggle('range', a.kind === 'range');
   pv.style.top = `${posPct(target.start)}%`;
   pv.style.height = `${((target.end - target.start) / VIEW_SPAN) * 100}%`;
+  pv.classList.toggle('copy', !!a.copy);
   pv.textContent = a.kind === 'range'
     ? `${minLabel(target.start)} – ${minLabel(target.end)} · ${fmtDur((target.end - target.start) * 60e3)}`
-    : `${minLabel(target.start)}–${minLabel(target.end)}`;
+    : `${a.copy ? '⧉ Double · ' : ''}${minLabel(target.start)}–${minLabel(target.end)}`;
 }
 
 // Près du haut ou du bas de l'écran, la grille défile toute seule.
@@ -3598,7 +3650,30 @@ function autoScroll() {
   else if (a.y < head + 50 && a.y > head - 80) dy = -Math.ceil((head + 50 - a.y) / 6);
   else if (a.y > tray - 50 && a.y < tray + 10) dy = Math.ceil((a.y - (tray - 50)) / 6);
   if (dy) { window.scrollBy(0, dy); moveDrag(a.x, a.y); }
+  edgePage(a);
   drag.raf = requestAnimationFrame(autoScroll);
+}
+
+// Bloc (ou tâche) tenu au bord de la grille : après lundi à gauche ou après dimanche à droite, un court instant, et le
+// planning passe à la semaine (au jour) d'à côté ; on continue de glisser. Rester au bord continue de tourner les pages.
+function edgePage(a) {
+  const cal = $('.cal');
+  const cols = $$('.cal-col');
+  if (!cal || !cols.length || (a.kind !== 'move' && a.kind !== 'new')) return;
+  const first = cols[0].getBoundingClientRect();
+  const last = cols[cols.length - 1].getBoundingClientRect();
+  const side = sideDocked() ? $('.side')?.getBoundingClientRect() : null;
+  const inGrid = a.y > first.top - 30 && a.y < gridBottom();
+  const dir = !inGrid ? 0 : a.x <= first.left + 6 ? -1 : a.x >= last.right - 14 && !(side && a.x >= side.left) ? 1 : 0;
+  cal.classList.toggle('edge-prev', dir < 0);
+  cal.classList.toggle('edge-next', dir > 0);
+  if (!dir) { a.edge = null; return; }
+  if (!a.edge || a.edge.dir !== dir) a.edge = { dir, at: now() + 520 };
+  if (now() < a.edge.at) return;
+  a.edge.at = now() + 900; // tenu au bord : la page suivante un peu plus tard
+  changePeriod(dir, dir > 0 ? 'right' : 'left');
+  $('.cal')?.classList.add(dir > 0 ? 'edge-next' : 'edge-prev');
+  moveDrag(a.x, a.y);
 }
 
 function endDrag(drop) {
@@ -3608,10 +3683,12 @@ function endDrag(drop) {
   a.ghost?.remove();
   if (a.kind !== 'range') $('.plan-preview')?.remove();
   for (const c of $$('.due-cell.drop')) c.classList.remove('drop');
-  document.body.classList.remove('is-dragging', 'drag-move', 'drop-hover', 'ranging');
+  document.body.classList.remove('is-dragging', 'drag-move', 'drop-hover', 'ranging', 'drag-copy');
+  temp.dragEnd = now();
   temp.suppressClick = true; // le relâchement ne doit pas compter comme un « toucher »
   setTimeout(() => { temp.suppressClick = false; }, 350);
   const tg = drop ? a.target : null;
+  $('.cal')?.classList.remove('edge-prev', 'edge-next');
   if (a.kind === 'range') { // le créneau dessiné reste affiché pendant que la fiche est ouverte
     if (tg?.col) { buzz(); openSlotSheet(tg.day, tg.start, undefined, tg.end - tg.start); } else $('.plan-preview')?.remove();
     return;
@@ -3623,6 +3700,15 @@ function endDrag(drop) {
     state.plans = state.plans.filter((x) => x.id !== a.plan.id);
     save(); render();
     toast('Retirée du planning', { label: 'Annuler', fn: () => { state.plans.push(old); save(); render(); } });
+    return;
+  }
+  if (a.kind === 'move' && a.copy) { // le double est posé là, l'original ne bouge pas
+    a.el.classList.remove('dragging');
+    if (!tg?.col) { render(); return; }
+    const p = { id: uid(), taskId: a.plan.taskId, start: dateAt(tg.day, tg.start), end: dateAt(tg.day, tg.end) };
+    state.plans.push(p);
+    save(); render(); buzz();
+    toast(`Créneau dupliqué · ${dayLabel(tg.day)} ${minLabel(tg.start)}`, { label: 'Annuler', fn: () => { state.plans = state.plans.filter((x) => x !== p); save(); render(); } });
     return;
   }
   if ((a.kind === 'move' || a.kind === 'resize') && tg?.col) {
@@ -3668,6 +3754,7 @@ function openPlanSheet(id) {
       ${t.done ? '' : `<button type="button" class="btn ${running ? 'stop' : 'primary'} grow" data-action="toggle-timer" data-id="${t.id}">${running ? `${ICON.stop} Arrêter` : `${ICON.play} Lancer le chrono`}</button>`}
       <button type="button" class="btn grow" data-action="toggle-done" data-id="${t.id}">${t.done ? 'Rouvrir' : `${ICON.check} Terminée`}</button>
     </div>
+    ${p.allDay ? '' : `<button type="button" class="btn ghost wide plan-dup" data-action="plan-dup" data-id="${id}">⧉ Dupliquer : poser un double ailleurs</button>`}
     <button type="button" class="btn ghost danger wide" data-action="delete-plan" data-id="${id}">${ICON.trash} ${after.length ? 'Retirer ce créneau' : 'Retirer du planning'}</button>
     ${after.length ? `<button type="button" class="btn ghost danger wide" data-action="delete-series" data-id="${id}">${ICON.trash} Retirer celui-ci et les ${after.length} suivants</button>` : ''}
   </form>`);
@@ -3701,7 +3788,7 @@ function openSlotSheet(day, min, maxDur = DAY_MIN - min, dur = 0, conv = null) {
   const d = parseYmd(day);
   const tasks = conv ? [] : trayTasks(0, 0);
   const def = newTaskDefaults();
-  let durs = [30, 60, 90, 120].filter((x) => x <= Math.max(30, maxDur));
+  let durs = TASK_DURS.filter((x) => x <= Math.max(30, maxDur));
   if (dur && !durs.includes(dur)) durs = [...durs, dur].sort((a, b) => a - b);
   const pick = dur || (durs.includes(PLAN_DUR) ? PLAN_DUR : durs[durs.length - 1]);
   openSheet(`<div class="sheet-body">
@@ -4792,10 +4879,10 @@ function freeGaps(items, from, to = DAY_WINDOW_END) {
   return gaps.filter((g) => g.e - g.s >= 30);
 }
 
-function nextFreeSlot(day) {
+function nextFreeSlot(day, want = PLAN_DUR) {
   const from = Math.max(VIEW_START, Math.ceil(nowMin() / 15) * 15);
   const gap = freeGaps(dayAgenda(day).filter(isOpenItem), from)[0];
-  return gap ? { s: gap.s, dur: Math.min(PLAN_DUR, gap.e - gap.s) } : null;
+  return gap ? { s: gap.s, dur: Math.min(want, gap.e - gap.s) } : null;
 }
 
 // Tout ce qui concerne aujourd'hui : agenda, tâches à faire, prioritaires, progression.
@@ -5452,6 +5539,15 @@ const dayWord = (day) => {
 
 const DUE_QUICK = [[0, 'Aujourd’hui'], [1, 'Demain'], [7, '+1 sem.']];
 
+// Durée prévue d'une tâche : pastilles à bascule (toucher celle qui est choisie la retire).
+const TASK_DURS = [5, 10, 15, 30, 45, 60, 90, 120];
+const durLabel = (m) => (m < 60 ? `${m} min` : `${Math.floor(m / 60)}h${m % 60 ? pad(m % 60) : ''}`); // « 5 min », « 1h », « 1h30 »
+function durChips(dur) {
+  return `<div class="due-row dur-row" role="group" aria-label="Durée prévue"><input type="hidden" name="dur_task" value="${dur || ''}">
+    ${TASK_DURS.map((d) => `<button type="button" class="due-chip${d === dur ? ' on' : ''}" data-action="set-dur" data-value="${d}" aria-pressed="${d === dur}">${durLabel(d)}</button>`).join('')}
+  </div>`;
+}
+
 // Échéance : pastilles à bascule (toucher celle qui est choisie la retire), plus une date au choix.
 // Vide par défaut : sans date choisie, il n'y a simplement pas d'échéance.
 function dueChips(deadline) {
@@ -5815,7 +5911,7 @@ function placeInAgenda(id) {
   const t = getTask(id);
   if (!t) return;
   Object.assign(state.ui, { tab: 'plan', planDate: t.deadline || ymd(new Date()) });
-  Object.assign(temp, { placing: id, placeDur: temp.placeDur || PLAN_DUR, openProject: null });
+  Object.assign(temp, { placing: id, placeDur: t.dur || temp.placeDur || PLAN_DUR, openProject: null });
   closeSideOnPhone();
   writeLocal(); render();
   window.scrollTo(0, 0);
@@ -5859,10 +5955,38 @@ document.addEventListener('pointermove', (e) => {
   if (temp.placing && e.pointerType === 'mouse' && state.ui.tab === 'plan') carryMove(e.clientX, e.clientY);
 });
 
+// Annuler / rétablir la dernière modification (Ctrl / ⌘ + Z, Ctrl / ⌘ + Maj + Z, Ctrl + Y).
+function undoStep(redo) {
+  const from = redo ? undo.future : undo.past;
+  if (!from.length) { toast(redo ? 'Rien à rétablir' : 'Rien à annuler'); return; }
+  if (sheet.open) closeSheet(); // (une fiche ouverte enregistrerait par-dessus)
+  if (drag.active) return;
+  const cur = dataSnap();
+  const data = JSON.parse(from.pop());
+  (redo ? undo.past : undo.future).push(cur);
+  UNDO_KEYS.forEach((k, i) => { state[k] = data[i]; });
+  // ce qui revient ne doit pas rester marqué comme supprimé (synchro)
+  for (const c of SYNCED) for (const x of state[c]) delete state.deleted[x.id];
+  for (const a of state.timers) delete state.deleted[timerKey(a)];
+  Object.assign(temp, { placing: null });
+  undo.busy = true;
+  save();
+  Object.assign(undo, { busy: false, last: dataSnap(), at: 0 });
+  render(); buzz();
+  toast(redo ? '↻ Rétabli' : '↺ Annulé', { label: redo ? 'Annuler' : 'Rétablir', fn: () => undoStep(!redo) });
+}
+
 // Raccourcis : Échap repose la tâche « en main », N crée une tâche, Ctrl / ⌘ + Entrée valide la fiche de création,
-// 1 à 4 changent d'onglet, / cherche une tâche.
+// Ctrl / ⌘ + Z annule, 1 à 4 changent d'onglet, / cherche une tâche.
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && temp.placing && !sheet.open && !$('#ask').open) { actions['cancel-placing'](); return; }
+  // Ctrl / ⌘ + Z : annuler la dernière modification ; + Maj (ou Ctrl + Y) : la rétablir. Dans un champ : celle du texte.
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && /^[zZyY]$/.test(e.key) && profile) {
+    if (e.target.closest?.('input, textarea, select, [contenteditable]') || $('#ask').open) return;
+    e.preventDefault();
+    undoStep(e.shiftKey || /[yY]/.test(e.key));
+    return;
+  }
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
     const f = e.target.closest?.('form[data-form="task"]');
     if (f && !f.dataset.id) { e.preventDefault(); f.requestSubmit(); }
@@ -5902,6 +6026,7 @@ const actions = {
   'pick-tray'(el) {
     const id = el.dataset.dragTask;
     temp.placing = temp.placing === id ? null : id;
+    if (temp.placing && getTask(id)?.dur) temp.placeDur = getTask(id).dur; // sa durée prévue
     if (temp.placing) closeSideOnPhone();
     document.body.classList.toggle('placing', !!temp.placing);
     render();
@@ -5951,6 +6076,15 @@ const actions = {
   'emoji-pick'(el) { pickEmoji(el); },
   'emoji-close'(el) { el.closest('.emoji-panel')?.remove(); },
   'cancel-placing'() { temp.placing = null; document.body.classList.remove('placing'); $('.carry-ghost')?.remove(); render(); },
+  'set-dur'(el) { // durée prévue (fiche d'une tâche) : à bascule
+    const form = el.closest('form');
+    const input = form.elements.dur_task;
+    input.value = input.value === el.dataset.value ? '' : el.dataset.value;
+    for (const b of form.querySelectorAll('[data-action="set-dur"]')) { const on = b.dataset.value === input.value; b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); }
+    if (form.dataset.id) input.dispatchEvent(new Event('change', { bubbles: true })); // tâche existante : enregistrée aussitôt
+    schedCardRefresh(form);
+    buzz();
+  },
   'place-dur'(el) { temp.placeDur = Number(el.dataset.value); $$('.pb-durs button').forEach((b) => b.classList.toggle('on', b === el)); },
   // Fiche de création : « Lancer », « Maintenant » et « Placer dans l'agenda » créent aussi la tâche (le titre est requis).
   'new-start'(el) { const form = el.closest('form'); if (form.reportValidity()) createTask(form, 'start'); },
@@ -6010,6 +6144,16 @@ const actions = {
     state.plans = state.plans.filter((x) => !ids.has(x.id));
     save(); closeSheet(); render();
     toast(`${gone.length} créneaux retirés`, { label: 'Annuler', fn: () => { state.plans.push(...gone); save(); render(); } });
+  },
+  'plan-dup'(el) { // le double du créneau passe « en main » (même durée) : un toucher sur un créneau le pose
+    const p = state.plans.find((x) => x.id === el.dataset.id);
+    if (!p) return;
+    closeSheet();
+    Object.assign(temp, { placing: p.taskId, placeDur: Math.max(5, Math.round((p.end - p.start) / 60e3)) });
+    closeSideOnPhone();
+    document.body.classList.add('placing');
+    render();
+    toast('Touche un créneau pour poser le double');
   },
   'delete-plan'(el) {
     const old = state.plans.find((x) => x.id === el.dataset.id);
@@ -6281,7 +6425,7 @@ const actions = {
 
   'today-fit'(el) {
     const day = ymd(new Date());
-    const slot = nextFreeSlot(day);
+    const slot = nextFreeSlot(day, getTask(el.dataset.id)?.dur || PLAN_DUR);
     if (!slot) { toast('Plus de créneau libre aujourd’hui (jusqu’à 23h)'); return; }
     createPlan(el.dataset.id, day, slot.s, slot.dur);
   },
@@ -6289,7 +6433,7 @@ const actions = {
     const day = ymd(new Date());
     const created = [];
     for (const t of todayModel().due) {
-      const slot = nextFreeSlot(day);
+      const slot = nextFreeSlot(day, t.dur || PLAN_DUR);
       if (!slot) break;
       const p = { id: uid(), taskId: t.id, start: dateAt(day, slot.s), end: dateAt(day, slot.s + slot.dur) };
       state.plans.push(p);

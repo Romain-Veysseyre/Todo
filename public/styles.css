@@ -783,6 +783,18 @@ body.is-dragging, body.is-dragging * { cursor: grabbing !important; }
 body.drag-move .drop-remove { display: flex; }
 body.drag-move.drop-hover .drop-remove { background: var(--late); color: #fff; }
 .drop-remove svg { width: 20px; height: 20px; }
+.drop-remove > span { display: flex; align-items: center; gap: 10px; text-align: left; }
+.drop-remove small { display: block; margin-top: 1px; font-size: 12.5px; font-weight: 600; opacity: .85; }
+.drop-remove kbd { color: inherit; }
+.dr-copy { display: none !important; }
+/* Alt maintenu : on duplique (l'original reste en place) */
+body.drag-copy .drop-remove { background: var(--accent-soft); color: var(--accent); border-top-color: var(--accent); }
+body.drag-copy .dr-move { display: none; }
+body.drag-copy .dr-copy { display: flex !important; }
+.dr-ic { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px; background: var(--accent); color: var(--accent-ink); font-size: 18px; }
+body.drag-copy, body.drag-copy * { cursor: copy !important; }
+.plan-preview.copy { border-style: solid; background: color-mix(in srgb, var(--c, var(--accent)) 35%, transparent); }
+.plan-dup { margin-bottom: 2px; color: var(--accent); }
 
 .plan-task { width: 100%; display: flex; align-items: center; gap: 12px; padding: 12px 14px; margin: 4px 0 6px; text-align: left; background: var(--card-2); border-radius: 14px; border-left: 4px solid var(--c); }
 .plan-task .dot { background: var(--c); }
@@ -1708,3 +1720,24 @@ body.placing #toast { bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom)
 .cal.is-day .due-cell { flex-direction: row; flex-wrap: wrap; padding: 4px; }
 .cal.is-day .due-task { max-width: 100%; padding: 5px 10px 5px 9px; font-size: 13px; letter-spacing: 0; -webkit-line-clamp: 1; }
 .pb-text small { font-size: 12px; font-weight: 600; opacity: .8; }
+
+/* Durée prévue d'une tâche (fiche) */
+.dur-row { flex-wrap: wrap; row-gap: 6px; overflow: visible; }
+.dur-row .due-chip { font-variant-numeric: tabular-nums; }
+
+/* Glisser un bloc au bord de la grille : flèche vers la semaine d'à côté */
+.cal.edge-prev .cal-body, .cal.edge-next .cal-body { position: relative; }
+.cal.edge-prev .cal-body::before, .cal.edge-next .cal-body::after {
+  content: ""; position: absolute; top: 0; bottom: 0; width: 46px; z-index: 8; pointer-events: none;
+  background-repeat: no-repeat; background-position: center 40vh; background-size: 26px;
+  animation: edge-in .25s ease-out;
+}
+.cal.edge-prev .cal-body::before {
+  left: 0; background-color: color-mix(in srgb, var(--accent) 16%, transparent); border-left: 3px solid var(--accent);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%234f46e5' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M15 5l-7 7 7 7'/%3E%3C/svg%3E");
+}
+.cal.edge-next .cal-body::after {
+  right: 0; background-color: color-mix(in srgb, var(--accent) 16%, transparent); border-right: 3px solid var(--accent);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%234f46e5' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 5l7 7-7 7'/%3E%3C/svg%3E");
+}
+@keyframes edge-in { from { opacity: 0; } }
