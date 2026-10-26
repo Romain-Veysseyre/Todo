@@ -1400,9 +1400,9 @@ function createTask(form, how = 'create') {
   toast('Tâche ajoutée', { label: 'Planifier', fn: () => placeInAgenda(t.id) });
 }
 
-// « Maintenant » : un créneau d'aujourd'hui qui commence tout de suite (durée écrite, sinon celle par défaut).
+// « Maintenant » : un créneau d'aujourd'hui qui commence tout de suite (durée écrite, sinon la durée prévue, sinon celle par défaut).
 function nowPlan(form) {
-  return { repeat: false, start: Math.floor(nowMin() / 5) * 5, dur: schedForms.get(form)?.s?.dur || PLAN_DUR, dates: [ymd(new Date())] };
+  return { repeat: false, start: Math.floor(nowMin() / 5) * 5, dur: schedForms.get(form)?.s?.dur || Number(form.elements.dur_task?.value) || PLAN_DUR, dates: [ymd(new Date())] };
 }
 
 // Fiche d'une tâche existante : chaque modification est enregistrée aussitôt.
