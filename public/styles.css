@@ -1754,3 +1754,46 @@ body.placing #toast { bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom)
 }
 .day-card.done .day-note { opacity: .6; }
 .now-note { font-weight: 750; color: color-mix(in srgb, var(--c) 70%, var(--text)); }
+
+/* Planning : la barre Semaine / Jour et la navigation entre semaines restent en haut pendant le défilement */
+.plan-bar { position: sticky; top: var(--top-h, 60px); z-index: 7; background: var(--bg); margin: 0; padding: 2px 0 6px; }
+.cal-head { top: calc(var(--top-h, 60px) + var(--bar-h, 0px)); }
+@media (min-width: 600px) { .plan-bar { margin: 0; padding: 4px 0 8px; } }
+@media (min-width: 760px) {
+  .side { top: calc(var(--top-h, 60px) + var(--bar-h, 0px) + 6px); max-height: calc(100dvh - var(--top-h, 60px) - var(--bar-h, 0px) - var(--tabbar-h) - 22px); }
+}
+/* Téléphone : une seule ligne (Semaine / Jour à gauche, semaines à droite) pour garder la place des heures */
+@media (max-width: 599px) {
+  .plan-bar { flex-wrap: nowrap; }
+  .plan-bar .plan-nav { order: 0; width: auto; flex: 1; min-width: 0; margin: 0 -6px 0 0; }
+  .plan-bar .seg-mini button { padding: 6px 10px; font-size: 13.5px; }
+  .plan-range { min-width: 0; }
+  .plan-range b { font-size: 15px; white-space: nowrap; }
+  .plan-range small { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+}
+
+/* Fiche d'un créneau : modifier la périodicité */
+.rep-edit { margin: 0 0 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--card-2); }
+.rep-edit > summary {
+  list-style: none; display: flex; align-items: center; gap: 8px; padding: 12px 14px; cursor: pointer;
+  font-size: 14.5px; font-weight: 700; color: var(--accent);
+}
+.rep-edit > summary::-webkit-details-marker { display: none; }
+.rep-edit > summary::after {
+  content: ""; margin-left: auto; width: 7px; height: 7px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor;
+  transform: translateY(-2px) rotate(45deg); transition: transform .2s;
+}
+.rep-edit[open] > summary::after { transform: translateY(2px) rotate(-135deg); }
+.rep-edit[open] > summary { padding-bottom: 6px; }
+.rep-edit > :not(summary) { margin-left: 14px; margin-right: 14px; }
+.rep-edit .seg2 { margin-top: 4px; margin-bottom: 8px; }
+.rep-edit:not(:has([name="rr"][value="weekly"]:checked)) .rep-detail { display: none; }
+.rep-edit .daypick span { background: var(--card); }
+.rep-edit .daypick input:checked + span { background: var(--accent); }
+.rep-edit .rep-until { margin: 10px 0 0; }
+.rep-edit .rep-sum { margin-top: 10px; }
+.rep-edit .btn.primary { width: calc(100% - 28px); margin-bottom: 14px; }
+.rep-skip { display: flex; align-items: flex-start; gap: 9px; margin: 12px 0 0; font-size: 13.5px; font-weight: 600; line-height: 1.35; color: var(--muted); cursor: pointer; }
+.rep-skip input { flex: none; width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
+.pr-short { display: none; }
+@media (max-width: 599px) { .pr-long { display: none; } .pr-short { display: inline; } }
