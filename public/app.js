@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.20.0';
+const VERSION = '2.21.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -1145,6 +1145,8 @@ function closeSheet() {
   if (!sheet.open || sheet.classList.contains('closing')) return;
   const f = $('form[data-form="task"]', sheet);
   if (f?.dataset.id) commitTaskForm(f);
+  const pf = $('form[data-form="plan"]', sheet);
+  if (pf && (pf.elements.pnote?.value.trim() || '') !== (state.plans.find((x) => x.id === pf.dataset.id)?.note || '')) commitPlanForm(pf);
   if (matchMedia('(prefers-reduced-motion: reduce)').matches) { sheet.close(); return; }
   sheet.classList.add('closing');
   sheetClosing = setTimeout(() => { sheet.classList.remove('closing'); if (sheet.open) sheet.close(); }, 170);
@@ -2019,7 +2021,7 @@ sheet.addEventListener('submit', (e) => {
       label: 'Annuler', fn: () => { state.projects.push(...removed.projects); state.subprojects.push(...removed.subs); save(); render(); },
     });
   }
-  else if (form.dataset.form === 'plan') closeSheet();
+  else if (form.dataset.form === 'plan') { commitPlanForm(form); closeSheet(); }
 });
 
 /* ----- Réglages, sauvegarde ----- */
@@ -2051,6 +2053,7 @@ function openSettings() {
       <p class="hint">${syncConf.code ? 'Tes données sont enregistrées sur cet appareil et synchronisées (chiffrées).' : 'Tes données restent sur cet appareil : rien n’est envoyé sur internet.'} Fais une sauvegarde de temps en temps (dernière : <b>${last}</b>).</p>
       <button type="button" class="btn wide" data-action="export-json">Sauvegarder mes données (.json)</button>
       <button type="button" class="btn wide" data-action="import-json">Restaurer une sauvegarde</button>
+      <button type="button" class="btn wide" data-action="add-json">Ajouter depuis un fichier (sans rien remplacer)</button>
       <button type="button" class="btn wide" data-action="export-csv">Exporter le journal pour Excel (.csv)</button>
     </section>
     <section class="set-group"><h3>Zone sensible</h3>
@@ -2085,13 +2088,26 @@ async function exportJson() {
   }
 }
 
-function importJson() {
+// Choisir un fichier .json sur l'appareil, puis then(contenu).
+function pickJson(then) {
   const input = Object.assign(document.createElement('input'), { type: 'file', accept: '.json,application/json' });
   input.onchange = async () => {
     const file = input.files[0];
     if (!file) return;
+    let raw;
+    try { raw = JSON.parse(await file.text()); } catch (e) { toast('Ce fichier n’est pas lisible (.json attendu)'); return; }
+    then(raw);
+  };
+  input.click();
+}
+
+const ADD_KIND = 'chrono-todo-ajout';
+
+function importJson() {
+  pickJson(async (raw) => {
+    if (raw?.kind === ADD_KIND) { addFromFile(raw); return; } // un fichier « à ajouter » ne remplace jamais rien
     let data;
-    try { data = normalize(JSON.parse(await file.text())); } catch (e) { toast('Ce fichier n’est pas une sauvegarde valide'); return; }
+    try { data = normalize(raw); } catch (e) { toast('Ce fichier n’est pas une sauvegarde valide'); return; }
     const ok = await ask({
       title: 'Restaurer cette sauvegarde ?',
       text: `${data.tasks.length} tâche(s), ${data.projects.length} projet(s), ${data.sessions.length} session(s). Les données actuelles seront remplacées${syncConf.code ? ', aussi sur tes autres appareils synchronisés' : ''}.`,
@@ -2102,8 +2118,113 @@ function importJson() {
     data.deleted = state.deleted; // ce qui manque dans la sauvegarde sera supprimé (aussi via la synchro)
     state = data;
     save(); closeSheet(); render(); toast('Sauvegarde restaurée');
+  });
+}
+
+// Ajouter depuis un fichier (emploi du temps préparé, données d'un autre appareil…) : rien n'est remplacé ni effacé.
+// Projets et sous-projets sont retrouvés par leur nom, une tâche à faire par son nom dans le même sous-projet ;
+// ce qui est déjà là (même identifiant, ou même créneau de la même tâche) n'est pas ajouté deux fois.
+// Un créneau : { start, end } (ms), ou { day: 'AAAA-MM-JJ', from: 'HH:MM', to: 'HH:MM' } ;
+// sur toute la journée : { allDay: true, day, until } (until inclus, facultatif).
+function mergeData(raw) {
+  const key = (x) => plain(String(x || ''));
+  const ids = new Set(SYNCED.flatMap((c) => state[c].map((x) => x.id)));
+  const fresh = (id) => { const v = id && !ids.has(String(id)) && !state.deleted[id] ? String(id) : uid(); ids.add(v); return v; };
+  const isDay = (d) => /^\d{4}-\d{2}-\d{2}$/.test(d || '');
+  const map = new Map(); // identifiant dans le fichier → identifiant ici
+  const add = { projects: [], subprojects: [], tasks: [], plans: [], sessions: [] };
+  const used = new Set(state.projects.map((x) => x.color));
+  let order = Math.max(-1, ...state.projects.map((x, i) => x.order ?? i));
+  for (const p of raw.projects || []) {
+    if (!p?.name) continue;
+    const named = (x) => key(x.name) === key(p.name);
+    const same = state.projects.find((x) => x.id === p.id) || state.projects.find((x) => named(x) && !x.archived)
+      || state.projects.find(named) || add.projects.find(named);
+    if (same) { map.set(p.id, same.id); continue; }
+    const color = p.color || COLORS.find((c) => !used.has(c)) || COLORS[(state.projects.length + add.projects.length) % COLORS.length];
+    used.add(color);
+    const np = { id: fresh(p.id), name: String(p.name).trim(), color, archived: false, createdAt: now(), order: ++order };
+    map.set(p.id, np.id);
+    add.projects.push(np);
+  }
+  const projOf = (id) => map.get(id) ?? (getProject(id) ? id : null);
+  for (const sp of raw.subprojects || []) {
+    const projectId = projOf(sp?.projectId);
+    if (!sp?.name || !projectId) continue;
+    const named = (x) => x.projectId === projectId && key(x.name) === key(sp.name);
+    const same = state.subprojects.find((x) => x.id === sp.id) || state.subprojects.find(named) || add.subprojects.find(named);
+    if (same) { map.set(sp.id, same.id); continue; }
+    const ns = { id: fresh(sp.id), projectId, name: String(sp.name).trim() };
+    map.set(sp.id, ns.id);
+    add.subprojects.push(ns);
+  }
+  const subOf = (id) => map.get(id) ?? (getSub(id) ? id : null);
+  for (const t of raw.tasks || []) {
+    if (!t?.title) continue;
+    const projectId = projOf(t.projectId);
+    const subprojectId = projectId ? subOf(t.subprojectId) : null;
+    const same = getTask(t.id) || state.tasks.find((x) => !x.done && x.projectId === projectId
+      && (x.subprojectId || null) === subprojectId && key(x.title) === key(t.title));
+    if (same) { map.set(t.id, same.id); continue; }
+    const nt = { ...t, id: fresh(t.id), title: String(t.title).trim(), projectId, subprojectId, done: !!t.done, doneAt: t.doneAt || null, createdAt: t.createdAt || now() };
+    delete nt.updatedAt;
+    map.set(t.id, nt.id);
+    add.tasks.push(nt);
+  }
+  const taskOf = (id) => map.get(id) ?? (getTask(id) ? id : null);
+  const span = (x) => {
+    if (Number.isFinite(x.start) && Number.isFinite(x.end) && x.end > x.start) return [x.start, x.end];
+    if (!isDay(x.day)) return null;
+    if (x.allDay) return [dateAt(x.day, 0), dateAt(isDay(x.until) && x.until > x.day ? x.until : x.day, DAY_MIN)];
+    const a = toMin(x.from);
+    const b = Math.min(DAY_MIN, toMin(x.to));
+    return /^\d{1,2}:\d{2}$/.test(x.from || '') && b > a ? [dateAt(x.day, a), dateAt(x.day, b)] : null;
   };
-  input.click();
+  const slot = (taskId, a, b) => `${taskId}|${a}|${b}`;
+  const taken = new Set(state.plans.map((x) => slot(x.taskId, x.start, x.end)));
+  for (const x of raw.plans || []) {
+    const taskId = x && taskOf(x.taskId);
+    const se = taskId && !state.plans.some((y) => y.id === x.id) && span(x);
+    if (!se || taken.has(slot(taskId, se[0], se[1]))) continue;
+    taken.add(slot(taskId, se[0], se[1]));
+    const np = { id: fresh(x.id), taskId, start: se[0], end: se[1] };
+    if (x.allDay) np.allDay = true;
+    if (x.series) np.series = String(x.series);
+    if (x.note) np.note = String(x.note).trim();
+    if (x.done) Object.assign(np, { done: true, doneAt: x.doneAt || null });
+    add.plans.push(np);
+  }
+  for (const x of raw.sessions || []) {
+    if (!x || ids.has(x.id) || !(x.end > x.start)) continue;
+    add.sessions.push({ ...x, id: fresh(x.id), taskId: taskOf(x.taskId), projectId: projOf(x.projectId), subprojectId: subOf(x.subprojectId) });
+  }
+  return add;
+}
+
+async function addFromFile(raw) {
+  const add = mergeData(raw);
+  const n = (k) => add[k].length;
+  if (!n('tasks') && !n('plans') && !n('sessions')) { toast('Tout y est déjà : rien à ajouter'); return; }
+  const count = (k, one, many) => `${n(k)} ${n(k) > 1 ? many : one}`;
+  const starts = add.plans.map((x) => x.start).sort((a, b) => a - b);
+  const range = starts.length > 1 ? ` (du ${dShort(ymd(new Date(starts[0])))} au ${dShort(ymd(new Date(starts[starts.length - 1])))})` : '';
+  const pname = (id) => getProject(id)?.name || add.projects.find((x) => x.id === id)?.name || '';
+  const fresh = [...add.projects.map((x) => x.name), ...add.subprojects.map((x) => `${pname(x.projectId)} › ${x.name}`)];
+  const ok = await ask({
+    title: `Ajouter ${raw.title ? `« ${raw.title} »` : 'ce fichier'} ?`,
+    text: `${count('tasks', 'tâche', 'tâches')} et ${count('plans', 'créneau', 'créneaux')}${range}${n('sessions') ? `, ${count('sessions', 'session', 'sessions')} de chrono` : ''}${fresh.length ? `. Nouveau : ${fresh.join(', ')}` : ''}. Rien n’est remplacé ni effacé, et ce qui est déjà là n’est pas ajouté deux fois.`,
+    ok: 'Ajouter',
+  });
+  if (!ok) return;
+  for (const k of Object.keys(add)) state[k].push(...add[k]);
+  save(); closeSheet(); render(); buzz();
+  toast(`${count('tasks', 'tâche ajoutée', 'tâches ajoutées')} · ${count('plans', 'créneau', 'créneaux')}`, {
+    label: 'Annuler',
+    fn: () => {
+      for (const k of Object.keys(add)) { const gone = new Set(add[k].map((x) => x.id)); state[k] = state[k].filter((x) => !gone.has(x.id)); }
+      save(); render();
+    },
+  });
 }
 
 function exportCsv() {
@@ -2706,8 +2827,10 @@ const boxStyle = (it) => `top:${posPct(it.s)}%;height:${(((it.e - it.s) / VIEW_S
 // Tâches à planifier : prioritaires d'abord, puis celles pas encore planifiées cette semaine.
 function trayTasks(weekStart, weekEnd) {
   const planned = new Set(state.plans.filter((p) => p.end > weekStart && p.start < weekEnd).map((p) => p.taskId));
+  // Déjà planifiée une autre semaine à venir (cours réguliers, rendez-vous…) : rien à placer, elle n'encombre pas la liste.
+  const elsewhere = new Set(state.plans.filter((p) => !p.done && p.end > now() && !(p.end > weekStart && p.start < weekEnd)).map((p) => p.taskId));
   return state.tasks
-    .filter((t) => !t.done)
+    .filter((t) => !t.done && !elsewhere.has(t.id))
     .map((t) => ({ t, planned: planned.has(t.id) }))
     .sort((a, b) => !!b.t.starred - !!a.t.starred || a.planned - b.planned || cmpDeadline(a.t, b.t) || b.t.createdAt - a.t.createdAt);
 }
@@ -2787,7 +2910,7 @@ function viewPlan() {
           : it.live.moved ? `${shortLabel(it.s0)} · en cours` : `${shortLabel(it.s0)}–${shortLabel(it.e0)} <em class="pb-over">+${fmtDur((nowMin - it.e0) * 60e3)}</em>`;
         const moving = drag.active?.kind === 'move' && !drag.active.copy && drag.active.plan?.id === it.p.id;
         return `<div class="plan-block${done ? ' done' : ''}${running ? ' running' : ''}${moving ? ' dragging' : ''}${grow}" data-action="open-plan" data-id="${it.p.id}" style="${boxStyle(it)};--c:${colorOf(t.projectId)}${split}">
-          ${done ? `<i class="pb-done" aria-hidden="true">${ICON.check}</i>` : ''}<b>${t.starred ? '★ ' : ''}${esc(t.title)}</b><span>${done ? 'Fait · ' : it.p.series ? '↻ ' : ''}${when}${spent ? `<em class="pb-spent"> · ⏱ ${fmtDur(spent)}</em>` : ''}</span>
+          ${done ? `<i class="pb-done" aria-hidden="true">${ICON.check}</i>` : ''}<b>${t.starred ? '★ ' : ''}${esc(t.title)}</b>${it.p.note ? `<small class="pb-note">${esc(it.p.note)}</small>` : ''}<span>${done ? 'Fait · ' : it.p.series ? '↻ ' : ''}${when}${spent ? `<em class="pb-spent"> · ⏱ ${fmtDur(spent)}</em>` : ''}</span>
           <i class="plan-resize" aria-hidden="true"></i></div>`;
       }).join('')}
       ${key === today && nowMin >= VIEW_START ? `<div class="now-line" style="top:${posPct(nowMin)}%"></div>` : ''}
@@ -3705,7 +3828,7 @@ function endDrag(drop) {
   if (a.kind === 'move' && a.copy) { // le double est posé là, l'original ne bouge pas
     a.el.classList.remove('dragging');
     if (!tg?.col) { render(); return; }
-    const p = { id: uid(), taskId: a.plan.taskId, start: dateAt(tg.day, tg.start), end: dateAt(tg.day, tg.end) };
+    const p = { id: uid(), taskId: a.plan.taskId, start: dateAt(tg.day, tg.start), end: dateAt(tg.day, tg.end), ...(a.plan.note ? { note: a.plan.note } : {}) };
     state.plans.push(p);
     save(); render(); buzz();
     toast(`Créneau dupliqué · ${dayLabel(tg.day)} ${minLabel(tg.start)}`, { label: 'Annuler', fn: () => { state.plans = state.plans.filter((x) => x !== p); save(); render(); } });
@@ -3749,10 +3872,11 @@ function openPlanSheet(id) {
       <span class="dot"></span><span class="plan-task-name">${t.starred ? '★ ' : ''}${esc(t.title)}<small>${esc(pathLabel(t.projectId, t.subprojectId))}</small></span>${ICON.right}
     </button>
     ${fields}
+    <label class="field"><span>Note</span><input name="pnote" value="${esc(p.note || '')}" placeholder="${p.allDay ? 'Ex. lieu, précisions…' : 'Ex. contenu de la séance, éval…'}" maxlength="160" enterkeyhint="done"></label>
     ${rep}
     <div class="sheet-actions">
-      ${t.done ? '' : `<button type="button" class="btn ${running ? 'stop' : 'primary'} grow" data-action="toggle-timer" data-id="${t.id}">${running ? `${ICON.stop} Arrêter` : `${ICON.play} Lancer le chrono`}</button>`}
-      <button type="button" class="btn grow" data-action="toggle-done" data-id="${t.id}">${t.done ? 'Rouvrir' : `${ICON.check} Terminée`}</button>
+      ${planDone(p) ? '' : `<button type="button" class="btn ${running ? 'stop' : 'primary'} grow" data-action="toggle-timer" data-id="${t.id}">${running ? `${ICON.stop} Arrêter` : `${ICON.play} Lancer le chrono`}</button>`}
+      <button type="button" class="btn grow" data-action="plan-done" data-id="${id}">${planDone(p) ? 'Rouvrir' : `${ICON.check} ${upcomingOthers(p) ? 'Fait' : 'Terminée'}`}</button>
     </div>
     ${p.allDay ? '' : `<button type="button" class="btn ghost wide plan-dup" data-action="plan-dup" data-id="${id}">⧉ Dupliquer : poser un double ailleurs</button>`}
     <button type="button" class="btn ghost danger wide" data-action="delete-plan" data-id="${id}">${ICON.trash} ${after.length ? 'Retirer ce créneau' : 'Retirer du planning'}</button>
@@ -3760,10 +3884,16 @@ function openPlanSheet(id) {
   </form>`);
 }
 
+// La tâche a-t-elle encore d'autres créneaux à faire ? (« Fait » ne valide alors que celui-ci)
+const upcomingOthers = (p) => state.plans.some((x) => x.taskId === p.taskId && x !== p && !x.done && x.start > now());
+
 function commitPlanForm(form) {
   const p = state.plans.find((x) => x.id === form.dataset.id);
   const day = form.elements.date.value;
   if (!p || !day) return;
+  const note = form.elements.pnote?.value.trim() || '';
+  if (note) p.note = note;
+  else delete p.note;
   if (p.allDay) { // du … au … (inclus)
     let to = form.elements.to.value;
     if (!to || to < day) { to = day; form.elements.to.value = day; }
@@ -4921,6 +5051,7 @@ function todayCard({ t, p, dur, done, totals, note = '', live = '' }) {
       <button type="button" class="check" data-action="today-done" data-kind="${kind}" data-id="${id}" aria-label="${done ? 'Annuler la validation' : 'Valider'}">${ICON.check}</button>
       <div class="day-main" role="button" tabindex="0" data-action="${p ? 'open-plan' : 'open-task'}" data-id="${id}">
         <div class="day-title">${t.starred ? `<span class="day-star">${ICON.star}</span>` : ''}${esc(t.title)}</div>
+        ${p?.note ? `<div class="day-note">${esc(p.note)}</div>` : ''}
         ${done ? '' : stepsPeek(t)}
         <div class="day-meta">
           ${stepsPill(t)}
@@ -5006,7 +5137,7 @@ function viewToday() {
     nowCard = `<section class="now-card${running ? ' running' : ''}" style="--c:${colorOf(t.projectId)}">
       <div class="now-label"><span class="pulse"></span>${label}</div>
       <div class="now-title" role="button" tabindex="0" data-action="open-plan" data-id="${focus.p.id}">${t.starred ? '★ ' : ''}${esc(t.title)}</div>
-      <div class="now-meta">${esc(pathLabel(t.projectId, t.subprojectId))}${meta}</div>
+      <div class="now-meta">${focus.p.note ? `<b class="now-note">${esc(focus.p.note)}</b> · ` : ''}${esc(pathLabel(t.projectId, t.subprojectId))}${meta}</div>
       ${isNow ? `<div class="now-progress${grown ? ' live' : ''}"><i style="width:${grown ? 100 : Math.round(((nm - focus.s) / (focus.e - focus.s)) * 100)}%"></i></div>` : ''}
       <div class="now-actions">
         <button type="button" class="btn ${running ? 'stop' : 'primary'} grow" data-action="toggle-timer" data-id="${t.id}">${running ? `${ICON.stop} <span${tickAttr('clock', 0, sinceOf(t.id))}>${fmtClock(elapsedSince(sinceOf(t.id)))}</span>` : `${ICON.play} ${isNow ? 'Lancer le chrono' : 'Commencer'}`}</button>
@@ -5222,7 +5353,7 @@ function journalResults(all = journalEntries()) {
       <span class="jr-tick">${ICON.check}</span>
       <button type="button" class="jr-main" data-action="${e.kind === 'plan' ? 'open-plan' : 'open-task'}" data-id="${e.id}">
         <b>${t.starred ? '★ ' : ''}${esc(t.title)}</b>
-        <small>${t.projectId ? `<span class="tag"><i></i>${esc(pathLabel(t.projectId, t.subprojectId))}</span>` : ''}${ms ? `<span>⏱ ${fmtDur(ms)}</span>` : ''}${slot ? `<span>${e.p.series ? '↻' : '📅'} ${slot}</span>` : ''}</small>
+        <small>${t.projectId ? `<span class="tag"><i></i>${esc(pathLabel(t.projectId, t.subprojectId))}</span>` : ''}${ms ? `<span>⏱ ${fmtDur(ms)}</span>` : ''}${slot ? `<span>${e.p.series ? '↻' : '📅'} ${slot}</span>` : ''}${e.p?.note ? `<span>${esc(e.p.note)}</span>` : ''}</small>
       </button>
       <time>${clockLabel(e.at)}</time>
       <button type="button" class="jr-undo" data-action="journal-undo" data-kind="${e.kind}" data-id="${e.id}" title="Remettre à faire" aria-label="Remettre à faire">↺</button>
@@ -5887,7 +6018,7 @@ function agendaBlock(taskId) {
     const d = new Date(p.start);
     const left = p.series ? upcoming.filter((x) => x.series === p.series).length : 0;
     const label = p.allDay ? planLabel(p) : `${dayWord(ymd(d))} · ${minLabel(d.getHours() * 60 + d.getMinutes())}–${hm(new Date(p.end)).replace(':', 'h')}`;
-    return `<span class="pp-plan"><button type="button" data-action="open-plan" data-id="${p.id}">${label}${left > 1 ? ` · ↻ ${left}` : ''}</button>
+    return `<span class="pp-plan"><button type="button" data-action="open-plan" data-id="${p.id}">${label}${p.note ? ` · ${esc(p.note)}` : ''}${left > 1 ? ` · ↻ ${left}` : ''}</button>
       <button type="button" class="pp-x" data-action="pp-remove" data-id="${p.id}" data-task="${taskId}" aria-label="Retirer ce créneau">${ICON.close}</button></span>`;
   }).join('');
   // Création : on peut aussi écrire quand (« jeudi 14h », « tous les lundis 8h30-10h30 ») ; une carte montre ce qui est compris.
@@ -6334,6 +6465,13 @@ const actions = {
     afterTimer(done, null);
   },
   'open-task'(el) { openTaskSheet(el.dataset.id); },
+  'plan-done'(el) { closeSheet(); validateToday('plan', el.dataset.id); },
+  'add-json'() {
+    pickJson((raw) => {
+      if (!raw || typeof raw !== 'object' || !(Array.isArray(raw.tasks) || Array.isArray(raw.plans))) { toast('Ce fichier ne contient ni tâches ni créneaux'); return; }
+      addFromFile(raw);
+    });
+  },
   'new-task'(el) {
     // Depuis la page d'un projet : la tâche est déjà rangée dans ce projet (et ce sous-projet). Échéance vide par défaut.
     const projectId = el.dataset.project || temp.openProject;

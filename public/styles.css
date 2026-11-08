@@ -1741,3 +1741,16 @@ body.placing #toast { bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom)
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%234f46e5' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 5l7 7-7 7'/%3E%3C/svg%3E");
 }
 @keyframes edge-in { from { opacity: 0; } }
+
+/* Note d'un créneau (contenu de séance, éval…) : sous le titre dans le planning et dans « Ma journée » */
+.pb-note {
+  display: block; font-size: 10px; font-weight: 700; line-height: 1.2; margin: 1px 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: rgba(255, 255, 255, .96);
+}
+.cal.is-day .pb-note { font-size: 12px; }
+.day-note {
+  margin-top: 2px; font-size: 13px; font-weight: 650; line-height: 1.3; color: color-mix(in srgb, var(--c) 72%, var(--text));
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.day-card.done .day-note { opacity: .6; }
+.now-note { font-weight: 750; color: color-mix(in srgb, var(--c) 70%, var(--text)); }
