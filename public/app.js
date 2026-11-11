@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.22.0';
+const VERSION = '2.23.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -1870,6 +1870,15 @@ function openTimerSheet(taskId, { forgot = false, back = '' } = {}) {
   const plan = timerPlan(a);
   const pick = forgot && plan && plan.end < now() ? 'plan' : '0';
   const pomo = pomoOf(t.id);
+  // Chrono oublié (3 h et plus) : « garder 30 min, 1 h… » depuis le début ; commencé un autre jour : le jour d'arrêt se choisit.
+  const long = now() - a.start >= 3 * 3600e3;
+  const startDay = ymd(new Date(a.start));
+  const days = [];
+  for (let d = startDay; d <= ymd(new Date()); d = addDays(d, 1)) days.push(d);
+  const atDay = long ? startDay : days[days.length - 1];
+  const atTime = atDay === startDay && days.length > 1
+    ? Math.min(a.start + 3600e3, dateAt(startDay, DAY_MIN) - 60e3)
+    : Math.max(a.start + 60e3, now() - 30 * 60e3);
   openSheet(`<form class="sheet-body tm-sheet" data-form="timer" data-task="${t.id}" data-back="${esc(back)}" style="--c:${colorOf(t.projectId)}">
     ${head(forgot ? 'Oublié de l’arrêter ?' : 'Chrono en cours')}
     ${forgot ? `<p class="warn">⏰ Le chrono tourne depuis ${fmtDur(now() - a.start)}. Choisis quand tu as vraiment arrêté : le reste ne sera pas compté.</p>` : ''}
@@ -1887,15 +1896,17 @@ function openTimerSheet(taskId, { forgot = false, back = '' } = {}) {
       ${[[0, 'Non'], ...POMOS.map(([f, b]) => [f, `${f} / ${b}`])].map(([v, l]) => `<button type="button" role="radio" aria-checked="${(pomo?.len || 0) === v}" class="${(pomo?.len || 0) === v ? 'on' : ''}" data-action="pomo" data-value="${v}">${l}</button>`).join('')}
     </div>
     <div class="tm-start">
-      <label><span>Commencé à</span><input type="time" name="start_at" value="${hm(new Date(a.start))}" step="60"></label>
+      <label><span>Commencé ${startDay === ymd(new Date()) ? '' : `${dayAt(startDay)} `}à</span><input type="time" name="start_at" value="${hm(new Date(a.start))}" step="60"></label>
       <span class="tm-chips" role="group" aria-label="Commencé plus tôt">${[5, 15, 30].map((m) => `<button type="button" data-action="timer-shift" data-value="${m}" aria-label="Commencé ${m} minutes plus tôt">−${m} min</button>`).join('')}</span>
     </div>
     <div class="tm-stop">
       <h3>Arrêter le chrono</h3>
       <div class="tm-opts" role="radiogroup" aria-label="Heure d’arrêt">
-        ${[[0, 'Maintenant'], [15, 'Il y a 15 min'], [30, 'Il y a 30 min'], [60, 'Il y a 1 h']].map(([m, l]) => `<label data-min="${m}"><input type="radio" name="stop" value="${m}"${String(m) === pick ? ' checked' : ''}><span>${l}</span></label>`).join('')}
-        ${plan ? `<label data-plan="${plan.end}"><input type="radio" name="stop" value="plan"${pick === 'plan' ? ' checked' : ''}><span>Fin du créneau · ${clockLabel(plan.end)}</span></label>` : ''}
-        <label class="tm-at"><input type="radio" name="stop" value="at"><span>À</span><input type="time" name="stop_at" value="${hm(new Date(Math.max(a.start + 60e3, now() - 30 * 60e3)))}" step="60" aria-label="Heure d’arrêt"></label>
+        ${[[0, 'Maintenant'], ...(long ? [] : [[15, 'Il y a 15 min'], [30, 'Il y a 30 min'], [60, 'Il y a 1 h']])].map(([m, l]) => `<label data-min="${m}"><input type="radio" name="stop" value="${m}"${String(m) === pick ? ' checked' : ''}><span>${l}</span></label>`).join('')}
+        ${long ? [30, 60, 90, 120, 180].map((m) => `<label data-keep="${m}"><input type="radio" name="stop" value="k${m}"><span>Garder ${durLabel(m)}</span></label>`).join('') : ''}
+        ${plan ? `<label data-plan="${plan.end}"><input type="radio" name="stop" value="plan"${pick === 'plan' ? ' checked' : ''}><span>Fin du créneau · ${atLabel(plan.end)}</span></label>` : ''}
+        <label class="tm-at"><input type="radio" name="stop" value="at"><span>${days.length > 1 ? 'Le' : 'À'}</span>${days.length > 1
+          ? `<select name="stop_day" aria-label="Jour d’arrêt">${days.map((d) => `<option value="${d}"${d === atDay ? ' selected' : ''}>${esc(dayAt(d))}</option>`).join('')}</select>` : ''}<input type="time" name="stop_at" value="${hm(new Date(atTime))}" step="60" aria-label="Heure d’arrêt"></label>
       </div>
       <div class="tm-line" aria-hidden="true">
         <div class="tm-track"><i class="tm-keep"></i><i class="tm-cut"></i></div>
@@ -1909,18 +1920,29 @@ function openTimerSheet(taskId, { forgot = false, back = '' } = {}) {
   timerSheetRefresh($('form[data-form="timer"]', sheet));
 }
 
+// Un jour en bref (« hier », « lun. 9 nov. ») et une heure avec son jour si ce n'est pas aujourd'hui (« hier 16h35 »).
+const dayAt = (day) => { const n = Math.round((startOfDay(new Date()) - parseYmd(day)) / 864e5); return n === 0 ? 'aujourd’hui' : n === 1 ? 'hier' : dShort(day); };
+const atLabel = (ms) => { const day = ymd(new Date(ms)); return day === ymd(new Date()) ? clockLabel(ms) : `${dayAt(day)} ${clockLabel(ms)}`; };
+// Au centre du cadran, plus court : « hier 13h32 », « lun. 13h32 ».
+const shortAt = (ms) => { const day = ymd(new Date(ms)); const n = dayAt(day); return day === ymd(new Date()) ? clockLabel(ms) : `${n.length > 6 ? fmt(parseYmd(day), { weekday: 'short' }) : n} ${clockLabel(ms)}`; };
+
 // Heure d'arrêt choisie (null si elle n'est pas après le début du chrono).
 function timerStopAt(form, a) {
   const v = form.querySelector('[name="stop"]:checked')?.value || '0';
   const t = now();
-  let end = t - Number(v) * 60e3;
+  let end = t - (Number(v) || 0) * 60e3;
   if (v === 'plan') end = Number(form.querySelector('[data-plan]')?.dataset.plan) || t;
+  else if (v[0] === 'k') end = a.start + Number(v.slice(1)) * 60e3; // « garder 1 h » depuis le début
   else if (v === 'at') {
     const [h, m] = (form.elements.stop_at.value || '').split(':').map(Number);
     if (Number.isNaN(h)) return null;
-    const d = new Date(t);
-    d.setHours(h, m || 0, 0, 0);
-    end = +d > t ? +d - 864e5 : +d; // plus tard qu'il n'est : c'était la veille
+    const day = form.elements.stop_day?.value;
+    if (day) end = dateAt(day, h * 60 + (m || 0)); // jour choisi (chrono commencé un autre jour)
+    else {
+      const d = new Date(t);
+      d.setHours(h, m || 0, 0, 0);
+      end = +d > t ? +d - 864e5 : +d; // plus tard qu'il n'est : c'était la veille
+    }
   }
   return end > a.start ? Math.min(end, t) : null;
 }
@@ -1931,9 +1953,10 @@ function timerSheetRefresh(form) {
   if (!a || !form.isConnected) return;
   const t = now();
   for (const l of form.querySelectorAll('.tm-opts label[data-min]')) l.hidden = Number(l.dataset.min) > 0 && t - Number(l.dataset.min) * 60e3 <= a.start;
+  for (const l of form.querySelectorAll('.tm-opts label[data-keep]')) l.hidden = a.start + Number(l.dataset.keep) * 60e3 >= t;
   if (form.querySelector('[name="stop"]:checked')?.closest('label').hidden) form.querySelector('[name="stop"][value="0"]').checked = true;
   const plan = timerPlan(a, t);
-  if (!pomoOf(a.taskId)) form.querySelector('.tm-since').textContent = `depuis ${clockLabel(a.start)}${plan ? ` · prévu ${fmtDur(plan.end - plan.start)}` : ''}`;
+  if (!pomoOf(a.taskId)) form.querySelector('.tm-since').textContent = `depuis ${shortAt(a.start)}${plan ? ` · prévu ${fmtDur(plan.end - plan.start)}` : ''}`;
   const end = timerStopAt(form, a);
   const keep = end ? end - a.start : 0;
   const cut = end ? t - end : 0;
@@ -1941,15 +1964,19 @@ function timerSheetRefresh(form) {
   form.querySelector('.tm-keep').style.width = pct;
   form.querySelector('.tm-cut').style.left = pct;
   const mid = form.querySelector('.tm-end');
-  mid.textContent = cut >= 60e3 ? clockLabel(end) : '';
+  mid.textContent = cut >= 60e3 ? atLabel(end) : '';
   mid.style.left = pct;
-  form.querySelector('.tm-t0').textContent = clockLabel(a.start);
+  // Près d'un bord (long chrono dont on garde peu) : l'heure d'arrêt passe sur une 2e ligne, calée dans la frise.
+  const share = keep / Math.max(1, t - a.start);
+  mid.style.transform = share < 0.2 ? 'translateX(-4px)' : share > 0.8 ? 'translateX(calc(-100% + 4px))' : '';
+  form.querySelector('.tm-ticks').classList.toggle('two', cut >= 60e3 && (share < 0.35 || share > 0.65));
+  form.querySelector('.tm-t0').textContent = atLabel(a.start);
   form.querySelector('.tm-t1').textContent = clockLabel(t);
   form.querySelector('.tm-sum').innerHTML = !end ? 'Choisis une heure après le début du chrono.'
     : `On garde <b>${fmtDur(keep)}</b>${cut >= 60e3 ? ` · on retire <b class="cut">${fmtDur(cut)}</b>` : ''}`;
   const go = form.querySelector('.tm-go');
   go.disabled = !end;
-  go.querySelector('span').textContent = !end ? 'Arrêter' : cut >= 60e3 ? `Arrêter à ${clockLabel(end)}` : 'Arrêter maintenant';
+  go.querySelector('span').textContent = !end ? 'Arrêter' : cut >= 60e3 ? `Arrêter ${ymd(new Date(end)) === ymd(new Date(t)) ? 'à ' : ''}${atLabel(end)}` : 'Arrêter maintenant';
   form.classList.toggle('cutting', cut >= 60e3);
 }
 
@@ -1979,7 +2006,7 @@ function stopTimerAt(form) {
   if (back) openTaskSheet(back.id); else closeSheet();
   render();
   const cut = now() - end;
-  toast(cut >= 60e3 ? `Arrêté à ${clockLabel(end)} · ${fmtDur(cut)} retirées` : `Chrono arrêté · ${fmtDur(end - a.start)}`, {
+  toast(cut >= 60e3 ? `Arrêté ${ymd(new Date(end)) === ymd(new Date()) ? 'à ' : ''}${atLabel(end)} · ${fmtDur(end - a.start)} gardées` : `Chrono arrêté · ${fmtDur(end - a.start)}`, {
     label: 'Annuler',
     fn: () => {
       state.sessions = state.sessions.filter((x) => x !== s);
@@ -1996,7 +2023,7 @@ sheet.addEventListener('change', (e) => {
   if (!form) return;
   if (e.target.name === 'start_at' && e.target.value) {
     const [h, m] = e.target.value.split(':').map(Number);
-    const d = new Date();
+    const d = new Date(timerOf(form.dataset.task)?.start || now()); // même jour que le début actuel
     d.setHours(h, m, 0, 0);
     timerSetStart(form, +d > now() ? +d - 864e5 : +d);
   }
@@ -2005,7 +2032,7 @@ sheet.addEventListener('change', (e) => {
 sheet.addEventListener('input', (e) => {
   const form = e.target.closest('form[data-form="timer"]');
   if (!form || e.target.name === 'start_at') return;
-  if (e.target.name === 'stop_at') form.querySelector('[name="stop"][value="at"]').checked = true;
+  if (e.target.name === 'stop_at' || e.target.name === 'stop_day') form.querySelector('[name="stop"][value="at"]').checked = true;
   timerSheetRefresh(form);
 });
 

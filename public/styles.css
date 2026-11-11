@@ -1797,3 +1797,12 @@ body.placing #toast { bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom)
 .rep-skip input { flex: none; width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
 .pr-short { display: none; }
 @media (max-width: 599px) { .pr-long { display: none; } .pr-short { display: inline; } }
+
+/* Chrono commencé un autre jour : « Le [jour] [heure] » */
+.tm-at select {
+  height: 38px; margin-left: -1.5px; padding: 0 6px; border-radius: 0; border: 1.5px solid var(--line); background: var(--card);
+  color: var(--text); font: inherit; font-size: 14.5px; font-weight: 700; cursor: pointer;
+}
+.tm-at:has(input:checked) select { border-color: var(--text); }
+.tm-ticks.two { padding-bottom: 18px; }
+.tm-ticks.two .tm-end { top: 18px; }
