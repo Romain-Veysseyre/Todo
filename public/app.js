@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.23.0';
+const VERSION = '2.24.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -382,6 +382,9 @@ function finishTimer(taskId, end = now()) {
   state.timers = state.timers.filter((x) => x !== a);
   if (state.ui.pomo?.taskId === taskId) delete state.ui.pomo;
   stretchPlan(a, end);
+  const auto = state.plans.filter((p) => p.live && p.taskId === taskId);
+  if (end - a.start < MIN_SESSION) state.plans = state.plans.filter((p) => !auto.includes(p)); // lancé par erreur : rien ne reste
+  else for (const p of auto) delete p.live; // un créneau comme les autres : là où on a travaillé
   if (end - a.start < MIN_SESSION) return null;
   const t = getTask(a.taskId);
   const s = {
@@ -394,7 +397,8 @@ function finishTimer(taskId, end = now()) {
 
 // Créneau d'une tâche dont le chrono tourne : le dernier commencé du jour, pas encore validé. Une fois son heure de
 // fin passée, il reste actif tant que le chrono tourne : prolongé s'il déborde, ou recalé sur l'heure réelle si le
-// chrono a été lancé après sa fin (sans qu'on y ait travaillé à son heure). Renvoie { p, start, moved } ou null.
+// chrono a été lancé après sa fin (sans qu'on y ait travaillé à son heure). Le créneau posé au lancement (live) suit
+// le chrono dès le début. Renvoie { p, start, moved } ou null.
 function liveSpan(a, end = now()) {
   const d0 = +startOfDay(new Date(end));
   let p = null;
@@ -402,6 +406,7 @@ function liveSpan(a, end = now()) {
     if (x.taskId !== a.taskId || x.allDay || x.done || x.start < d0 || x.start > end) continue;
     if (!p || x.start > p.start) p = x;
   }
+  if (p?.live) return { p, start: p.start, moved: true };
   if (!p || p.end > end) return null; // aucun créneau commencé aujourd'hui, ou il n'est pas fini
   if (a.start < p.end) return { p, start: p.start, moved: false };
   const worked = state.sessions.some((s) => s.taskId === a.taskId && s.start < p.end && s.end > p.start);
@@ -415,13 +420,27 @@ function stretchPlan(a, end) {
   const step = 5 * 60e3;
   const start = live.moved ? Math.floor(a.start / step) * step : live.p.start;
   live.p.start = start;
-  live.p.end = Math.min(dateAt(ymd(new Date(start)), DAY_MIN), Math.max(Math.round(end / step) * step, live.moved ? start + SNAP * 60e3 : live.p.end));
+  live.p.end = Math.min(dateAt(ymd(new Date(start)), DAY_MIN), Math.max(Math.round(end / step) * step, live.moved ? start + (live.p.live ? step : SNAP * 60e3) : live.p.end));
+}
+
+// Lancer une tâche qui n'a pas de créneau en cours : un créneau est posé à l'heure du lancement (au 5 minutes) et
+// s'allonge en direct dans le planning tant que le chrono tourne. (Un créneau du jour déjà passé, où l'on n'a pas
+// travaillé, se recale plutôt sur l'heure réelle.)
+function livePlan(a) {
+  const t = a.start;
+  const busy = state.plans.some((x) => x.taskId === a.taskId && !x.allDay && !x.done && x.start <= t && x.end > t);
+  if (busy || liveSpan(a, t)) return;
+  const step = 5 * 60e3;
+  const start = Math.floor(t / step) * step;
+  state.plans.push({ id: uid(), taskId: a.taskId, start, end: start + step, live: true });
 }
 
 // Lancer une tâche ne coupe pas les autres chronos : ils tournent en parallèle.
 function startTimer(taskId) {
   if (timerOf(taskId)) return;
-  state.timers.unshift({ taskId, start: now() });
+  const a = { taskId, start: now() };
+  state.timers.unshift(a);
+  livePlan(a);
   const t = getTask(taskId);
   if (t?.done) { t.done = false; t.doneAt = null; }
   save(); render(); buzz(); persistStorage();
@@ -1987,6 +2006,7 @@ function timerSetStart(form, start) {
   start = Math.min(start, now() - 60e3);
   if (start === a.start) return;
   a.start = start;
+  for (const p of state.plans) if (p.live && p.taskId === a.taskId) p.start = Math.floor(start / 3e5) * 3e5;
   save(); render();
   form.elements.start_at.value = hm(new Date(start));
   for (const n of form.querySelectorAll('[data-since]')) n.dataset.since = String(start);
@@ -1999,7 +2019,7 @@ function stopTimerAt(form) {
   if (!a) { closeSheet(); return; }
   const end = timerStopAt(form, a);
   if (!end) return;
-  const plans = state.plans.filter((p) => p.taskId === a.taskId).map((p) => [p, p.start, p.end]);
+  const plans = state.plans.map((p) => ({ ...p }));
   const s = finishTimer(a.taskId, end);
   save(); buzz();
   const back = getTask(form.dataset.back);
@@ -2010,7 +2030,7 @@ function stopTimerAt(form) {
     label: 'Annuler',
     fn: () => {
       state.sessions = state.sessions.filter((x) => x !== s);
-      for (const [p, st, en] of plans) Object.assign(p, { start: st, end: en });
+      state.plans = plans;
       delete state.deleted[timerKey(a)];
       state.timers.unshift(a);
       save(); render();
@@ -2948,7 +2968,7 @@ function viewPlan() {
         const when = !it.live ? `${shortLabel(it.s0)}–${shortLabel(it.e)}`
           : it.live.moved ? `${shortLabel(it.s0)} · en cours` : `${shortLabel(it.s0)}–${shortLabel(it.e0)} <em class="pb-over">+${fmtDur((nowMin - it.e0) * 60e3)}</em>`;
         const moving = drag.active?.kind === 'move' && !drag.active.copy && drag.active.plan?.id === it.p.id;
-        return `<div class="plan-block${done ? ' done' : ''}${running ? ' running' : ''}${moving ? ' dragging' : ''}${grow}" data-action="open-plan" data-id="${it.p.id}" style="${boxStyle(it)};--c:${colorOf(t.projectId)}${split}">
+        return `<div class="plan-block${done ? ' done' : ''}${running ? ' running' : ''}${moving ? ' dragging' : ''}${it.p.live ? ' is-live' : ''}${grow}" data-action="open-plan" data-id="${it.p.id}" style="${boxStyle(it)};--c:${colorOf(t.projectId)}${split}">
           ${done ? `<i class="pb-done" aria-hidden="true">${ICON.check}</i>` : ''}<b>${t.starred ? '★ ' : ''}${esc(t.title)}</b>${it.p.note ? `<small class="pb-note">${esc(it.p.note)}</small>` : ''}<span>${done ? 'Fait · ' : it.p.series ? '↻ ' : ''}${when}${spent ? `<em class="pb-spent"> · ⏱ ${fmtDur(spent)}</em>` : ''}</span>
           <i class="plan-resize" aria-hidden="true"></i></div>`;
       }).join('')}
@@ -5264,13 +5284,13 @@ function todayCard({ t, p, dur, done, totals, note = '', live = '' }) {
         <div class="day-meta">
           ${stepsPill(t)}
           ${t.projectId ? `<span class="tag"><i></i>${esc(pathLabel(t.projectId, t.subprojectId))}</span>` : ''}
-          ${p ? `<span>${note ? esc(note) : `${p.series ? '↻ ' : ''}${fmtDur(dur * 60e3)}`}${live ? ` <em class="over">${esc(live)}</em>` : ''}</span>` : ''}
+          ${p ? `<span>${note ? esc(note) : p.live ? '' : `${p.series ? '↻ ' : ''}${fmtDur(dur * 60e3)}`}${live ? `${p.live ? '' : ' '}<em class="over">${esc(live)}</em>` : ''}</span>` : ''}
           ${late && late.cls === 'late' ? `<span class="due late">${esc(late.text)}</span>` : ''}
           ${spent || running ? `<span class="spent">${ICON.clock}${liveDur(spent, sinceOf(t.id))}</span>` : ''}
         </div>
       </div>
       ${done ? '' : `${p ? '' : `<button type="button" class="mini-btn" data-action="today-fit" data-id="${t.id}" title="Caler dans le prochain créneau libre" aria-label="Caler dans le prochain créneau libre">${ICON.cal}</button>`}
-      ${note ? '' : `<button type="button" class="mini-btn later-btn" data-action="today-later" data-kind="${kind}" data-id="${id}" title="Reporter à demain" aria-label="Reporter à demain">↷</button>`}
+      ${note || p?.live ? '' : `<button type="button" class="mini-btn later-btn" data-action="today-later" data-kind="${kind}" data-id="${id}" title="Reporter à demain" aria-label="Reporter à demain">↷</button>`}
       <button type="button" class="play" data-action="toggle-timer" data-id="${t.id}" aria-label="${running ? 'Arrêter' : 'Lancer le chrono'}">${running ? ICON.stop : ICON.play}</button>`}
     </div>
   </div>`;
@@ -6584,8 +6604,10 @@ const actions = {
     if (!a) return;
     state.timers = state.timers.filter((x) => x !== a);
     if (state.ui.pomo?.taskId === a.taskId) delete state.ui.pomo;
+    const auto = state.plans.filter((p) => p.live && p.taskId === a.taskId);
+    state.plans = state.plans.filter((p) => !auto.includes(p));
     save(); closeSheet(); render(); buzz();
-    toast('Chrono annulé · rien n’a été compté', { label: 'Annuler', fn: () => { delete state.deleted[timerKey(a)]; state.timers.unshift(a); save(); render(); } });
+    toast('Chrono annulé · rien n’a été compté', { label: 'Annuler', fn: () => { delete state.deleted[timerKey(a)]; state.timers.unshift(a); state.plans.push(...auto); save(); render(); } });
   },
   'step-toggle'(el) {
     const form = el.closest('form');

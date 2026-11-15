@@ -1806,3 +1806,7 @@ body.placing #toast { bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom)
 .tm-at:has(input:checked) select { border-color: var(--text); }
 .tm-ticks.two { padding-bottom: 18px; }
 .tm-ticks.two .tm-end { top: 18px; }
+
+/* Tâche lancée sans créneau : son créneau suit le chrono en direct (plein, rayures en mouvement, sans ligne de fin prévue) */
+.plan-block.grow.is-live { background: var(--c); }
+.plan-block.grow.is-live::after { display: none; }
