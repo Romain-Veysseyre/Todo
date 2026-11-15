@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.24.0';
+const VERSION = '2.25.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -62,6 +62,8 @@ function blankState() {
     sessions: [],    // { id, taskId, title, projectId, subprojectId, start, end }
     plans: [],       // créneaux du planning : { id, taskId, start, end }
     events: [],      // événements fixes : { id, title, color, start, end (minutes), days ('12345' = lun→ven) ou date }
+    goals: [],       // missions de la semaine : { id, week (lundi), kind, icon, title, note, targets: { n, km, dplus, min }, order }
+    logs: [],        // séances notées : { id, kind, goalId, taskId, planId, sessionId, day, at, min, km, dplus }
     // (chaque élément a aussi updatedAt, ajouté par stamp() pour la synchro)
     timers: [],      // chronos en cours : { taskId, start } (plusieurs en parallèle possible, un par tâche)
     deleted: {},     // id supprimé (ou "timer:…" pour un chrono arrêté) → date, pour la synchro
@@ -96,7 +98,7 @@ function seedState(p) {
 function normalize(data) {
   if (!data || typeof data !== 'object' || !Array.isArray(data.tasks)) throw new Error('format');
   const s = blankState();
-  for (const k of ['projects', 'subprojects', 'tasks', 'sessions', 'plans', 'events']) if (Array.isArray(data[k])) s[k] = data[k];
+  for (const k of SYNCED) if (Array.isArray(data[k])) s[k] = data[k];
   s.timers = timerList(data);
   if (data.deleted && typeof data.deleted === 'object') s.deleted = { ...data.deleted };
   Object.assign(s.ui, data.ui || {});
@@ -126,7 +128,7 @@ const temp = { statsOpen: new Set(), installEvt: null, showCode: false, keys: nu
 
 /* ----- Suivi des modifications (pour la synchro) ----- */
 
-const SYNCED = ['projects', 'subprojects', 'tasks', 'sessions', 'plans', 'events'];
+const SYNCED = ['projects', 'subprojects', 'tasks', 'sessions', 'plans', 'events', 'goals', 'logs'];
 const timerKey = (a) => (a ? `timer:${a.taskId}@${a.start}` : '');
 // Chronos en cours d'un document (ancien format : un seul chrono, champ « active »).
 function timerList(d) {
@@ -150,7 +152,7 @@ let shadow; // contenu de chaque élément au dernier enregistrement, pour repé
 
 // Retour en arrière (Ctrl / ⌘ + Z) : l'état des données avant chaque modification (les enregistrements rapprochés
 // d'un même geste ne font qu'une étape). Rétablir : Ctrl / ⌘ + Maj + Z, ou Ctrl + Y.
-const UNDO_KEYS = ['projects', 'subprojects', 'tasks', 'sessions', 'plans', 'events', 'timers'];
+const UNDO_KEYS = ['projects', 'subprojects', 'tasks', 'sessions', 'plans', 'events', 'goals', 'logs', 'timers'];
 const undo = { past: [], future: [], last: null, at: 0, who: null, busy: false };
 const dataSnap = () => JSON.stringify(UNDO_KEYS.map((k) => state[k]));
 
@@ -572,6 +574,9 @@ function render() {
 function barHeight() {
   const bar = $('.plan-bar');
   if (bar) document.documentElement.style.setProperty('--bar-h', `${bar.offsetHeight}px`);
+  // Téléphone : le bandeau « Missions » se pose au-dessus de la liste « À planifier » réduite.
+  const side = $('.side');
+  if (side && !sideDocked() && !side.classList.contains('open')) document.documentElement.style.setProperty('--dock-h', `${side.offsetHeight}px`);
 }
 window.addEventListener('resize', barHeight);
 
@@ -2065,6 +2070,8 @@ sheet.addEventListener('submit', (e) => {
   } else if (form.dataset.form === 'project') saveProject(form);
   else if (form.dataset.form === 'sub') saveSub(form);
   else if (form.dataset.form === 'timer') stopTimerAt(form);
+  else if (form.dataset.form === 'goal') saveGoal(form);
+  else if (form.dataset.form === 'log') saveLog(form);
   else if (form.dataset.form === 'session') saveSession(form);
   else if (form.dataset.form === 'clean') {
     const ids = new Set(new FormData(form).getAll('drop'));
@@ -3110,6 +3117,7 @@ function viewPlan() {
         <div class="cal-hours">${[...Array(17)].map((_, i) => `<span style="top:${posPct((i + 7) * 60)}%">${i + 7}h</span>`).join('')}</div>
         <div class="cal-cols" style="--n:${shown.length}">${cols}</div>
       </div>
+      ${missionsBand(weekOf(ymd(week[0])))}
     </div>
     ${side}
     </div>
@@ -3554,7 +3562,7 @@ function swipeShift(dx) {
 
 document.addEventListener('touchstart', (e) => {
   if (state.ui.tab !== 'plan' || !profile || drag.active) return;
-  const onCal = !!e.target.closest('.cal');
+  const onCal = !!e.target.closest('.cal') && !e.target.closest('.missions');
   if (e.touches.length === 2 && (onCal || gest.mode)) {
     const [a, b] = e.touches;
     cancelPending();
@@ -3617,7 +3625,7 @@ for (const ev of ['gesturestart', 'gesturechange']) {
 // Ordinateur : pincer sur le pavé tactile (ou Ctrl + molette) zoome la grille ;
 // glisser à deux doigts sur le côté change de semaine.
 document.addEventListener('wheel', (e) => {
-  if (state.ui.tab !== 'plan' || !profile || !e.target.closest('.cal')) return;
+  if (state.ui.tab !== 'plan' || !profile || !e.target.closest('.cal') || e.target.closest('.missions')) return;
   if (e.ctrlKey) {
     e.preventDefault();
     setHour(hourPx() * Math.exp(-e.deltaY * 0.01), e.clientY);
@@ -3654,7 +3662,8 @@ window.addEventListener('pointerup', (e) => {
 function gridBottom() {
   const rm = $('.drop-remove');
   const r = rm && getComputedStyle(rm).display !== 'none' ? rm.getBoundingClientRect() : $('.tabbar').getBoundingClientRect();
-  return r.top;
+  const ms = $('.missions')?.getBoundingClientRect(); // le bandeau « Missions » cache le bas de la grille
+  return ms?.height && ms.top < r.top ? ms.top : r.top;
 }
 
 /* ----- Glisser-déposer (souris : tout de suite ; tactile : appui long puis glisser) ----- */
@@ -3769,6 +3778,7 @@ function dropTarget(x, y) {
     return { col: a.col, day: a.day, start, end };
   }
   const inside = (el) => { const r = el?.getBoundingClientRect(); return r && r.width && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom; };
+  if (a.kind === 'new' && inside($('.missions'))) return { mission: true }; // bandeau « Missions » : tâche de la semaine
   if (a.kind === 'new') { // sur un jour de la ligne « Échéances » : l'échéance passe à ce jour
     const cell = $$('.due-cell').find(inside);
     if (cell) return { dueDay: cell.dataset.value, cell };
@@ -3802,6 +3812,9 @@ function moveDrag(x, y) {
   const target = dropTarget(x, y);
   a.target = target;
   document.body.classList.toggle('drop-hover', !!target?.tray && a.kind === 'move');
+  const band = $('.missions');
+  band?.classList.toggle('armed', a.kind === 'new');
+  band?.classList.toggle('drop', !!target?.mission);
   for (const c of $$('.due-cell.drop')) if (c !== target?.cell) c.classList.remove('drop');
   target?.cell?.classList.add('drop');
   let pv = $('.plan-preview');
@@ -3865,6 +3878,7 @@ function endDrag(drop) {
   a.ghost?.remove();
   if (a.kind !== 'range') $('.plan-preview')?.remove();
   for (const c of $$('.due-cell.drop')) c.classList.remove('drop');
+  $('.missions')?.classList.remove('armed', 'drop');
   document.body.classList.remove('is-dragging', 'drag-move', 'drop-hover', 'ranging', 'drag-copy');
   temp.dragEnd = now();
   temp.suppressClick = true; // le relâchement ne doit pas compter comme un « toucher »
@@ -3875,6 +3889,7 @@ function endDrag(drop) {
     if (tg?.col) { buzz(); openSlotSheet(tg.day, tg.start, undefined, tg.end - tg.start); } else $('.plan-preview')?.remove();
     return;
   }
+  if (a.kind === 'new' && tg?.mission) { setWeek(a.id, $('.missions')?.dataset.week); return; }
   if (a.kind === 'new' && tg?.dueDay) { moveDeadline(a.id, tg.dueDay); return; }
   if (a.kind === 'new' && tg?.col) { createPlan(a.id, tg.day, tg.start, a.dur); return; }
   if (a.kind === 'move' && tg?.tray) {
@@ -4233,6 +4248,375 @@ setInterval(() => {
 }, 60e3);
 
 new ResizeObserver(() => document.documentElement.style.setProperty('--top-h', `${$('.top').offsetHeight}px`)).observe($('.top'));
+
+/* ---------- Missions de la semaine : objectifs chiffrés et tâches à accomplir ---------- */
+
+// Sports et habitudes : mots qui font reconnaître une tâche (dans son nom, son projet ou son sous-projet) et ce que
+// le questionnaire demande à sa validation, en plus du temps. km : distance proposée d'office (vélo : travail-maison).
+const GOAL_KINDS = {
+  run: { icon: '🏃', name: 'Course', words: ['course', 'courir', 'run', 'footing', 'running', 'jogging', 'trail', 'fractionné'], fields: ['km', 'dplus'] },
+  bike: { icon: '🚴', name: 'Vélo', words: ['vélo', 'bike', 'vtt', 'vélotaf', 'cyclisme'], fields: ['km', 'dplus'], km: 9.5 },
+  swim: { icon: '🏊', name: 'Natation', words: ['natation', 'piscine', 'nage', 'nager', 'swim'], fields: ['km'] },
+  gym: { icon: '🏋️', name: 'Muscu', words: ['muscu', 'musculation', 'gym', 'renfo', 'renforcement'], fields: [] },
+  intro: { icon: '🧠', name: 'Introspection', words: ['introspection', 'write', 'smart reading', 'writte', 'writing', 'journaling'], fields: [] },
+  stretch: { icon: '🤸', name: 'Étirements', words: ['étirement', 'étirements', 'étirer', 'stretching', 'stretch', 'souplesse'], fields: [] },
+  other: { icon: '🎯', name: 'Autre', words: [], fields: [] },
+};
+const GOAL_KEYS = [['n', 'Séances'], ['km', 'Distance'], ['dplus', 'D+'], ['min', 'Temps']];
+// Les missions de Romain, proposées d'un toucher la première fois.
+const GOAL_PRESET = [
+  { kind: 'run', title: 'Course', targets: { n: 5, km: 25, dplus: 500 } },
+  { kind: 'gym', title: 'Muscu', targets: { n: 5 } },
+  { kind: 'bike', title: 'Vélo', targets: { km: 100 } },
+  { kind: 'swim', title: 'Natation', targets: { n: 2, km: 3 } },
+  { kind: 'intro', title: 'Introspection', note: 'Write ou smart reading', targets: { n: 5 } },
+  { kind: 'stretch', title: 'S’étirer', targets: { n: 5 } },
+];
+
+const weekOf = (day) => addDays(day, 1 - Number(isoDay(day))); // le lundi de la semaine
+const weekGoals = (week) => state.goals.filter((g) => g.week === week).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+const weekTasks = (week) => state.tasks.filter((t) => t.week === week).sort((a, b) => a.done - b.done || a.createdAt - b.createdAt);
+const fmtN = (x, d = 1) => Number(x || 0).toLocaleString('fr-FR', { maximumFractionDigits: d });
+const readN = (v) => { const n = parseFloat(String(v ?? '').replace(',', '.').replace(/\s/g, '')); return Number.isFinite(n) && n > 0 ? n : 0; };
+const paceLabel = (m) => { const sec = Math.round(m * 60); return `${Math.floor(sec / 60)}’${pad(sec % 60)}”`; };
+// « 2/5 », « 38/100 km », « 230/500 m D+ », « 1h30/5h »
+function goalPair(k, got, target) {
+  if (k === 'min') return `${fmtDur(got * 60e3)}/${fmtDur(target * 60e3)}`;
+  const d = k === 'km' ? 1 : 0;
+  return `${fmtN(got, d)}/${fmtN(target, d)}${k === 'km' ? ' km' : k === 'dplus' ? ' m D+' : ''}`;
+}
+
+// Séances de la semaine d'une mission (toutes celles de son sport, ou les siennes pour « Autre ») et avancement.
+function goalProgress(g) {
+  const end = addDays(g.week, 6);
+  const logs = state.logs.filter((l) => l.day >= g.week && l.day <= end && (g.kind === 'other' ? l.goalId === g.id : l.kind === g.kind));
+  const got = { n: logs.length, km: 0, dplus: 0, min: 0 };
+  for (const l of logs) { got.km += l.km || 0; got.dplus += l.dplus || 0; got.min += l.min || 0; }
+  const keys = GOAL_KEYS.filter(([k]) => g.targets?.[k] > 0);
+  const ratio = keys.length ? keys.reduce((n, [k]) => n + Math.min(1, got[k] / g.targets[k]), 0) / keys.length : 0;
+  return { got, keys, ratio, logs };
+}
+const goalSummary = (g, p = goalProgress(g)) => p.keys.map(([k]) => goalPair(k, p.got[k], g.targets[k])).join(' · ');
+
+// Mission de la semaine pour laquelle une tâche compte (d'après son nom, son projet, son sous-projet), ou null.
+function goalFor(t, day = ymd(new Date())) {
+  const goals = t ? weekGoals(weekOf(day)) : [];
+  if (!goals.length) return null;
+  const text = ` ${plain(`${t.title} ${getProject(t.projectId)?.name || ''} ${getSub(t.subprojectId)?.name || ''}`)} `;
+  const words = (g) => [...(GOAL_KINDS[g.kind]?.words || []).map(plain), ...plainWords(g.title).filter((w) => w.length > 3)];
+  return goals.find((g) => words(g).some((w) => text.includes(` ${w} `))) || null;
+}
+
+// Retire des séances (validation annulée…) et le temps qu'elles avaient ajouté au Bilan.
+function dropLogs(pred) {
+  const gone = state.logs.filter(pred);
+  if (!gone.length) return;
+  const ses = new Set(gone.map((l) => l.sessionId).filter(Boolean));
+  state.logs = state.logs.filter((l) => !gone.includes(l));
+  state.sessions = state.sessions.filter((x) => !ses.has(x.id));
+}
+
+const dayTracked = (taskId, day) => state.sessions.reduce((n, x) => n + (x.taskId === taskId ? overlap(x, dateAt(day, 0), dateAt(day, DAY_MIN)) : 0), 0);
+
+// Tâche ou créneau validé qui compte pour une mission de la semaine : le questionnaire de la séance s'ouvre
+// (temps prérempli d'après le chrono, sinon le créneau). Une séance déjà notée ne l'est pas deux fois.
+function goalAsk(t, p = null) {
+  const day = ymd(new Date(p ? p.start : now()));
+  const g = goalFor(t, day);
+  if (!g || (sheet.open && !sheet.classList.contains('closing'))) return;
+  if (state.logs.some((l) => (p ? l.planId === p.id : l.taskId === t.id && !l.planId && l.day === day))) return;
+  const tracked = dayTracked(t.id, day);
+  openLogSheet({ goalId: g.id, taskId: t.id, planId: p?.id || null, day, min: (tracked || (p ? p.end - p.start : 0)) / 60e3, tracked: tracked > 0 });
+}
+
+// Bandeau en bas du planning : chaque mission avec son avancement, et les tâches de la semaine.
+function missionsBand(week) {
+  const goals = weekGoals(week);
+  const tasks = weekTasks(week);
+  const chip = (cls, r, body, title = '') => `<span class="ms-chip${cls}${r >= 1 ? ' full' : ''}" style="--r:${(Math.min(1, r) * 100).toFixed(1)}%"${title ? ` title="${esc(title)}"` : ''}>${body}${r >= 1 ? ' ✓' : ''}<i></i></span>`;
+  const chips = goals.map((g) => {
+    const p = goalProgress(g);
+    const [k] = p.keys[0] || ['n'];
+    return chip('', p.ratio, `<span class="ms-ic">${g.icon}</span>${esc(goalPair(k, p.got[k], g.targets?.[k] || 0))}`, `${g.title} : ${goalSummary(g, p)}`);
+  });
+  const doneN = tasks.filter((t) => t.done).length;
+  if (tasks.length) chips.push(chip(' tasks', doneN / tasks.length, `<span class="ms-ic">☑️</span>${doneN}/${tasks.length} tâche${tasks.length > 1 ? 's' : ''}`));
+  return `<div class="missions" data-action="missions" data-week="${week}" role="button" tabindex="0" aria-label="Missions de la semaine">
+    <span class="ms-lab">🎯<b>Missions</b></span>
+    <div class="ms-chips">${chips.join('') || '<span class="ms-empty">Fixe tes objectifs et les tâches de la semaine</span>'}</div>
+    <span class="ms-go" aria-hidden="true">${ICON.right}</span>
+    <span class="ms-drop" aria-hidden="true">🎯 Lâche ici : à accomplir cette semaine</span>
+  </div>`;
+}
+
+// Une tâche à accomplir cette semaine (glissée sur le bandeau, ou posée dessus après l'avoir touchée).
+function setWeek(id, week) {
+  const t = getTask(id);
+  if (!t || !week) return;
+  const old = t.week;
+  t.week = week;
+  save(); render(); buzz();
+  toast(`« ${t.title} » : à accomplir cette semaine`, { label: 'Annuler', fn: () => { if (old) t.week = old; else delete t.week; save(); render(); } });
+}
+
+function addGoals(week, list) {
+  let order = weekGoals(week).length;
+  for (const x of list) {
+    state.goals.push({ id: uid(), week, kind: x.kind, icon: GOAL_KINDS[x.kind]?.icon || '🎯', title: x.title, ...(x.note ? { note: x.note } : {}), targets: { ...x.targets }, order: order++ });
+  }
+  save(); render(); openMissionsSheet(week); buzz();
+}
+
+const logLine = (l) => {
+  const bits = [cap(fmt(parseYmd(l.day), { weekday: 'short' }).replace('.', ''))];
+  if (l.km) bits.push(`${fmtN(l.km, 2)} km`);
+  if (l.dplus) bits.push(`${fmtN(l.dplus, 0)} m D+`);
+  if (l.min) bits.push(fmtDur(Math.round(l.min * 60) * 1e3));
+  if (l.min && l.km && l.kind === 'run') bits.push(`${paceLabel(l.min / l.km)}/km`);
+  if (l.min && l.km && l.kind === 'bike') bits.push(`${fmtN(l.km / (l.min / 60), 1)} km/h`);
+  if (l.min && l.km && l.kind === 'swim') bits.push(`${paceLabel(l.min / (l.km * 10))}/100 m`);
+  return bits.join(' · ');
+};
+
+// Fiche des missions d'une semaine : avancement, séances notées, tâches de la semaine.
+function openMissionsSheet(week) {
+  temp.msWeek = week;
+  const goals = weekGoals(week);
+  const tasks = weekTasks(week);
+  const prev = weekGoals(addDays(week, -7));
+  const range = `${fmt(parseYmd(week), { day: 'numeric', month: 'short' })} – ${fmt(parseYmd(addDays(week, 6)), { day: 'numeric', month: 'short' })}`;
+  const card = (g) => {
+    const p = goalProgress(g);
+    return `<div class="ms-card${p.ratio >= 1 ? ' full' : ''}">
+      <div class="ms-card-head">
+        <button type="button" class="ms-title" data-action="goal-edit" data-id="${g.id}"><span class="ms-ic">${g.icon}</span><span>${esc(g.title)}${p.ratio >= 1 ? ' ✓' : ''}${g.note ? `<small>${esc(g.note)}</small>` : ''}</span></button>
+        <button type="button" class="btn small ms-add" data-action="log-new" data-id="${g.id}">${ICON.plus} Séance</button>
+      </div>
+      ${p.keys.map(([k, label]) => `<div class="ms-row"><span>${label}</span><span class="ms-bar"><i style="width:${(Math.min(1, p.got[k] / g.targets[k]) * 100).toFixed(1)}%"></i></span><b>${esc(goalPair(k, p.got[k], g.targets[k]))}</b></div>`).join('')}
+      ${p.logs.length ? `<div class="ms-logs">${p.logs.sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : b.at - a.at)).map((l) => `<button type="button" class="ms-log" data-action="log-edit" data-id="${l.id}">${esc(logLine(l))}</button>`).join('')}</div>` : ''}
+    </div>`;
+  };
+  const doneN = tasks.filter((t) => t.done).length;
+  const empty = `<div class="ms-intro">
+      <p>Des objectifs chiffrés (séances, km, D+…) qui avancent à chaque séance validée dans le planning.</p>
+      ${prev.length ? `<button type="button" class="btn primary wide" data-action="goal-copy">Reprendre celles de la semaine dernière · ${prev.length}</button>`
+        : profile === 'romain' ? `<button type="button" class="btn primary wide ms-preset" data-action="goal-preset"><span>Commencer avec mes missions</span><small>${GOAL_PRESET.map((x) => `${GOAL_KINDS[x.kind].icon} ${x.title} ${GOAL_KEYS.filter(([k]) => x.targets[k]).map(([k]) => (k === 'n' ? `${x.targets.n}×` : k === 'km' ? `${fmtN(x.targets.km)} km` : k === 'dplus' ? `${x.targets.dplus} D+` : fmtDur(x.targets.min * 60e3))).join(', ')}`).join(' · ')}</small></button>` : ''}
+    </div>`;
+  openSheet(`<div class="sheet-body ms-sheet">
+    ${head(`Missions · ${range}`)}
+    ${goals.length ? `<div class="ms-cards">${goals.map(card).join('')}</div>` : empty}
+    <button type="button" class="btn ghost wide" data-action="goal-new">${ICON.plus} Ajouter une mission</button>
+    <div class="section-title"><span>À accomplir cette semaine${tasks.length ? ` · ${doneN}/${tasks.length}` : ''}</span></div>
+    ${tasks.length ? `<div class="ms-tasks">${tasks.map((t) => `<div class="ms-task${t.done ? ' done' : ''}" style="--c:${colorOf(t.projectId)}">
+        <button type="button" class="check" data-action="toggle-done" data-id="${t.id}" aria-label="${t.done ? 'Rouvrir' : 'Marquer comme faite'}">${ICON.check}</button>
+        <button type="button" class="ms-task-name" data-action="open-task" data-id="${t.id}">${esc(t.title)}<small>${esc(pathLabel(t.projectId, t.subprojectId))}</small></button>
+        <button type="button" class="icon-btn ms-x" data-action="ms-remove" data-id="${t.id}" aria-label="Retirer des missions">${ICON.close}</button>
+      </div>`).join('')}</div>`
+      : '<p class="hint">Glisse une tâche de « À planifier » sur le bandeau du bas, ou ajoute-la ici.</p>'}
+    <button type="button" class="btn ghost wide" data-action="ms-pick">${ICON.plus} Ajouter une tâche</button>
+  </div>`);
+}
+
+// Choisir des tâches à accomplir cette semaine.
+function openMissionPick(week) {
+  const list = state.tasks.filter((t) => !t.done && t.week !== week)
+    .sort((a, b) => !!b.starred - !!a.starred || cmpDeadline(a, b) || b.createdAt - a.createdAt);
+  openSheet(`<div class="sheet-body ms-pick">
+    ${head('Ajouter à la semaine')}
+    <label class="field"><span class="sr-only">Chercher</span><input class="ms-search" placeholder="Chercher une tâche…" autocomplete="off"></label>
+    <div class="ms-pick-list">${list.map((t) => `<button type="button" class="ms-pick-row" data-action="ms-add-task" data-id="${t.id}" data-week="${week}" data-q="${esc(plain(`${t.title} ${pathLabel(t.projectId, t.subprojectId)}`))}" style="--c:${colorOf(t.projectId)}">
+        <i></i><span>${t.starred ? '★ ' : ''}${esc(t.title)}<small>${esc(pathLabel(t.projectId, t.subprojectId))}</small></span>${ICON.plus}</button>`).join('') || '<p class="hint">Aucune tâche à faire.</p>'}</div>
+    <button type="button" class="btn ghost wide" data-action="missions" data-week="${week}">Retour aux missions</button>
+  </div>`);
+}
+
+// Fiche d'une mission : sport (ou « Autre »), nom, objectifs de la semaine.
+function openGoalSheet(id, week = temp.msWeek) {
+  const g = state.goals.find((x) => x.id === id) || { kind: 'run', title: GOAL_KINDS.run.name, targets: {}, week };
+  const isNew = !state.goals.includes(g);
+  const v = (x, d = 1) => (x ? fmtN(x, d).replace(/\s/g, '') : '');
+  openSheet(`<form class="sheet-body goal-sheet" data-form="goal" data-id="${isNew ? '' : g.id}" data-week="${g.week}" autocomplete="off">
+    ${head(isNew ? 'Nouvelle mission' : 'Mission de la semaine')}
+    <div class="goal-kinds" role="radiogroup" aria-label="Sport ou habitude">${Object.entries(GOAL_KINDS).map(([k, x]) => `<label><input type="radio" name="kind" value="${k}"${k === g.kind ? ' checked' : ''}><span>${x.icon} ${x.name}</span></label>`).join('')}</div>
+    <div class="row2">
+      <label class="field"><span>Nom</span><input name="title" value="${esc(g.title)}" maxlength="60" required></label>
+      <label class="field"><span>Précision <small>(facultatif)</small></span><input name="note" value="${esc(g.note || '')}" placeholder="Ex. write ou smart reading" maxlength="80"></label>
+    </div>
+    <div class="goal-targets">
+      <label class="field"><span>Séances</span><input name="t_n" inputmode="numeric" value="${v(g.targets.n, 0)}" placeholder="—"></label>
+      <label class="field gt-km"><span>Distance (km)</span><input name="t_km" inputmode="decimal" value="${v(g.targets.km)}" placeholder="—"></label>
+      <label class="field gt-dplus"><span>D+ (m)</span><input name="t_dplus" inputmode="numeric" value="${v(g.targets.dplus, 0)}" placeholder="—"></label>
+      <label class="field"><span>Temps (h)</span><input name="t_h" inputmode="decimal" value="${v(g.targets.min ? g.targets.min / 60 : 0)}" placeholder="—"></label>
+    </div>
+    <p class="hint goal-hint"></p>
+    <button class="btn primary wide">${isNew ? 'Ajouter la mission' : 'Enregistrer'}</button>
+    ${isNew ? '' : `<button type="button" class="btn ghost danger wide" data-action="goal-del" data-id="${g.id}">${ICON.trash} Supprimer la mission</button>`}
+  </form>`);
+  goalHint($('form[data-form="goal"]', sheet));
+}
+
+// Sous les objectifs : quelles tâches comptent, et ce qu'on notera à leur validation.
+function goalHint(form) {
+  const kind = form.querySelector('[name="kind"]:checked')?.value || 'other';
+  const K = GOAL_KINDS[kind];
+  const ask = ['le temps', ...(K.fields.includes('km') ? ['les km'] : []), ...(K.fields.includes('dplus') ? ['le D+'] : [])];
+  const own = K.words.map(plain);
+  const words = [...K.words.slice(0, 5), ...plainWords(form.elements.title.value).filter((w) => w.length > 3 && !own.includes(w))].map((w) => `« ${w} »`);
+  form.querySelector('.goal-hint').textContent = `${words.length ? `Compte pour elle toute tâche dont le nom, le projet ou le sous-projet contient ${words.slice(0, 6).join(', ')}` : 'Note tes séances avec « + Séance »'} : à sa validation, l’app te demande ${ask.join(', ').replace(/, ([^,]*)$/, ' et $1')}${K.km ? ` (${fmtN(K.km)} km proposés d’office)` : ''}.`;
+}
+
+function saveGoal(form) {
+  const f = form.elements;
+  const kind = form.querySelector('[name="kind"]:checked')?.value || 'other';
+  const K = GOAL_KINDS[kind];
+  const targets = {};
+  const n = Math.round(readN(f.t_n.value));
+  const km = K.fields.includes('km') ? readN(f.t_km.value) : 0;
+  const dplus = K.fields.includes('dplus') ? Math.round(readN(f.t_dplus.value)) : 0;
+  const min = Math.round(readN(f.t_h.value) * 60);
+  if (n) targets.n = n;
+  if (km) targets.km = km;
+  if (dplus) targets.dplus = dplus;
+  if (min) targets.min = min;
+  if (!Object.keys(targets).length) {
+    const h = form.querySelector('.goal-hint');
+    h.textContent = 'Donne au moins un objectif : un nombre de séances, des km, du D+ ou un temps.';
+    h.classList.remove('shake'); void h.offsetWidth; h.classList.add('shake');
+    return;
+  }
+  let g = state.goals.find((x) => x.id === form.dataset.id);
+  if (!g) { g = { id: uid(), week: form.dataset.week, order: weekGoals(form.dataset.week).length }; state.goals.push(g); }
+  Object.assign(g, { kind, icon: K.icon, title: f.title.value.trim() || K.name, targets });
+  if (f.note.value.trim()) g.note = f.note.value.trim(); else delete g.note;
+  save(); render(); openMissionsSheet(g.week);
+}
+
+// Temps écrit : « 45 » (minutes), « 1h05 », « 52:30 » (min:s), « 1:05:30 », « 52'30 ».
+function parseMin(text) {
+  const t = String(text || '').trim().toLowerCase().replace(',', '.');
+  if (!t) return 0;
+  let m = t.match(/^(\d+(?:\.\d+)?)\s*h\s*(\d{1,2})?\s*(?:min|mn|m)?$/);
+  if (m) return Number(m[1]) * 60 + Number(m[2] || 0);
+  if ((m = t.match(/^(\d+):(\d{1,2}):(\d{1,2})$/))) return Number(m[1]) * 60 + Number(m[2]) + Number(m[3]) / 60;
+  if ((m = t.match(/^(\d+):(\d{1,2})$/))) return Number(m[1]) >= 10 ? Number(m[1]) + Number(m[2]) / 60 : Number(m[1]) * 60 + Number(m[2]);
+  if ((m = t.match(/^(\d+(?:\.\d+)?)\s*(?:min|mn|m|'|’)?\s*(?:(\d{1,2})\s*(?:s|"|”)?)?$/))) return Number(m[1]) + Number(m[2] || 0) / 60;
+  return null;
+}
+const minText = (m) => (!m ? '' : m >= 60 ? `${Math.floor(m / 60)}h${pad(Math.round(m % 60))}` : String(Math.round(m * 10) / 10).replace('.', ','));
+
+// Questionnaire d'une séance : temps (et allure ou vitesse), km, D+ selon le sport ; ce que ça donne pour la mission.
+function openLogSheet({ goalId = '', logId = '', taskId = null, planId = null, day = ymd(new Date()), min = 0, tracked = false, back = '' } = {}) {
+  const l = logId ? state.logs.find((x) => x.id === logId) : null;
+  const g = state.goals.find((x) => x.id === (l?.goalId || goalId)) || null;
+  const kind = l?.kind || g?.kind || 'other';
+  const K = GOAL_KINDS[kind] || GOAL_KINDS.other;
+  const t = getTask(l?.taskId || taskId);
+  const km = l ? l.km : K.km || 0;
+  openSheet(`<form class="sheet-body log-sheet" data-form="log" data-id="${l?.id || ''}" data-goal="${g?.id || ''}" data-kind="${kind}" data-task="${t?.id || ''}" data-plan="${l?.planId || planId || ''}"${tracked ? ' data-tracked="1"' : ''} data-back="${back}" autocomplete="off">
+    ${head(`${K.icon} ${l ? 'Séance' : t ? 'Séance validée' : 'Nouvelle séance'} · ${g?.title || K.name}`)}
+    ${t ? `<p class="log-task">${esc(t.title)}</p>` : ''}
+    <div class="log-grid">
+      <label class="field"><span>Jour</span><input type="date" name="day" value="${l?.day || day}" required></label>
+      <label class="field"><span>Temps</span><input name="time" value="${minText(l ? l.min : min)}" placeholder="45 · 1h05 · 52:30" enterkeyhint="done"></label>
+      ${K.fields.includes('km') ? `<label class="field"><span>Distance (km)</span><input name="km" inputmode="decimal" value="${km ? fmtN(km, 2).replace(/\s/g, '') : ''}" placeholder="0" enterkeyhint="done"></label>` : ''}
+      ${K.fields.includes('dplus') ? `<label class="field"><span>D+ (m)</span><input name="dplus" inputmode="numeric" value="${l?.dplus || ''}" placeholder="0" enterkeyhint="done"></label>` : ''}
+    </div>
+    <p class="log-pace"></p>
+    <p class="log-after"></p>
+    <button class="btn primary wide">${l ? 'Enregistrer' : 'Compter cette séance'}</button>
+    ${l ? `<button type="button" class="btn ghost danger wide" data-action="log-del" data-id="${l.id}">${ICON.trash} Supprimer cette séance</button>`
+      : `<button type="button" class="btn ghost wide" data-action="${back ? 'missions' : 'close-sheet'}"${back && g ? ` data-week="${g.week}"` : ''}>Ne pas compter</button>`}
+  </form>`);
+  logRefresh($('form[data-form="log"]', sheet));
+}
+
+function logRead(form) {
+  const f = form.elements;
+  return { day: f.day.value, min: parseMin(f.time.value), km: f.km ? readN(f.km.value) : 0, dplus: f.dplus ? Math.round(readN(f.dplus.value)) : 0 };
+}
+
+// Allure (course, natation) ou vitesse (vélo), et l'avancement de la mission avec cette séance.
+function logRefresh(form) {
+  if (!form) return;
+  const v = logRead(form);
+  const kind = form.dataset.kind;
+  const bits = [];
+  if (v.min === null) bits.push('Temps pas compris : écris 45, 1h05 ou 52:30');
+  else if (v.min > 0) {
+    bits.push(`⏱ ${fmtDur(Math.round(v.min * 60) * 1e3)}`);
+    if (v.km > 0 && kind === 'run') bits.push(`Allure ${paceLabel(v.min / v.km)} /km`);
+    if (v.km > 0 && kind === 'bike') bits.push(`${fmtN(v.km / (v.min / 60), 1)} km/h`);
+    if (v.km > 0 && kind === 'swim') bits.push(`${paceLabel(v.min / (v.km * 10))} /100 m`);
+  }
+  const pace = $('.log-pace', form);
+  pace.textContent = bits.join(' · ');
+  pace.classList.toggle('miss', v.min === null);
+  const g = state.goals.find((x) => x.id === form.dataset.goal);
+  const after = $('.log-after', form);
+  if (!g) { after.textContent = ''; return; }
+  const p = goalProgress(g);
+  const old = state.logs.find((x) => x.id === form.dataset.id);
+  const inWeek = v.day >= g.week && v.day <= addDays(g.week, 6);
+  const got = { ...p.got };
+  if (old && p.logs.includes(old)) { got.n -= 1; for (const k of ['km', 'dplus', 'min']) got[k] -= old[k] || 0; }
+  if (inWeek) { got.n += 1; got.km += v.km; got.dplus += v.dplus; got.min += v.min || 0; }
+  after.textContent = `${g.icon} ${g.title} : ${p.keys.map(([k]) => goalPair(k, got[k], g.targets[k])).join(' · ')}${inWeek ? '' : ' (séance hors de cette semaine)'}`;
+}
+
+function saveLog(form) {
+  const v = logRead(form);
+  if (v.min === null || !/^\d{4}-\d{2}-\d{2}$/.test(v.day)) {
+    const pace = $('.log-pace', form);
+    pace.classList.remove('shake'); void pace.offsetWidth; pace.classList.add('shake');
+    return;
+  }
+  const g = state.goals.find((x) => x.id === form.dataset.goal);
+  const before = g ? goalProgress(g).ratio : 0;
+  let l = state.logs.find((x) => x.id === form.dataset.id);
+  if (l) Object.assign(l, v);
+  else {
+    l = { id: uid(), kind: form.dataset.kind, goalId: g?.id || null, taskId: form.dataset.task || null, planId: form.dataset.plan || null, at: now(), ...v };
+    state.logs.push(l);
+  }
+  // Aucun temps chronométré pour cette tâche ce jour-là : le temps noté compte aussi dans le Bilan.
+  const t = getTask(l.taskId);
+  const s = state.sessions.find((x) => x.id === l.sessionId);
+  if (s && v.min > 0) s.end = s.start + Math.round(v.min * 60e3);
+  else if (s) { state.sessions = state.sessions.filter((x) => x !== s); delete l.sessionId; }
+  else if (t && !form.dataset.tracked && v.min > 0) {
+    const p = state.plans.find((x) => x.id === l.planId);
+    const end = p ? Math.min(now(), p.start + Math.round(v.min * 60e3)) : Math.min(now(), dateAt(v.day, DAY_MIN));
+    const start = p ? p.start : end - Math.round(v.min * 60e3);
+    const ns = { id: uid(), taskId: t.id, title: t.title, projectId: t.projectId || null, subprojectId: t.subprojectId || null, start, end: start + Math.round(v.min * 60e3) };
+    state.sessions.push(ns);
+    l.sessionId = ns.id;
+  }
+  save();
+  if (form.dataset.back) openMissionsSheet(g?.week || weekOf(v.day)); else closeSheet();
+  render(); buzz();
+  if (!g) { toast('Séance notée'); return; }
+  const p = goalProgress(g);
+  if (p.ratio >= 1 && before < 1) { haptic(); toast(`🎉 Mission accomplie · ${g.icon} ${g.title} · ${goalSummary(g, p)}`); }
+  else toast(`${g.icon} ${g.title} · ${goalSummary(g, p)}`);
+}
+
+sheet.addEventListener('input', (e) => {
+  const form = e.target.closest('form[data-form="log"]');
+  if (form) logRefresh(form);
+  if (e.target.closest('form[data-form="goal"]') && e.target.name === 'title') goalHint(e.target.form);
+  if (e.target.matches('.ms-search')) {
+    const q = plain(e.target.value);
+    for (const r of $$('.ms-pick-row')) r.hidden = !!q && !r.dataset.q.includes(q);
+  }
+});
+// Sport choisi : le nom suit tant qu'il n'a pas été changé à la main.
+sheet.addEventListener('change', (e) => {
+  const form = e.target.closest('form[data-form="goal"]');
+  if (!form || e.target.name !== 'kind') return;
+  const names = Object.values(GOAL_KINDS).map((x) => x.name);
+  if (!form.elements.title.value.trim() || names.includes(form.elements.title.value.trim())) form.elements.title.value = GOAL_KINDS[e.target.value].name;
+  goalHint(form);
+});
 
 /* ---------- Emojis dans les noms (tâches, projets, sous-projets, événements) ---------- */
 
@@ -5720,10 +6104,12 @@ async function validateToday(kind, id, card) {
     if (planDone(p)) { // annuler la validation
       Object.assign(p, { done: false, doneAt: null });
       if (t.done) { t.done = false; t.doneAt = null; }
+      dropLogs((l) => l.planId === p.id);
       save(); render();
       return;
     }
-    const extra = await askPlannedTime(t, plannedToCount(t, p));
+    // Séance d'une mission (course, vélo…) : le temps se note dans son questionnaire, pas besoin de le demander ici.
+    const extra = goalFor(t, ymd(new Date(p.start))) ? [] : await askPlannedTime(t, plannedToCount(t, p));
     const prev = { pDone: !!p.done, pAt: p.doneAt || null, tDone: t.done, tAt: t.doneAt };
     const stopped = finishTimer(t.id);
     Object.assign(p, { done: true, doneAt: now() });
@@ -5737,14 +6123,16 @@ async function validateToday(kind, id, card) {
       Object.assign(p, { done: prev.pDone, doneAt: prev.pAt });
       Object.assign(t, { done: prev.tDone, doneAt: prev.tAt });
       state.sessions = state.sessions.filter((s) => !extra.includes(s));
+      dropLogs((l) => l.planId === p.id);
       save(); render();
     });
     afterTimer(stopped, null);
+    goalAsk(t, p);
   } else {
     const t = getTask(id);
     if (!t) return;
-    if (t.done) { t.done = false; t.doneAt = null; save(); render(); return; }
-    const extra = await askPlannedTime(t, plannedToCount(t));
+    if (t.done) { t.done = false; t.doneAt = null; dropLogs((l) => l.taskId === t.id && !l.planId); save(); render(); return; }
+    const extra = goalFor(t) ? [] : await askPlannedTime(t, plannedToCount(t));
     const stopped = finishTimer(t.id);
     t.done = true;
     t.doneAt = now();
@@ -5754,9 +6142,11 @@ async function validateToday(kind, id, card) {
     doneToast(before, `Bravo, tâche terminée ✓${countedLabel(extra)}`, () => {
       t.done = false; t.doneAt = null;
       state.sessions = state.sessions.filter((s) => !extra.includes(s));
+      dropLogs((l) => l.taskId === t.id && !l.planId);
       save(); render();
     });
     afterTimer(stopped, null);
+    goalAsk(t);
   }
 }
 
@@ -6677,10 +7067,11 @@ const actions = {
     if (!t) return;
     const inSheet = !!el.closest('#sheet');
     if (inSheet) closeSheet(); // enregistre aussi les modifications du formulaire
-    const extra = t.done ? [] : await askPlannedTime(t, plannedToCount(t));
+    const extra = t.done || goalFor(t) ? [] : await askPlannedTime(t, plannedToCount(t));
     const done = t.done ? null : finishTimer(t.id);
     t.done = !t.done;
     t.doneAt = t.done ? now() : null;
+    if (!t.done) dropLogs((l) => l.taskId === t.id && !l.planId);
     state.sessions.push(...extra);
     save();
     if (t.done) playDone(doneCard(t.id, el), colorOf(t.projectId));
@@ -6689,13 +7080,65 @@ const actions = {
       toast(`Tâche terminée${countedLabel(extra)}`, { label: 'Annuler', fn: () => {
         t.done = false; t.doneAt = null;
         state.sessions = state.sessions.filter((s) => !extra.includes(s));
+        dropLogs((l) => l.taskId === t.id && !l.planId);
         save(); render();
       } });
     }
     afterTimer(done, null);
+    if (t.done) goalAsk(t);
   },
   'open-task'(el) { openTaskSheet(el.dataset.id); },
   'plan-done'(el) { closeSheet(); validateToday('plan', el.dataset.id); },
+  // Missions de la semaine
+  missions(el) {
+    const week = el.dataset.week || temp.msWeek;
+    if (temp.placing) { const id = temp.placing; actions['cancel-placing'](); setWeek(id, week); return; } // tâche en main posée là
+    openMissionsSheet(week);
+  },
+  'goal-new'() { openGoalSheet(null, temp.msWeek); },
+  'goal-edit'(el) { openGoalSheet(el.dataset.id); },
+  async 'goal-del'(el) {
+    const g = state.goals.find((x) => x.id === el.dataset.id);
+    if (!g) return;
+    const ok = await ask({ title: `Supprimer « ${g.title} » ?`, text: 'Les séances déjà notées restent enregistrées.', ok: 'Supprimer', danger: true });
+    if (!ok) return;
+    state.goals = state.goals.filter((x) => x !== g);
+    save(); render(); openMissionsSheet(g.week);
+    toast('Mission supprimée', { label: 'Annuler', fn: () => { state.goals.push(g); save(); render(); } });
+  },
+  'goal-preset'() { addGoals(temp.msWeek, GOAL_PRESET); },
+  'goal-copy'() { addGoals(temp.msWeek, weekGoals(addDays(temp.msWeek, -7))); },
+  'log-new'(el) {
+    const g = state.goals.find((x) => x.id === el.dataset.id);
+    if (!g) return;
+    const today = ymd(new Date());
+    openLogSheet({ goalId: g.id, day: today >= g.week && today <= addDays(g.week, 6) ? today : g.week, back: 'missions' });
+  },
+  'log-edit'(el) { openLogSheet({ logId: el.dataset.id, back: 'missions' }); },
+  'log-del'(el) {
+    const l = state.logs.find((x) => x.id === el.dataset.id);
+    if (!l) return;
+    const s = state.sessions.find((x) => x.id === l.sessionId);
+    dropLogs((x) => x === l);
+    const g = state.goals.find((x) => x.id === l.goalId);
+    save(); render(); openMissionsSheet(g?.week || weekOf(l.day));
+    toast('Séance supprimée', { label: 'Annuler', fn: () => { state.logs.push(l); if (s) state.sessions.push(s); save(); render(); } });
+  },
+  'ms-pick'() { openMissionPick(temp.msWeek); },
+  'ms-add-task'(el) {
+    const t = getTask(el.dataset.id);
+    if (!t) return;
+    t.week = el.dataset.week;
+    save(); render(); openMissionsSheet(t.week);
+  },
+  'ms-remove'(el) {
+    const t = getTask(el.dataset.id);
+    if (!t) return;
+    const week = t.week;
+    delete t.week;
+    save(); render(); openMissionsSheet(week);
+    toast('Retirée des missions', { label: 'Annuler', fn: () => { t.week = week; save(); render(); } });
+  },
   'rep-apply'(el) { applyRepeat(el.closest('form')); },
   'add-json'() {
     pickJson((raw) => {
@@ -6726,9 +7169,11 @@ const actions = {
       const p = state.plans.find((x) => x.id === id);
       if (!p) return;
       reopen(p);
+      dropLogs((l) => l.planId === p.id);
     } else {
       const t = getTask(id);
       if (!t) return;
+      dropLogs((l) => l.taskId === t.id && !l.planId);
       const day = ymd(new Date(t.doneAt || now()));
       for (const p of state.plans) if (p.taskId === t.id && p.done && ymd(new Date(p.doneAt || p.end)) === day) reopen(p);
       reopen(t);

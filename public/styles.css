@@ -1810,3 +1810,103 @@ body.placing #toast { bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom)
 /* Tâche lancée sans créneau : son créneau suit le chrono en direct (plein, rayures en mouvement, sans ligne de fin prévue) */
 .plan-block.grow.is-live { background: var(--c); }
 .plan-block.grow.is-live::after { display: none; }
+
+/* ---------- Missions de la semaine : bandeau en bas du planning ---------- */
+.missions {
+  position: sticky; z-index: 9; bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 10px);
+  display: flex; align-items: center; gap: 10px; min-height: 54px; margin: 12px 0 0; padding: 8px 8px 8px 14px;
+  border: 1px solid var(--line); border-radius: 18px; cursor: pointer;
+  background: color-mix(in srgb, var(--card) 92%, transparent); -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px);
+  box-shadow: 0 8px 26px rgba(15, 15, 30, .13); transition: border-color .15s, background .15s, transform .15s;
+}
+.missions:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.missions:active { transform: scale(.995); }
+.ms-lab { flex: none; display: flex; align-items: center; gap: 6px; font-size: 15px; }
+.ms-lab b { font-weight: 800; letter-spacing: -.01em; }
+.ms-chips { flex: 1; min-width: 0; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 18px), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - 18px), transparent); }
+.ms-chips::-webkit-scrollbar { display: none; }
+.ms-chip {
+  position: relative; flex: none; display: inline-flex; align-items: center; gap: 5px; height: 36px; padding: 0 11px 2px; overflow: hidden;
+  border-radius: 12px; border: 1px solid var(--line); background: var(--card-2);
+  font-size: 13.5px; font-weight: 750; white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+.ms-chip i { position: absolute; left: 0; bottom: 0; height: 4px; width: var(--r); background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 65%, #fff), var(--accent)); border-radius: 0 4px 4px 0; transition: width .4s ease; }
+.ms-chip.full { border-color: color-mix(in srgb, var(--run) 45%, transparent); background: var(--run-soft); color: var(--run); }
+.ms-chip.full i { background: var(--run); }
+.ms-ic { font-size: 15px; line-height: 1; }
+.ms-empty { align-self: center; color: var(--muted); font-size: 14px; font-weight: 600; white-space: nowrap; }
+.ms-go { flex: none; display: grid; place-items: center; width: 30px; height: 30px; color: var(--muted); }
+.ms-go svg { width: 18px; height: 18px; }
+.ms-drop { display: none; }
+/* Une tâche de « À planifier » glissée : le bandeau l'attend */
+.missions.armed { border: 2px dashed var(--accent); }
+.missions.armed .ms-drop {
+  display: flex; position: absolute; inset: 0; align-items: center; justify-content: center; border-radius: inherit;
+  background: color-mix(in srgb, var(--accent-soft) 94%, transparent); color: var(--accent); font-weight: 800; font-size: 14.5px;
+}
+.missions.drop .ms-drop { background: var(--accent); color: var(--accent-ink); }
+@media (max-width: 759px) {
+  .missions { bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + var(--dock-h, 70px) + 8px); margin: 10px 8px 0; min-height: 48px; padding: 6px 4px 6px 12px; }
+  body.is-dragging .missions { bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 10px); }
+  .ms-lab b { display: none; }
+  .ms-chip { height: 34px; padding: 0 9px 2px; font-size: 13px; }
+}
+
+/* Fiche des missions */
+.ms-cards { display: grid; gap: 10px; margin-bottom: 10px; }
+.ms-card { padding: 12px 14px; border: 1px solid var(--line); border-radius: 16px; background: var(--card-2); }
+.ms-card.full { border-color: color-mix(in srgb, var(--run) 45%, transparent); background: linear-gradient(160deg, var(--run-soft), var(--card-2) 70%); }
+.ms-card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.ms-title { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; text-align: left; font-size: 16px; font-weight: 800; }
+.ms-title .ms-ic { font-size: 22px; }
+.ms-title small { display: block; font-size: 12.5px; font-weight: 600; color: var(--muted); }
+.ms-add { flex: none; }
+.ms-add svg { width: 15px; height: 15px; }
+.ms-row { display: grid; grid-template-columns: 70px 1fr auto; align-items: center; gap: 10px; margin-top: 6px; font-size: 13.5px; color: var(--muted); font-weight: 650; }
+.ms-row b { color: var(--text); font-weight: 750; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ms-bar { height: 9px; border-radius: 999px; background: color-mix(in srgb, var(--line) 70%, transparent); overflow: hidden; }
+.ms-bar i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 65%, #fff), var(--accent)); transition: width .4s ease; }
+.ms-card.full .ms-bar i { background: var(--run); }
+.ms-logs { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
+.ms-log { padding: 5px 9px; border-radius: 9px; background: var(--card); border: 1px solid var(--line); font-size: 12.5px; font-weight: 650; color: var(--muted); font-variant-numeric: tabular-nums; }
+.ms-log:hover { color: var(--text); border-color: var(--accent); }
+.ms-intro { margin-bottom: 10px; padding: 14px; border-radius: 16px; background: var(--accent-soft); }
+.ms-intro p { margin: 0 0 12px; font-size: 14px; line-height: 1.4; color: color-mix(in srgb, var(--accent) 70%, var(--text)); }
+.ms-preset { flex-direction: column; gap: 3px; min-height: 64px; padding: 10px 14px; }
+.ms-preset small { font-size: 12px; font-weight: 600; opacity: .9; line-height: 1.35; white-space: normal; }
+.ms-tasks { display: grid; gap: 6px; margin-bottom: 8px; }
+.ms-task { display: flex; align-items: center; gap: 10px; padding: 6px 4px 6px 8px; border-radius: 13px; background: var(--card-2); box-shadow: inset 3px 0 0 var(--c); }
+.ms-task-name { flex: 1; min-width: 0; text-align: left; font-weight: 650; font-size: 14.5px; overflow: hidden; text-overflow: ellipsis; }
+.ms-task-name small { display: block; font-size: 12px; font-weight: 600; color: var(--muted); }
+.ms-task.done .ms-task-name { color: var(--muted); text-decoration: line-through; }
+.ms-x { width: 34px; height: 34px; color: var(--muted); }
+.ms-pick-list { display: grid; gap: 4px; max-height: 52dvh; overflow-y: auto; margin: 4px 0 10px; }
+.ms-pick-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 12px; text-align: left; font-weight: 650; }
+.ms-pick-row:hover { background: var(--card-2); }
+.ms-pick-row i { width: 9px; height: 9px; border-radius: 50%; background: var(--c); flex: none; }
+.ms-pick-row > span { flex: 1; min-width: 0; }
+.ms-pick-row small { display: block; font-size: 12px; color: var(--muted); font-weight: 600; }
+.ms-pick-row svg { width: 16px; height: 16px; color: var(--accent); flex: none; }
+
+/* Fiche d'une mission */
+.goal-kinds { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 12px; }
+.goal-kinds label { position: relative; }
+.goal-kinds input { position: absolute; left: 0; top: 0; width: 1px; height: 1px; margin: 0; opacity: 0; pointer-events: none; }
+.goal-kinds span { display: inline-flex; align-items: center; height: 38px; padding: 0 12px; border-radius: 999px; border: 1.5px solid var(--line); background: var(--card-2); font-size: 14px; font-weight: 650; cursor: pointer; }
+.goal-kinds input:checked + span { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.goal-targets { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 8px; }
+.goal-targets input { text-align: center; font-weight: 750; font-variant-numeric: tabular-nums; }
+.goal-sheet:not(:has([name="kind"][value="run"]:checked, [name="kind"][value="bike"]:checked, [name="kind"][value="swim"]:checked)) .gt-km,
+.goal-sheet:not(:has([name="kind"][value="run"]:checked, [name="kind"][value="bike"]:checked)) .gt-dplus { display: none; }
+.goal-hint { margin: 2px 0 14px; }
+.goal-hint.shake { color: var(--warn); animation: shake .35s; }
+
+/* Questionnaire d'une séance */
+.log-task { margin: -4px 0 10px; font-size: 14px; font-weight: 650; color: var(--muted); }
+.log-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 10px; }
+.log-grid input { font-weight: 750; font-variant-numeric: tabular-nums; }
+.log-pace { min-height: 20px; margin: 4px 2px 6px; font-size: 15px; font-weight: 800; color: var(--accent); font-variant-numeric: tabular-nums; }
+.log-pace.miss { color: var(--warn); font-weight: 650; font-size: 14px; }
+.log-pace.shake { animation: shake .35s; }
+.log-after { margin: 0 2px 14px; padding: 10px 12px; border-radius: 12px; background: var(--card-2); font-size: 14px; font-weight: 650; }
+.log-after:empty { display: none; }
