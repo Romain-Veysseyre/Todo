@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.27.0';
+const VERSION = '2.28.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -586,6 +586,7 @@ function selectProfile(id) {
   Object.assign(temp, { openProject: null, keys: null });
   temp.statsOpen.clear();
   state.ui.tab = 'today'; // la journée est la page d'accueil
+  temp.day = null;
   orga.off = false;
   orgaWake();
   writeLocal();
@@ -5636,7 +5637,6 @@ const SORTABLES = [
     stepsSet(form, ids.map((id) => list.find((x) => x.id === id)).filter(Boolean));
   } },
   { grip: '.sub-grip', item: '.sub-row', done: () => {} }, // sous-projets : l'ordre des lignes est enregistré avec la fiche
-  { grip: '.ag-grip', item: '.ag-plan.movable', shift: (el) => el.getBoundingClientRect().height + 9, done: (ids, item) => reorderDay(ids, item.dataset.id) },
 ];
 
 const sortDrag = { active: null };
@@ -5706,7 +5706,6 @@ window.addEventListener('pointercancel', endSort);
 // - Rien ne passe avant maintenant ; un créneau oublié (déjà passé) qu'on descend se pose après celui qui le précède.
 // - Ce qui suit est poussé s'il chevauche. « Annuler » remet tout comme avant.
 function reorderDay(ids, dId) {
-  const now5 = Math.ceil(now() / 3e5) * 3e5;
   const old = ids.map((id) => state.plans.find((x) => x.id === id)).filter(Boolean).sort((a, b) => a.start - b.start);
   const neu = ids.map((id) => old.find((x) => x.id === id)).filter(Boolean);
   const D = old.find((x) => x.id === dId);
@@ -5714,7 +5713,8 @@ function reorderDay(ids, dId) {
   const t = neu.indexOf(D);
   if (!D || f === t) { render(); return; }
   const before = state.plans.map((x) => ({ ...x }));
-  const day = ymd(new Date());
+  const day = ymd(new Date(D.start));
+  const now5 = day === ymd(new Date()) ? Math.ceil(now() / 3e5) * 3e5 : dateAt(day, 0); // un autre jour : pas de limite
   const fixed = (x) => x !== D && !!x.series;
   // Ce qui ne bouge pas : créneaux réguliers du jour (sauf celui qu'on déplace) et créneaux dont le chrono tourne.
   const blocks = plansOn(day).filter((x) => !x.allDay && !planDone(x) && (fixed(x) || timerOf(x.taskId)));
@@ -5808,235 +5808,485 @@ function freeGaps(items, from, to = DAY_WINDOW_END) {
 }
 
 function nextFreeSlot(day, want = PLAN_DUR) {
-  const from = Math.max(VIEW_START, Math.ceil(nowMin() / 15) * 15);
+  const today = ymd(new Date());
+  if (day < today) return null;
+  const from = day === today ? Math.max(VIEW_START, Math.ceil(nowMin() / 15) * 15) : 8 * 60; // un autre jour : dès 8h
   const gap = freeGaps(dayAgenda(day).filter(isOpenItem), from)[0];
   return gap ? { s: gap.s, dur: Math.min(want, gap.e - gap.s) } : null;
 }
 
-// Tout ce qui concerne aujourd'hui : agenda, tâches à faire, prioritaires, progression.
-function todayModel() {
-  const day = ymd(new Date());
+// Tout ce qui concerne un jour : agenda, tâches à faire (sans horaire), prioritaires, progression.
+// Aujourd'hui, les échéances dépassées reviennent dans « à faire » ; les prioritaires ne sont proposées que ce jour-là.
+function dayModel(day = ymd(new Date())) {
+  const today = ymd(new Date());
   const d0 = dateAt(day, 0);
   const d1 = dateAt(day, DAY_MIN);
   const items = dayAgenda(day);
   const blocks = items.filter((i) => i.kind === 'plan');
-  const spans = spansOn(day).filter((p) => !planDone(p)).map((p) => ({ p, t: getTask(p.taskId) }));
+  const spans = spansOn(day).map((p) => ({ p, t: getTask(p.taskId) }));
   const plannedIds = new Set([...blocks, ...spans].map((i) => i.t.id));
   const due = state.tasks
-    .filter((t) => !t.done && t.deadline && t.deadline <= day && !plannedIds.has(t.id))
+    .filter((t) => !t.done && !isOrga(t) && t.deadline && (day === today ? t.deadline <= day : t.deadline === day) && !plannedIds.has(t.id))
     .sort((a, b) => !!b.starred - !!a.starred || cmpDeadline(a, b) || a.createdAt - b.createdAt);
-  const prio = state.tasks
-    .filter((t) => !t.done && t.starred && !plannedIds.has(t.id) && !(t.deadline && t.deadline <= day))
+  const prio = day !== today ? [] : state.tasks
+    .filter((t) => !t.done && !isOrga(t) && t.starred && !plannedIds.has(t.id) && !(t.deadline && t.deadline <= day))
     .sort((a, b) => cmpDeadline(a, b) || b.createdAt - a.createdAt);
-  const extraDone = state.tasks.filter((t) => t.done && t.doneAt >= d0 && t.doneAt < d1 && !plannedIds.has(t.id));
+  const extraDone = state.tasks.filter((t) => t.done && !isOrga(t) && t.doneAt >= d0 && t.doneAt < d1 && !plannedIds.has(t.id));
   const total = blocks.length + due.length + extraDone.length;
   const doneN = blocks.filter((i) => planDone(i.p)).length + extraDone.length;
   return { day, d0, d1, items, open: items.filter(isOpenItem), blocks, spans, due, prio, extraDone, total, doneN };
 }
+const todayModel = () => dayModel();
 
-// Bloc de tâche à valider (agenda, « à faire aujourd'hui », « terminé »).
-// note : texte à la place de la durée (tâche sur plusieurs jours : « Jour 2 sur 3 »).
-// live : créneau prolongé (ou recalé) tant que son chrono tourne (« +22 min », « en cours »).
-function todayCard({ t, p, dur, done, totals, note = '', live = '' }) {
-  const running = !!timerOf(t.id);
-  const kind = p ? 'plan' : 'task';
-  const id = p ? p.id : t.id;
-  const late = !p && !done && dueInfo(t.deadline);
-  const spent = totals.get(t.id) || 0;
-  return `<div class="swipe-wrap">
-    <div class="swipe-bg" aria-hidden="true"><span class="sw-done">${ICON.check} Fait</span><span class="sw-later">Demain ↷</span></div>
-    <div class="day-card${done ? ' done' : ''}${running ? ' running' : ''}" data-swipe="${kind}" data-id="${id}" style="--c:${colorOf(t.projectId)}">
-      <button type="button" class="check" data-action="today-done" data-kind="${kind}" data-id="${id}" aria-label="${done ? 'Annuler la validation' : 'Valider'}">${ICON.check}</button>
-      <div class="day-main" role="button" tabindex="0" data-action="${p ? 'open-plan' : 'open-task'}" data-id="${id}">
-        <div class="day-title">${t.starred ? `<span class="day-star">${ICON.star}</span>` : ''}${esc(t.title)}</div>
-        ${p?.note ? `<div class="day-note">${esc(p.note)}</div>` : ''}
-        ${done ? '' : stepsPeek(t)}
-        <div class="day-meta">
-          ${stepsPill(t)}
-          ${t.projectId ? `<span class="tag"><i></i>${esc(pathLabel(t.projectId, t.subprojectId))}</span>` : ''}
-          ${p ? `<span>${note ? esc(note) : p.live ? '' : `${p.series ? '↻ ' : ''}${fmtDur(dur * 60e3)}`}${live ? `${p.live ? '' : ' '}<em class="over">${esc(live)}</em>` : ''}</span>` : ''}
-          ${late && late.cls === 'late' ? `<span class="due late">${esc(late.text)}</span>` : ''}
-          ${spent || running ? `<span class="spent">${ICON.clock}${liveDur(spent, sinceOf(t.id))}</span>` : ''}
-        </div>
+// Jour affiché dans « Aujourd'hui » (hier, demain… en balayant la page) : null = aujourd'hui.
+const shownDay = () => temp.day || ymd(new Date());
+
+// Aller à un autre jour (flèches, balayage, clavier) ; pendant un glisser, sans transition.
+function goDay(day, dir = 'fwd', instant = false) {
+  const today = ymd(new Date());
+  temp.day = day === today ? null : day;
+  temp.dlEdit = null;
+  if (instant) { render(); return; }
+  pageTransition(dir, render);
+}
+
+// Temps chronométré sur un jour (toutes tâches), chronos en cours compris.
+const trackedOn = (d0, d1) => state.sessions.reduce((n, x) => n + overlap(x, d0, d1), 0)
+  + state.timers.reduce((n, a) => n + Math.max(0, Math.min(now(), d1) - Math.max(a.start, d0)), 0);
+
+// Jour d'une tâche sur plusieurs jours : « Jour 2 sur 3 », sinon « Toute la journée ».
+function spanNote(p, day) {
+  const first = ymd(new Date(p.start));
+  const last = ymd(new Date(p.end - 1));
+  const n = Math.round((parseYmd(last) - parseYmd(first)) / 864e5) + 1;
+  const k = Math.round((parseYmd(day) - parseYmd(first)) / 864e5) + 1;
+  return n > 1 ? `Jour ${k} sur ${n}` : 'Toute la journée';
+}
+
+// Éditeur d'horaire d'un créneau (en touchant son heure) : début ±15 min ou à la minute, durée, jour voisin.
+function dlEditor(p, day) {
+  const s0 = minOfDay(p.start, day);
+  const e0 = minOfDay(p.end, day) || DAY_MIN;
+  const dur = e0 - s0;
+  const durs = [...new Set([15, 30, 45, 60, 90, 120, dur])].sort((a, b) => a - b);
+  return `<div class="dl-edit">
+      <div class="dle-row"><span class="dle-lab">Début</span>
+        <button type="button" class="dle-step" data-action="dl-shift" data-id="${p.id}" data-value="-15" aria-label="15 minutes plus tôt">−15</button>
+        <input type="time" class="dle-time" data-id="${p.id}" value="${hhmm(s0)}" step="300" aria-label="Heure de début">
+        <button type="button" class="dle-step" data-action="dl-shift" data-id="${p.id}" data-value="15" aria-label="15 minutes plus tard">+15</button>
+        <span class="dle-end">→ ${minLabel(e0)}</span></div>
+      <div class="dle-row dle-durs" role="group" aria-label="Durée">${durs.map((d) => `<button type="button" class="${d === dur ? 'on' : ''}" data-action="dl-dur" data-id="${p.id}" data-value="${d}">${durLabel(d)}</button>`).join('')}</div>
+      <div class="dle-row dle-acts">
+        <button type="button" data-action="dl-move-day" data-id="${p.id}" data-value="-1">${ICON.left} Veille</button>
+        <button type="button" data-action="dl-move-day" data-id="${p.id}" data-value="1">Lendemain ${ICON.right}</button>
+        ${p.series ? '' : `<button type="button" data-action="dl-unplan" data-id="${p.id}">Sans horaire</button>`}
+        <button type="button" data-action="open-plan" data-id="${p.id}">Plus…</button>
       </div>
-      ${done ? '' : `${p ? '' : `<button type="button" class="mini-btn" data-action="today-fit" data-id="${t.id}" title="Caler dans le prochain créneau libre" aria-label="Caler dans le prochain créneau libre">${ICON.cal}</button>`}
-      ${note || p?.live ? '' : `<button type="button" class="mini-btn later-btn" data-action="today-later" data-kind="${kind}" data-id="${id}" title="Reporter à demain" aria-label="Reporter à demain">↷</button>`}
-      <button type="button" class="play" data-action="toggle-timer" data-id="${t.id}" aria-label="${running ? 'Arrêter' : 'Lancer le chrono'}">${running ? ICON.stop : ICON.play}</button>`}
-    </div>
-  </div>`;
+    </div>`;
 }
 
 function viewToday() {
-  const m = todayModel();
-  const nm = nowMin();
-  const me = getProfile(profile);
-  const totals = taskTotals();
-  const today = new Date();
-  const allDone = m.total > 0 && m.doneN === m.total;
-  const pct = m.total ? Math.round((m.doneN / m.total) * 100) : 0;
+  const day = shownDay();
+  const today = ymd(new Date());
+  const isToday = day === today;
+  const past = day < today;
+  const m = dayModel(day);
+  const nm = isToday ? nowMin() : past ? DAY_MIN + 1 : -1; // « maintenant », vu depuis le jour affiché
 
-  // Temps chronométré aujourd'hui, par projet
-  const per = new Map();
-  for (const s of allSessions()) {
-    const ms = overlap(s, m.d0, m.d1);
-    if (ms) { const k = getProject(s.projectId) ? s.projectId : 'none'; per.set(k, (per.get(k) || 0) + ms); }
-  }
-  const perSorted = [...per.entries()].sort((a, b) => b[1] - a[1]);
-  const lt = liveTotal(m.d0, m.d1);
-  const mood = allDone ? '🎉' : nm < 12 * 60 ? '☀️' : nm < 18 * 60 ? '👋' : '🌙';
+  // En-tête : le jour, et de quoi passer à la veille ou au lendemain
+  const diff = Math.round((parseYmd(day) - parseYmd(today)) / 864e5);
+  const rel = diff === 0 ? 'Aujourd’hui' : diff === -1 ? 'Hier' : diff === 1 ? 'Demain' : diff < 0 ? `Il y a ${-diff} jours` : `Dans ${diff} jours`;
+  const head = `<div class="dp-head">
+      <button type="button" class="dp-arrow" data-action="day-move" data-value="-1" aria-label="Jour précédent">${ICON.left}</button>
+      <button type="button" class="dp-date" data-action="day-today"${isToday ? ' tabindex="-1"' : ' title="Revenir à aujourd’hui"'}>
+        <small>${rel}${isToday ? '' : ' · <u>revenir à aujourd’hui</u>'}</small>
+        <b>${esc(cap(fmt(parseYmd(day), { weekday: 'long', day: 'numeric', month: 'long' })))}</b></button>
+      <button type="button" class="dp-arrow" data-action="day-move" data-value="1" aria-label="Jour suivant">${ICON.right}</button>
+    </div>`;
+  const pct = m.total ? m.doneN / m.total : 0;
+  const lt = isToday ? liveTotal(m.d0, m.d1) : { base: trackedOn(m.d0, m.d1), since: [] };
+  const sum = `<div class="dp-sum">
+      <div class="dp-bar${m.total && m.doneN === m.total ? ' full' : ''}" role="img" aria-label="${m.doneN} sur ${m.total} faites"><i style="width:${(pct * 100).toFixed(1)}%"></i></div>
+      <span class="dp-count">${m.total ? `${m.doneN}/${m.total} faite${m.doneN > 1 ? 's' : ''}` : 'Rien de prévu'}</span>
+      <button type="button" class="dp-time" data-action="go-stats" title="Temps chronométré">${ICON.clock}${liveDur(lt.base, lt.since)}</button>
+    </div>`;
 
-  const hero = `<section class="today-hero">
-      <div class="hero-top">
-        <div class="hero-text">
-          <p class="hero-date">${esc(cap(fmt(today, { weekday: 'long', day: 'numeric', month: 'long' })))}</p>
-          <h2>${greeting()} ${esc(me.name)} ${mood}</h2>
-          <p class="hero-sub">${allDone ? 'Journée bouclée, bravo !' : m.total ? `${m.total - m.doneN} à faire · ${m.doneN} ${m.doneN > 1 ? 'faites' : 'faite'}` : 'Rien de prévu pour l’instant'}</p>
-        </div>
-        <div class="ring${allDone ? ' full' : ''}" role="img" aria-label="${m.doneN} sur ${m.total} faites">
-          <svg viewBox="0 0 36 36"><circle class="bg" cx="18" cy="18" r="15.9155"/><circle class="fg" cx="18" cy="18" r="15.9155" stroke-dasharray="${pct} 100"/></svg>
-          <b>${m.total ? `${m.doneN}/${m.total}` : '–'}</b>
-        </div>
-      </div>
-      <button type="button" class="hero-time" data-action="go-stats" title="Voir le temps de la journée">
-        <span class="tt-head">${ICON.clock}${liveDur(lt.base, lt.since)} chronométrées${perSorted.length ? '' : ' aujourd’hui'}</span>
-        ${perSorted.length ? `<span class="mix">${perSorted.map(([k, ms]) => `<i style="flex:${ms} 0 0;background:${colorOf(k)}"></i>`).join('')}</span>
-        <span class="mix-legend">${perSorted.slice(0, 3).map(([k, ms]) => `<span style="--c:${colorOf(k)}"><i></i>${esc(getProject(k)?.name || 'Sans projet')} · ${fmtDur(ms)}</span>`).join('')}</span>` : ''}
-      </button>
-    </section>`;
+  // Tâches sur plusieurs jours (journées entières)
+  const spans = m.spans.length ? `<div class="dp-spans">${m.spans.map(({ p, t }) => `<button type="button" class="dp-span${planDone(p) ? ' done' : ''}" data-action="open-plan" data-id="${p.id}" style="--c:${colorOf(t.projectId)}"><i></i><span>${esc(t.title)}</span><small>${esc(spanNote(p, day))}</small></button>`).join('')}</div>` : '';
 
-  // Chrono lancé sur un créneau déjà fini : il reste « en cours » jusqu'à maintenant (ou se recale sur l'heure réelle).
+  // Déroulé : créneaux (faits compris, en petit), créneaux libres à venir, ligne « maintenant »
   const live = new Map();
-  for (const a of state.timers) { const l = liveSpan(a); if (l) live.set(l.p.id, l); }
-  for (const i of m.open) {
+  if (isToday) for (const a of state.timers) { const l = liveSpan(a); if (l) live.set(l.p.id, l); }
+  const items = m.items.map((i) => {
     const l = i.kind === 'plan' && live.get(i.p.id);
-    if (l) Object.assign(i, { s0: i.s, e0: i.e, moved: l.moved, over: l.moved ? 0 : nm - i.e, s: l.moved ? minOfDay(l.start, m.day) : i.s, e: Math.max(i.e, nm + 1) });
-  }
-  m.open.sort((a, b) => a.s - b.s || (a.kind === 'event' ? -1 : 1));
-  const liveNote = (i) => (!i.e0 ? '' : i.moved ? 'en cours' : i.over >= 1 ? `+${fmtDur(i.over * 60e3)}` : 'prolongé');
-
-  // Carte « Maintenant » : créneau en cours (celui dont le chrono tourne d'abord), sinon le prochain
-  const open = (i) => i.kind === 'plan' && !planDone(i.p);
-  const inNow = (i) => open(i) && i.s <= nm && nm < i.e;
-  const current = m.open.find((i) => inNow(i) && timerOf(i.t.id)) || m.open.find(inNow);
-  const next = m.open.find((i) => open(i) && i.s > nm);
-  const busyEvent = m.items.find((i) => i.kind === 'event' && i.s <= nm && nm < i.e);
-  const focus = current || next;
-  let nowCard = '';
-  if (focus) {
-    const t = focus.t;
-    const running = !!timerOf(t.id);
-    const isNow = focus === current;
-    const grown = isNow && focus.e0 != null; // prolongé : la fin est « quand le chrono s'arrête »
-    const label = !isNow ? `Ensuite · ${minLabel(focus.s)} (dans ${fmtDur((focus.s - nm) * 60e3)})`
-      : grown ? `Maintenant · depuis ${minLabel(focus.s)}` : `Maintenant · ${minLabel(focus.s)}–${minLabel(focus.e)}`;
-    const meta = !isNow ? (busyEvent ? ` · après « ${esc(busyEvent.ev.title)} »` : '')
-      : !grown ? ` · reste ${fmtDur((focus.e - nm) * 60e3)}`
-        : focus.moved ? ` · prévu à ${minLabel(focus.s0)}` : ` · prévu jusqu’à ${minLabel(focus.e0)}${focus.over >= 1 ? ` · <b class="over">+${fmtDur(focus.over * 60e3)}</b>` : ''}`;
-    nowCard = `<section class="now-card${running ? ' running' : ''}" style="--c:${colorOf(t.projectId)}">
-      <div class="now-label"><span class="pulse"></span>${label}</div>
-      <div class="now-title" role="button" tabindex="0" data-action="open-plan" data-id="${focus.p.id}">${t.starred ? '★ ' : ''}${esc(t.title)}</div>
-      <div class="now-meta">${focus.p.note ? `<b class="now-note">${esc(focus.p.note)}</b> · ` : ''}${esc(pathLabel(t.projectId, t.subprojectId))}${meta}</div>
-      ${isNow ? `<div class="now-progress${grown ? ' live' : ''}"><i style="width:${grown ? 100 : Math.round(((nm - focus.s) / (focus.e - focus.s)) * 100)}%"></i></div>` : ''}
-      <div class="now-actions">
-        <button type="button" class="btn ${running ? 'stop' : 'primary'} grow" data-action="toggle-timer" data-id="${t.id}">${running ? `${ICON.stop} <span${tickAttr('clock', 0, sinceOf(t.id))}>${fmtClock(elapsedSince(sinceOf(t.id)))}</span>` : `${ICON.play} ${isNow ? 'Lancer le chrono' : 'Commencer'}`}</button>
-        <button type="button" class="btn grow" data-action="today-done" data-kind="plan" data-id="${focus.p.id}">${ICON.check} Fait</button>
-      </div>
-    </section>`;
-  }
-
-  // Programme : ce qui reste à faire + créneaux libres + ligne « maintenant » (les créneaux réalisés le quittent)
-  const from = Math.max(VIEW_START, Math.ceil(nm / 15) * 15);
-  const rows = [...m.open, ...freeGaps(m.open, from).map((g) => ({ kind: 'gap', ...g }))]
-    .sort((a, b) => a.s - b.s || (a.kind === 'gap' ? 1 : -1));
-  const nowRule = `<li class="ag-now"><time>${minLabel(nm)}</time><div class="rule"></div></li>`;
-  let placed = false;
-  const agenda = rows.map((i) => {
-    let html = '';
-    const isCur = i.kind !== 'gap' && i.s <= nm && nm < i.e;
-    if (!placed && (isCur || i.s > nm)) { placed = true; if (!isCur) html += nowRule; }
+    return l ? { ...i, s0: i.s, e0: i.e, moved: l.moved, over: l.moved ? 0 : nm - i.e, s: l.moved ? minOfDay(l.start, day) : i.s, e: Math.max(i.e, nm + 1), live: true } : { ...i };
+  });
+  const open = items.filter(isOpenItem);
+  const gaps = past || !open.length && !isToday ? [] : freeGaps(open, isToday ? Math.max(VIEW_START, Math.ceil(nm / 15) * 15) : open[0].s, isToday ? DAY_WINDOW_END : Math.max(...open.map((i) => i.e)));
+  const rows = [...items, ...gaps.map((g) => ({ kind: 'gap', ...g }))].sort((a, b) => a.s - b.s || (a.kind === 'gap' ? 1 : -1));
+  const nowRow = `<li class="dl-now" aria-hidden="true"><time>${minLabel(nowMin())}</time><i></i></li>`;
+  let nowPlaced = !isToday;
+  const html = rows.map((i) => {
+    let pre = '';
+    const done = i.kind === 'plan' && planDone(i.p);
+    const cur = isToday && i.kind !== 'gap' && !done && i.s <= nm && nm < i.e;
+    if (!nowPlaced && (cur || i.s > nm || (i.kind === 'gap' && i.s >= nm))) { nowPlaced = true; if (!cur) pre = nowRow; }
     if (i.kind === 'gap') {
-      return `${html}<li class="ag ag-gap"><time>${minLabel(i.s)}</time><div class="gap-card" role="button" tabindex="0" data-action="gap-plan" data-min="${i.s}" data-max="${i.e - i.s}">
-        <span><b>Libre</b> · ${fmtDur((i.e - i.s) * 60e3)}<small>${minLabel(i.s)} – ${minLabel(i.e)}</small></span>
-        <span class="btn small">${ICON.plus} Ajouter</span></div></li>`;
+      return `${pre}<li class="dl-gap"><time>${minLabel(i.s)}</time><button type="button" class="dl-free" data-action="gap-plan" data-min="${i.s}" data-max="${i.e - i.s}">
+        <span>Libre · ${fmtDur((i.e - i.s) * 60e3)}</span><small>${minLabel(i.s)} – ${minLabel(i.e)}</small>${ICON.plus}</button></li>`;
     }
-    const past = i.e <= nm;
     if (i.kind === 'event') {
-      return `${html}<li class="ag ag-ev${past ? ' past' : ''}${isCur ? ' current' : ''}" style="--c:${i.ev.color || EVENT_COLORS[0]}"><time>${minLabel(i.s)}</time>
-        <div class="ev-card" role="button" tabindex="0" data-action="open-event" data-id="${i.ev.id}"><b>${esc(i.ev.title)}</b><span>${shortLabel(i.ev.start)}–${shortLabel(i.ev.end)}</span></div></li>`;
+      return `${pre}<li class="dl-row ev${i.e <= nm ? ' past' : ''}" style="--c:${i.ev.color || EVENT_COLORS[0]}"><span class="dl-time"><b>${minLabel(i.s)}</b><small>${minLabel(i.e)}</small></span>
+        <div class="dl-card ev-card" role="button" tabindex="0" data-action="open-event" data-id="${i.ev.id}"><div class="dl-main"><div class="day-title">${esc(i.ev.title)}</div></div></div></li>`;
     }
-    const done = planDone(i.p);
-    // Créneau à faire, sans chrono en cours : on le saisit par son heure pour changer l'ordre de la journée.
-    const movable = !done && !i.p.allDay && !timerOf(i.t.id);
-    return `${html}<li class="ag ag-plan${past ? ' past' : ''}${isCur && !done ? ' current' : ''}${movable ? ' movable' : ''}" data-id="${i.p.id}" style="--c:${colorOf(i.t.projectId)}"><time${movable ? ' class="ag-grip" title="Glisser pour changer l’ordre de la journée"' : ''}>${minLabel(i.s)}${movable ? `<i aria-hidden="true">${ICON.grip}</i>` : ''}</time>
-      ${todayCard({ t: i.t, p: i.p, dur: (i.e0 ?? i.e) - (i.s0 ?? i.s), done, totals, live: liveNote(i) })}</li>`;
-  }).join('') + (placed || !rows.length ? '' : nowRule);
+    const { p, t } = i;
+    const running = !!timerOf(t.id);
+    const late = isToday && !done && !cur && i.e <= nm;
+    const dur = (i.e0 ?? i.e) - (i.s0 ?? i.s);
+    const spent = dayTracked(t.id, day);
+    const editing = temp.dlEdit === p.id && !done;
+    const meta = [
+      p.note ? `<b class="dl-note">${esc(p.note)}</b>` : '',
+      i.live ? `<em class="dl-live">${i.moved ? 'en cours' : `+${fmtDur(Math.max(0, i.over) * 60e3)}`}</em>` : `<span>${p.series ? '↻ ' : ''}${fmtDur(dur * 60e3)}</span>`,
+      t.projectId ? `<span class="dl-proj"><i></i>${esc(getSub(t.subprojectId)?.name || getProject(t.projectId)?.name || '')}</span>` : '',
+      done ? '' : stepsPill(t),
+      spent || running ? `<span class="dl-spent">${ICON.clock}${liveDur(spent, isToday ? sinceOf(t.id) : [])}</span>` : '',
+    ].filter(Boolean).join('');
+    const prog = cur && !i.live ? `<i class="dl-prog" style="width:${Math.round(((nm - i.s) / Math.max(1, i.e - i.s)) * 100)}%"></i>` : '';
+    return `${pre}<li class="dl-row is-slot${done ? ' done' : ''}${cur ? ' current' : ''}${late ? ' late' : ''}${editing ? ' editing' : ''}" data-id="${p.id}" data-kind="plan"${done || running ? '' : ' data-drag="1"'} style="--c:${colorOf(t.projectId)}">
+      <button type="button" class="dl-time" data-action="dl-edit" data-id="${p.id}"${done ? ' disabled' : ''} aria-label="Changer l’horaire"><b>${minLabel(i.s)}</b><small>${minLabel(i.live ? Math.min(i.e, DAY_MIN) : i.e)}</small></button>
+      <div class="day-card dl-card${running ? ' running' : ''}">
+        <button type="button" class="check" data-action="today-done" data-kind="plan" data-id="${p.id}" aria-label="${done ? 'Annuler la validation' : 'Valider'}">${ICON.check}</button>
+        <div class="dl-main" role="button" tabindex="0" data-action="open-plan" data-id="${p.id}">
+          <div class="day-title">${t.starred ? '★ ' : ''}${esc(t.title)}</div>
+          <div class="dl-meta">${meta}</div>
+        </div>
+        ${done ? '' : `<button type="button" class="dl-play${running ? ' on' : ''}" data-action="toggle-timer" data-id="${t.id}" aria-label="${running ? 'Arrêter' : 'Lancer le chrono'}">${running ? ICON.stop : ICON.play}</button>`}
+        ${prog}
+      </div>
+      ${editing ? dlEditor(p, day) : ''}
+    </li>`;
+  }).join('') + (nowPlaced ? '' : nowRow);
+  const timeline = `<div class="dp-sec"><span>Déroulé</span><button type="button" data-action="go-day" data-value="${day}">Planning ${ICON.right}</button></div>
+    ${rows.length || isToday ? `<ol class="dl" data-list="plan">${html}</ol>` : '<p class="dp-empty">Aucun créneau ce jour-là.</p>'}`;
 
-  const agendaHtml = `<div class="section-title"><span>Programme</span><button type="button" data-action="go-day" data-value="${m.day}">Planning ${ICON.right}</button></div>
-    ${rows.length ? `<ol class="agenda">${agenda}</ol>`
-      : `<div class="card empty-day"><b>Plus de créneau aujourd’hui</b><span>La suite se prépare dans le planning.</span></div>`}`;
-
-  const spanNote = (p) => {
-    const first = ymd(new Date(p.start));
-    const last = ymd(new Date(p.end - 1));
-    const n = Math.round((parseYmd(last) - parseYmd(first)) / 864e5) + 1;
-    const k = Math.round((parseYmd(m.day) - parseYmd(first)) / 864e5) + 1;
-    return n > 1 ? `Jour ${k} sur ${n} · jusqu’au ${fmt(parseYmd(last), { weekday: 'short', day: 'numeric' })}` : 'Toute la journée';
+  // À faire sans horaire (échéances du jour ; aujourd'hui, les retards aussi), et ce qui a été fait sans créneau
+  const untimed = (t, done = false) => {
+    const running = !!timerOf(t.id);
+    const late = !done && t.deadline && t.deadline < today ? dueInfo(t.deadline) : null;
+    const spent = dayTracked(t.id, day);
+    const meta = [
+      late ? `<span class="dl-late">${esc(late.text)}</span>` : '',
+      t.projectId ? `<span class="dl-proj"><i></i>${esc(getSub(t.subprojectId)?.name || getProject(t.projectId)?.name || '')}</span>` : '',
+      done ? '' : stepsPill(t),
+      spent || running ? `<span class="dl-spent">${ICON.clock}${liveDur(spent, isToday ? sinceOf(t.id) : [])}</span>` : '',
+    ].filter(Boolean).join('');
+    return `<li class="dl-row is-task${done ? ' done' : ''}" data-id="${t.id}" data-kind="task"${done || running ? '' : ' data-drag="1"'} style="--c:${colorOf(t.projectId)}">
+      ${done || past ? '<span class="dl-time"></span>' : `<button type="button" class="dl-time dl-fit" data-action="today-fit" data-id="${t.id}" title="Caler dans le premier créneau libre">${ICON.cal}<small>Caler</small></button>`}
+      <div class="day-card dl-card${running ? ' running' : ''}">
+        <button type="button" class="check" data-action="today-done" data-kind="task" data-id="${t.id}" aria-label="${done ? 'Annuler' : 'Valider'}">${ICON.check}</button>
+        <div class="dl-main" role="button" tabindex="0" data-action="open-task" data-id="${t.id}">
+          <div class="day-title">${t.starred ? '★ ' : ''}${esc(t.title)}</div>
+          ${meta ? `<div class="dl-meta">${meta}</div>` : ''}
+        </div>
+        ${done ? '' : `<button type="button" class="dl-play${running ? ' on' : ''}" data-action="toggle-timer" data-id="${t.id}" aria-label="${running ? 'Arrêter' : 'Lancer le chrono'}">${running ? ICON.stop : ICON.play}</button>`}
+      </div>
+    </li>`;
   };
-  const spansHtml = m.spans.length ? `<div class="section-title"><span>Sur plusieurs jours</span></div>
-    <div class="list">${m.spans.map(({ p, t }) => todayCard({ t, p, totals, note: spanNote(p) })).join('')}</div>` : '';
+  const todo = m.due.length || m.extraDone.length ? `<div class="dp-sec"><span>À faire · sans horaire${m.due.length ? ` · ${m.due.length}` : ''}</span>${m.due.length > 1 && !past && nextFreeSlot(day) ? '<button type="button" data-action="today-fit-all">✨ Tout caler</button>' : ''}</div>
+    <ul class="dl dl-todo" data-list="task">${m.due.map((t) => untimed(t)).join('')}${m.extraDone.map((t) => untimed(t, true)).join('')}</ul>`
+    : isToday || !past ? '<ul class="dl dl-todo dl-empty" data-list="task"><li class="dl-drop-here">Glisse une tâche ici pour la faire ce jour-là, sans horaire</li></ul>' : '';
 
-  const dueHtml = m.due.length ? `<div class="section-title"><span>À faire aujourd’hui · ${m.due.length}</span>${m.due.length > 1 && nextFreeSlot(m.day) ? `<button type="button" data-action="today-fit-all">✨ Tout caler</button>` : ''}</div>
-    <div class="list">${m.due.map((t) => todayCard({ t, totals })).join('')}</div>` : '';
-
-  const prioShown = temp.showAllPrio ? m.prio : m.prio.slice(0, 4);
-  const prioHtml = m.prio.length ? `<div class="section-title"><span>★ Prioritaires à caser</span></div>
-    <div class="card prio-list">${prioShown.map((t) => `<div class="prio-row" style="--c:${colorOf(t.projectId)}">
+  const prioShown = temp.showAllPrio ? m.prio : m.prio.slice(0, 3);
+  const prio = m.prio.length ? `<div class="dp-sec"><span>★ Prioritaires</span></div>
+    <div class="prio-list dp-prio">${prioShown.map((t) => `<div class="prio-row" style="--c:${colorOf(t.projectId)}">
         <span class="dot"></span>
         <button type="button" class="prio-title" data-action="open-task" data-id="${t.id}">${esc(t.title)}<small>${esc(pathLabel(t.projectId, t.subprojectId))}</small></button>
         <button type="button" class="btn small" data-action="today-add" data-id="${t.id}">${ICON.plus} Aujourd’hui</button>
       </div>`).join('')}
-      ${m.prio.length > 4 ? `<button type="button" class="prio-more" data-action="toggle-prio">${temp.showAllPrio ? 'Voir moins' : `Voir les ${m.prio.length - 4} autres`}</button>` : ''}
+      ${m.prio.length > 3 ? `<button type="button" class="prio-more" data-action="toggle-prio">${temp.showAllPrio ? 'Voir moins' : `Voir les ${m.prio.length - 3} autres`}</button>` : ''}
     </div>` : '';
 
-  // Réalisées aujourd'hui (créneaux et tâches) : rangées dans un petit menu discret, avec « ↺ » pour annuler.
-  const doneItems = [
-    ...m.blocks.filter((i) => planDone(i.p)).map((i) => ({ t: i.t, p: i.p, at: i.p.doneAt || i.t.doneAt || dateAt(m.day, i.e) })),
-    ...m.extraDone.map((t) => ({ t, at: t.doneAt })),
-  ].sort((a, b) => b.at - a.at);
-  const spentToday = (t) => state.sessions.reduce((n, x) => n + (x.taskId === t.id ? overlap(x, m.d0, m.d1) : 0), 0);
-  const doneHtml = doneItems.length ? `<details class="done-today"${temp.showTodayDone ? ' open' : ''}>
-      <summary><span class="dt-ic">${ICON.check}</span><span>${doneItems.length} réalisée${doneItems.length > 1 ? 's' : ''} aujourd’hui</span>${ICON.down}</summary>
-      <ul class="dt-list">${doneItems.map(({ t, p, at }) => {
-        const ms = spentToday(t);
-        return `<li class="dt-row" style="--c:${colorOf(t.projectId)}">
-          <span class="dt-tick">${ICON.check}</span>
-          <button type="button" class="dt-main" data-action="${p ? 'open-plan' : 'open-task'}" data-id="${p ? p.id : t.id}"><b>${esc(t.title)}</b>
-            <small>${clockLabel(at)}${t.projectId ? ` · ${esc(pathLabel(t.projectId, t.subprojectId))}` : ''}${ms ? ` · ⏱ ${fmtDur(ms)}` : ''}</small></button>
-          <button type="button" class="dt-undo" data-action="today-done" data-kind="${p ? 'plan' : 'task'}" data-id="${p ? p.id : t.id}" title="Remettre à faire" aria-label="Remettre à faire">↺</button>
-        </li>`;
-      }).join('')}
-        <li class="dt-more"><button type="button" data-action="tab" data-value="review" data-sub="done">Tout le bilan ${ICON.right}</button></li>
-      </ul>
-    </details>` : '';
-
-  const tm = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
-  const tk = ymd(tm);
-  const tPlans = plansOn(tk).length + spansOn(tk).length;
-  const tDue = state.tasks.filter((t) => !t.done && t.deadline === tk).length;
-  const tEv = eventsOn(tm).length;
-  const tomorrow = `<button type="button" class="card tomorrow" data-action="go-day" data-value="${tk}">
-      <span class="tm-icon" aria-hidden="true">🌙</span>
-      <span class="tm-text"><b>Demain · ${esc(fmt(tm, { weekday: 'long', day: 'numeric' }))}</b>
-        <small>${[tPlans && `${tPlans} créneau${tPlans > 1 ? 'x' : ''}`, tDue && `${tDue} échéance${tDue > 1 ? 's' : ''}`, tEv && `${tEv} événement${tEv > 1 ? 's' : ''}`].filter(Boolean).join(' · ') || 'Rien de prévu pour l’instant'}</small></span>
-      ${ICON.right}</button>`;
-
-  const hint = !state.ui.hideSwipeHint && (m.due.length || m.blocks.some((i) => !planDone(i.p)))
-    ? `<div class="swipe-hint"><span>👆 Balaie une tâche <b>vers la droite</b> pour la valider, <b>vers la gauche</b> pour la reporter à demain. Saisis-la par son heure (⋮⋮) pour changer l’ordre de la journée.</span><button type="button" class="icon-btn" data-action="hide-swipe-hint" aria-label="Masquer l’astuce">${ICON.close}</button></div>`
+  const hint = !state.ui.dayHint && (m.blocks.length || m.due.length)
+    ? `<div class="dl-hint"><span><b>Appui long</b> sur une tâche pour la déplacer (contre un bord : jour suivant ou précédent) · <b>touche l’heure</b> pour la changer · <b>balaie la page</b> pour changer de jour.</span><button type="button" class="icon-btn" data-action="day-hint-ok" aria-label="Compris">${ICON.close}</button></div>`
     : '';
-
-  const meta = navTip() || installHint() || backupHint(); // une seule carte d'aide à la fois, au-dessus de la journée
-  return `${meta}${hero}${nowCard}${hint}${spansHtml}${agendaHtml}${dueHtml}${prioHtml}${doneHtml}${tomorrow}`;
+  const meta = isToday ? navTip() || installHint() || backupHint() : ''; // une seule carte d'aide à la fois
+  return `<div class="dp">${meta}${head}${sum}${hint}${spans}${timeline}${todo}${prio}</div>`;
 }
+
+/* ----- Déplacer une tâche dans la journée, ou d'un jour à l'autre ----- */
+
+// Ce qui ne bouge pas dans un jour (sauf « but ») : créneaux réguliers et créneaux dont le chrono tourne.
+const fixedOn = (day, but) => plansOn(day).filter((x) => x !== but && !x.allDay && !planDone(x) && (x.series || timerOf(x.taskId)));
+// Première heure libre à partir de « st » pour « dur », sans chevaucher ce qui ne bouge pas.
+function clearOf(st, dur, blocks) {
+  for (let i = 0; i < 50; i++) {
+    const b = blocks.find((x) => x.start < st + dur && x.end > st);
+    if (!b) return st;
+    st = b.end;
+  }
+  return st;
+}
+
+// Pose un créneau (déjà existant, ou nouveau pour une tâche) dans un jour, à une place de son déroulé (index parmi
+// les créneaux qu'on peut déplacer) ; sans place : à la même heure. Ce qui suit est poussé s'il chevauche.
+function placeOnDay(p, day, index = null) {
+  const today = ymd(new Date());
+  const lower = day === today ? Math.ceil(now() / 3e5) * 3e5 : dateAt(day, 0);
+  const dur = p.end - p.start;
+  const mv = plansOn(day).filter((x) => x !== p && !planDone(x) && !timerOf(x.taskId)).sort((a, b) => a.start - b.start);
+  const fixed = fixedOn(day, p);
+  let st = Math.max(dateAt(day, minOfDay(p.start, ymd(new Date(p.start)))), lower);
+  if (index != null && mv.length) {
+    const prev = mv[index - 1];
+    const next = mv[index];
+    if (prev && st < prev.end) st = prev.end;
+    if (next && st + dur > next.start) st = Math.max(prev ? prev.end : lower, Math.min(st, next.start - dur));
+  }
+  st = clearOf(Math.min(st, dateAt(day, DAY_MIN) - Math.min(dur, DAY_MIN * 60e3)), dur, fixed);
+  Object.assign(p, { start: st, end: st + dur });
+  let cursor = p.end;
+  for (const x of mv.filter((y) => y.start >= st && !fixed.includes(y))) {
+    if (x.start >= cursor) break;
+    const d = x.end - x.start;
+    const s2 = clearOf(cursor, d, fixed);
+    Object.assign(x, { start: s2, end: s2 + d });
+    cursor = s2 + d;
+  }
+}
+
+function dropPlan(id, day, tg) {
+  const p = state.plans.find((x) => x.id === id);
+  const t = getTask(p?.taskId);
+  if (!p || !t) { render(); return; }
+  const from = ymd(new Date(p.start));
+  const before = state.plans.map((x) => ({ ...x }));
+  const undo = () => { state.plans = before; save(); render(); };
+  if (tg?.list === 'task') { // vers « sans horaire »
+    if (p.series) { render(); toast('Un créneau régulier garde son horaire (ouvre-le pour le retirer)'); return; }
+    const old = t.deadline;
+    state.plans = state.plans.filter((x) => x !== p);
+    t.deadline = day;
+    save(); render(); buzz();
+    toast(`« ${t.title} » : sans horaire, ${dayLabel(day).toLowerCase()}`, { label: 'Annuler', fn: () => { t.deadline = old; undo(); } });
+    return;
+  }
+  if (from === day) {
+    if (tg?.list !== 'plan') { render(); return; }
+    const ids = $$('.dl[data-list="plan"] .dl-row[data-drag]').map((r) => r.dataset.id).filter((x) => x !== id);
+    ids.splice(Math.min(tg.index, ids.length), 0, id);
+    reorderDay(ids, id);
+    return;
+  }
+  placeOnDay(p, day, tg?.list === 'plan' ? tg.index : null);
+  save(); render(); buzz();
+  toast(`« ${t.title} » : ${dayLabel(day).toLowerCase()} à ${clockLabel(p.start)}`, { label: 'Annuler', fn: undo });
+}
+
+function dropTask(id, day, tg) {
+  const t = getTask(id);
+  if (!t) { render(); return; }
+  if (tg?.list === 'plan') { // dans le déroulé : la tâche prend un horaire à cette place
+    const today = ymd(new Date());
+    const dur = (t.dur || PLAN_DUR) * 60e3;
+    const base = day === today ? Math.max(Math.ceil(now() / 3e5) * 3e5, dateAt(day, 8 * 60)) : dateAt(day, 9 * 60);
+    const p = { id: uid(), taskId: t.id, start: base, end: base + dur }; // placeOnDay le cale entre ses voisins
+    const before = state.plans.map((x) => ({ ...x }));
+    placeOnDay(p, day, tg.index);
+    state.plans.push(p);
+    save(); render(); buzz();
+    toast(`« ${t.title} » à ${clockLabel(p.start)}`, { label: 'Annuler', fn: () => { state.plans = before; save(); render(); } });
+    return;
+  }
+  moveDeadline(id, day); // ailleurs dans la page : la tâche est pour ce jour-là (sans horaire)
+}
+
+// Glisser une tâche de la page : appui long au doigt (ou cliquer-glisser à la souris), puis la lâcher dans le
+// déroulé (nouvelle place, nouvel horaire), dans « sans horaire », ou contre un bord pour changer de jour.
+const dd = { pending: null, active: null };
+
+document.addEventListener('pointerdown', (e) => {
+  if (state.ui.tab !== 'today' || !profile || dd.active || (e.pointerType === 'mouse' && e.button !== 0)) return;
+  const row = e.target.closest('.dl-row[data-drag]');
+  if (!row || e.target.closest('.check, .dl-play, .dl-time, .dl-edit, .steps-pill, input')) return;
+  dd.pending = { row, type: e.pointerType, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY };
+  if (e.pointerType !== 'mouse') dd.pending.timer = setTimeout(ddBegin, 380); // appui long
+});
+window.addEventListener('pointermove', (e) => {
+  if (dd.active) { ddMove(e.clientX, e.clientY); return; }
+  const p = dd.pending;
+  if (!p) return;
+  Object.assign(p, { x: e.clientX, y: e.clientY });
+  const dist = Math.hypot(e.clientX - p.x0, e.clientY - p.y0);
+  if (p.type === 'mouse' && dist > 6) ddBegin();
+  else if (p.type !== 'mouse' && dist > 10) ddCancel(); // il fait défiler ou balaie la page
+});
+window.addEventListener('pointerup', () => { if (dd.active) ddEnd(true); else ddCancel(); });
+window.addEventListener('pointercancel', () => { if (dd.active) ddEnd(false); else ddCancel(); });
+document.addEventListener('touchmove', (e) => { if (dd.active) e.preventDefault(); }, { passive: false });
+document.addEventListener('contextmenu', (e) => { if (dd.active || dd.pending || e.target.closest('.dl-row')) e.preventDefault(); });
+
+function ddCancel() {
+  if (dd.pending) clearTimeout(dd.pending.timer);
+  dd.pending = null;
+}
+
+function ddBegin() {
+  const p = dd.pending;
+  if (!p) return;
+  clearTimeout(p.timer);
+  dd.pending = null;
+  const card = p.row.querySelector('.dl-card');
+  if (!card) return;
+  const r = card.getBoundingClientRect();
+  const ghost = card.cloneNode(true);
+  ghost.classList.add('dd-ghost');
+  Object.assign(ghost.style, { width: `${r.width}px`, left: `${r.left}px`, top: `${r.top}px` });
+  document.body.appendChild(ghost);
+  for (const side of ['prev', 'next']) {
+    if (!$(`.dd-edge.${side}`)) document.body.insertAdjacentHTML('beforeend', `<div class="dd-edge ${side}" aria-hidden="true"><span></span></div>`);
+  }
+  dd.active = { id: p.row.dataset.id, kind: p.row.dataset.kind, dx: p.x - r.left, dy: p.y - r.top, x: p.x, y: p.y, ghost, edge: null, target: null };
+  p.row.classList.add('dd-src');
+  document.body.classList.add('dd-on');
+  ddEdgeLabels();
+  haptic();
+  ddMove(p.x, p.y);
+  dd.active.raf = requestAnimationFrame(ddLoop);
+}
+
+// Libellés des bords : le jour d'avant, le jour d'après.
+function ddEdgeLabels() {
+  const lab = (d) => { const w = dayWord(d); return w === 'Aujourd’hui' || w === 'Demain' ? w : cap(fmt(parseYmd(d), { weekday: 'short', day: 'numeric' })); };
+  const day = shownDay();
+  const prev = addDays(day, -1);
+  $('.dd-edge.prev span').textContent = `‹ ${prev === addDays(ymd(new Date()), -1) ? 'Hier' : lab(prev)}`;
+  $('.dd-edge.next span').textContent = `${lab(addDays(day, 1))} ›`;
+}
+
+// Place visée : dans le déroulé (index parmi les créneaux déplaçables), ou dans « sans horaire ».
+function ddMove(x, y) {
+  const a = dd.active;
+  Object.assign(a, { x, y });
+  a.ghost.style.left = `${x - a.dx}px`;
+  a.ghost.style.top = `${y - a.dy}px`;
+  let tg = null;
+  for (const list of $$('.dl[data-list]')) {
+    const r = list.getBoundingClientRect();
+    if (y < r.top - 24 || y > r.bottom + 24) continue;
+    const rows = [...list.querySelectorAll(':scope > .dl-row[data-drag]')].filter((el) => el.dataset.id !== a.id);
+    const index = rows.filter((el) => { const b = el.getBoundingClientRect(); return b.top + b.height / 2 < y; }).length;
+    tg = { list: list.dataset.list, index, el: list, rows };
+  }
+  a.target = tg;
+  let mark = $('.dd-mark');
+  if (!tg) { mark?.remove(); return; }
+  if (!mark) mark = Object.assign(document.createElement('li'), { className: 'dd-mark' });
+  const ref = tg.list === 'plan' ? tg.rows[tg.index] : null;
+  if (ref) ref.before(mark);
+  else if (tg.list === 'plan' && tg.rows.length) tg.rows[tg.rows.length - 1].after(mark);
+  else tg.el.appendChild(mark);
+}
+
+function ddLoop() {
+  const a = dd.active;
+  if (!a) return;
+  // contre un bord : au bout d'un instant, le jour d'avant ou d'après (et ainsi de suite en y restant)
+  const dir = a.x < 30 ? -1 : a.x > innerWidth - 30 ? 1 : 0;
+  document.body.classList.toggle('dd-edge-prev', dir < 0);
+  document.body.classList.toggle('dd-edge-next', dir > 0);
+  if (!dir) a.edge = null;
+  else if (!a.edge || a.edge.dir !== dir) a.edge = { dir, at: now() + 550 };
+  else if (now() >= a.edge.at) {
+    a.edge.at = now() + 1000;
+    goDay(addDays(shownDay(), dir), dir > 0 ? 'fwd' : 'back', true);
+    ddEdgeLabels();
+    buzz();
+    ddMove(a.x, a.y);
+  }
+  // près du haut ou du bas : la page défile
+  const dy = a.y < 110 ? -Math.ceil((110 - a.y) / 8) : a.y > innerHeight - 120 ? Math.ceil((a.y - (innerHeight - 120)) / 8) : 0;
+  if (dy) { window.scrollBy(0, dy); ddMove(a.x, a.y); }
+  a.raf = requestAnimationFrame(ddLoop);
+}
+
+function ddEnd(drop) {
+  const a = dd.active;
+  dd.active = null;
+  cancelAnimationFrame(a.raf);
+  a.ghost.remove();
+  $('.dd-mark')?.remove();
+  $$('.dd-src').forEach((el) => el.classList.remove('dd-src'));
+  document.body.classList.remove('dd-on', 'dd-edge-prev', 'dd-edge-next');
+  temp.suppressClick = true; // le relâchement ne doit pas ouvrir la tâche
+  setTimeout(() => { temp.suppressClick = false; }, 350);
+  if (!drop) { render(); return; }
+  if (a.kind === 'plan') dropPlan(a.id, shownDay(), a.target);
+  else dropTask(a.id, shownDay(), a.target);
+}
+
+// Balayer la page vers la gauche / la droite : le lendemain / la veille.
+const ds = { on: false };
+document.addEventListener('touchstart', (e) => {
+  ds.on = false;
+  if (state.ui.tab !== 'today' || !profile || dd.active || e.touches.length !== 1 || sheet.open) return;
+  if (e.target.closest('input, textarea, select, .dl-edit, .dp-spans, .chips')) return;
+  Object.assign(ds, { on: true, x0: e.touches[0].clientX, y0: e.touches[0].clientY, lock: null, dx: 0 });
+}, { passive: true });
+document.addEventListener('touchmove', (e) => {
+  if (!ds.on || dd.active) return;
+  const dx = e.touches[0].clientX - ds.x0;
+  const dy = e.touches[0].clientY - ds.y0;
+  if (!ds.lock) {
+    if (Math.abs(dx) > 14 && Math.abs(dx) > Math.abs(dy) * 1.4) { ds.lock = 'x'; ddCancel(); }
+    else if (Math.abs(dy) > 12) { ds.on = false; return; }
+    else return;
+  }
+  ds.dx = dx;
+  const v = $('#view');
+  v.style.transition = 'none';
+  v.style.transform = `translateX(${dx * 0.45}px)`;
+  v.style.opacity = String(1 - Math.min(0.35, Math.abs(dx) / 900));
+}, { passive: true });
+document.addEventListener('touchend', () => {
+  if (!ds.on || ds.lock !== 'x') { ds.on = false; return; }
+  ds.on = false;
+  const v = $('#view');
+  const go = Math.abs(ds.dx) > 70;
+  v.style.transition = go ? 'none' : 'transform .22s ease, opacity .22s ease';
+  v.style.transform = '';
+  v.style.opacity = '';
+  if (go) goDay(addDays(shownDay(), ds.dx < 0 ? 1 : -1), ds.dx < 0 ? 'fwd' : 'back');
+  setTimeout(() => { v.style.transition = ''; }, 260);
+});
+// Ordinateur : ← / → (hors d'un champ), ou glisser à deux doigts sur le pavé tactile.
+document.addEventListener('keydown', (e) => {
+  if (state.ui.tab !== 'today' || !profile || sheet.open || $('#ask').open || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.target.closest?.('input, textarea, select, [contenteditable]') || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return;
+  e.preventDefault();
+  goDay(addDays(shownDay(), e.key === 'ArrowRight' ? 1 : -1), e.key === 'ArrowRight' ? 'fwd' : 'back');
+});
+const dw = { x: 0, at: 0 };
+document.addEventListener('wheel', (e) => {
+  if (state.ui.tab !== 'today' || !profile || Math.abs(e.deltaX) < Math.abs(e.deltaY) * 1.5) return;
+  if (now() - dw.at < 700) return;
+  dw.x += e.deltaX;
+  if (Math.abs(dw.x) < 140) return;
+  const dir = dw.x > 0 ? 1 : -1;
+  Object.assign(dw, { x: 0, at: now() });
+  goDay(addDays(shownDay(), dir), dir > 0 ? 'fwd' : 'back');
+}, { passive: true });
+// L'heure tapée dans l'éditeur d'horaire : le créneau commence là (même durée).
+document.addEventListener('change', (e) => {
+  if (!e.target.matches?.('.dle-time') || !e.target.value) return;
+  const p = state.plans.find((x) => x.id === e.target.dataset.id);
+  if (!p) return;
+  const day = ymd(new Date(p.start));
+  const dur = p.end - p.start;
+  const st = dateAt(day, toMin(e.target.value));
+  Object.assign(p, { start: st, end: st + dur });
+  save(); render();
+});
 
 /* ---------- Journal : les tâches réalisées, jour par jour ---------- */
 
@@ -6249,6 +6499,7 @@ function playDone(card, color) {
   doneAnims++;
   const finish = () => { if (--doneAnims === 0) render(); };
   if (reduce) { setTimeout(finish, 280); return; }
+  if (card.closest('.dl-row')) { setTimeout(finish, 560); return; } // déroulé : elle reste, en petit et barrée
   setTimeout(() => {
     // la carte glisse et s'efface pendant que la liste se resserre (l'espace entre les cartes compris)
     const box = card.closest('li.ag') || card.closest('.swipe-wrap') || card;
@@ -6464,7 +6715,7 @@ document.addEventListener('touchcancel', () => { resetCardSwipe(cs.card); cs.car
 
 // L'écran se met à jour chaque minute (ligne « maintenant », temps restant, créneau en cours).
 setInterval(() => {
-  if (state.ui.tab === 'today' && profile && !document.hidden && !sheet.open && !$('#ask').open && !cs.card && !sortDrag.active) render();
+  if (state.ui.tab === 'today' && profile && !document.hidden && !sheet.open && !$('#ask').open && !cs.card && !sortDrag.active && !dd.active && !document.activeElement?.closest?.('.dl-edit')) render();
 }, 60e3);
 
 const dayWord = (day) => {
@@ -7115,6 +7366,7 @@ const actions = {
     const from = TAB_ORDER.indexOf(state.ui.tab);
     const to = TAB_ORDER.indexOf(want.tab);
     const same = from === to && !temp.openProject && (!cfg || !want[cfg.key] || want[cfg.key] === state.ui[cfg.key]);
+    if (same && want.tab === 'today' && temp.day) { goDay(ymd(new Date()), temp.day > ymd(new Date()) ? 'back' : 'fwd'); return; } // un autre jour : retour à aujourd'hui
     if (same) { if (window.scrollY > 0) window.scrollTo({ top: 0, behavior: 'smooth' }); return; } // onglet déjà ouvert : remonter
     if (temp.openProject && history.state?.project) history.replaceState(null, ''); // on quitte la page du projet : le retour ne doit plus y mener
     pageTransition(to >= from ? 'fwd' : 'back', () => {
@@ -7431,25 +7683,25 @@ const actions = {
   },
 
   'today-fit'(el) {
-    const day = ymd(new Date());
+    const day = state.ui.tab === 'today' ? shownDay() : ymd(new Date());
     const slot = nextFreeSlot(day, getTask(el.dataset.id)?.dur || PLAN_DUR);
-    if (!slot) { toast('Plus de créneau libre aujourd’hui (jusqu’à 23h)'); return; }
+    if (!slot) { toast('Plus de créneau libre ce jour-là (jusqu’à 23h)'); return; }
     createPlan(el.dataset.id, day, slot.s, slot.dur);
   },
   'today-fit-all'() {
-    const day = ymd(new Date());
+    const day = shownDay();
     const created = [];
-    for (const t of todayModel().due) {
+    for (const t of dayModel(day).due) {
       const slot = nextFreeSlot(day, t.dur || PLAN_DUR);
       if (!slot) break;
       const p = { id: uid(), taskId: t.id, start: dateAt(day, slot.s), end: dateAt(day, slot.s + slot.dur) };
       state.plans.push(p);
       created.push(p);
     }
-    if (!created.length) { toast('Plus de créneau libre aujourd’hui (jusqu’à 23h)'); return; }
+    if (!created.length) { toast('Plus de créneau libre ce jour-là (jusqu’à 23h)'); return; }
     save(); render(); buzz();
     const ids = new Set(created.map((p) => p.id));
-    toast(`${created.length} tâche${created.length > 1 ? 's calées' : ' calée'} dans ta journée`, {
+    toast(`${created.length} tâche${created.length > 1 ? 's calées' : ' calée'} dans la journée`, {
       label: 'Annuler', fn: () => { state.plans = state.plans.filter((p) => !ids.has(p.id)); save(); render(); },
     });
   },
@@ -7461,7 +7713,51 @@ const actions = {
     save(); render(); buzz();
     toast('Ajoutée à ta journée', { label: 'Annuler', fn: () => { t.deadline = old; save(); render(); } });
   },
-  'gap-plan'(el) { openSlotSheet(ymd(new Date()), Number(el.dataset.min), Number(el.dataset.max) || undefined); },
+  'gap-plan'(el) { openSlotSheet(state.ui.tab === 'today' ? shownDay() : ymd(new Date()), Number(el.dataset.min), Number(el.dataset.max) || undefined); },
+  // Page d'un jour : changer de jour, horaire d'un créneau (éditeur sous la carte), déplacer d'un jour
+  'day-move'(el) { const n = Number(el.dataset.value); goDay(addDays(shownDay(), n), n > 0 ? 'fwd' : 'back'); },
+  'day-today'() { if (temp.day) goDay(ymd(new Date()), temp.day > ymd(new Date()) ? 'back' : 'fwd'); },
+  'day-hint-ok'() { state.ui.dayHint = 1; writeLocal(); render(); },
+  'dl-edit'(el) { temp.dlEdit = temp.dlEdit === el.dataset.id ? null : el.dataset.id; render(); },
+  'dl-shift'(el) {
+    const p = state.plans.find((x) => x.id === el.dataset.id);
+    if (!p) return;
+    const day = ymd(new Date(p.start));
+    const d = Number(el.dataset.value) * 60e3;
+    const st = Math.max(dateAt(day, 0), Math.min(p.start + d, dateAt(day, DAY_MIN) - (p.end - p.start)));
+    Object.assign(p, { start: st, end: st + (p.end - p.start) });
+    save(); render();
+  },
+  'dl-dur'(el) {
+    const p = state.plans.find((x) => x.id === el.dataset.id);
+    if (!p) return;
+    p.end = Math.min(p.start + Number(el.dataset.value) * 60e3, dateAt(ymd(new Date(p.start)), DAY_MIN));
+    save(); render();
+  },
+  'dl-move-day'(el) {
+    const p = state.plans.find((x) => x.id === el.dataset.id);
+    const t = getTask(p?.taskId);
+    if (!p || !t) return;
+    const old = { start: p.start, end: p.end };
+    const n = Number(el.dataset.value);
+    const shift = (v) => { const d = new Date(v); d.setDate(d.getDate() + n); return +d; };
+    Object.assign(p, { start: shift(p.start), end: shift(p.end) });
+    temp.dlEdit = null;
+    save(); render(); buzz();
+    toast(`« ${t.title} » : ${dayLabel(ymd(new Date(p.start))).toLowerCase()} à ${clockLabel(p.start)}`, { label: 'Annuler', fn: () => { Object.assign(p, old); save(); render(); } });
+  },
+  'dl-unplan'(el) {
+    const p = state.plans.find((x) => x.id === el.dataset.id);
+    const t = getTask(p?.taskId);
+    if (!p || !t) return;
+    const old = t.deadline;
+    const day = ymd(new Date(p.start));
+    state.plans = state.plans.filter((x) => x !== p);
+    t.deadline = day;
+    temp.dlEdit = null;
+    save(); render();
+    toast(`« ${t.title} » : sans horaire`, { label: 'Annuler', fn: () => { state.plans.push(p); t.deadline = old; save(); render(); } });
+  },
   'go-day'(el) {
     Object.assign(state.ui, { tab: 'plan', planView: 'day', planDate: el.dataset.value });
     writeLocal(); render(); window.scrollTo(0, 0); scrollPlanToHour();
