@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.26.0';
+const VERSION = '2.27.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -438,11 +438,14 @@ function livePlan(a) {
 }
 
 // Lancer une tâche ne coupe pas les autres chronos : ils tournent en parallèle.
+// (Le chrono automatique « Organisation des tâches » s'arrête : c'est maintenant cette tâche qui compte.)
 function startTimer(taskId) {
   if (timerOf(taskId)) return;
+  const auto = isOrga(getTask(taskId));
+  if (!auto) orgaStop();
   const a = { taskId, start: now() };
   state.timers.unshift(a);
-  livePlan(a);
+  if (!auto) livePlan(a);
   const t = getTask(taskId);
   if (t?.done) { t.done = false; t.doneAt = null; }
   save(); render(); buzz(); persistStorage();
@@ -453,6 +456,86 @@ function stopTimer(taskId) {
   save(); render(); buzz();
   return done;
 }
+
+/* ----- Chrono automatique : le temps passé dans l'app compte sur « Organisation des tâches » ----- */
+
+// Quand on utilise l'app (toucher, clic, clavier, défilement) sans autre chrono en cours, un chrono tourne sur la
+// tâche « Organisation des tâches » (créée au besoin, cachée des listes). Il s'arrête 2 min après la dernière action
+// ou quand on quitte l'app ; repris peu après, la même séance continue. Arrêté à la main : il attend la prochaine
+// ouverture de l'app. Réglage par appareil (Réglages › Chrono automatique).
+const ORGA_TITLE = 'Organisation des tâches';
+const ORGA_IDLE = 2 * 60e3;  // sans action pendant 2 min : arrêt
+const ORGA_GRACE = 15e3;     // compté encore après la dernière action
+const ORGA_MERGE = 3 * 60e3; // repris dans les 3 min : la séance d'avant continue
+const ORGA_MIN = 20e3;       // moins de 20 s : rien n'est compté
+const orga = { last: 0, idle: 0, wait: 0, off: false, saved: 0 };
+const isOrga = (t) => t?.auto === 'orga';
+const orgaOn = () => !!profile && state.ui.autoOrga !== false && !orga.off;
+
+function orgaTask(create = true) {
+  let t = state.tasks.find(isOrga) || state.tasks.find((x) => !x.done && plain(x.title) === plain(ORGA_TITLE));
+  if (t) {
+    if (!isOrga(t)) t.auto = 'orga';
+    if (t.done) Object.assign(t, { done: false, doneAt: null });
+    return t;
+  }
+  if (!create) return null;
+  t = { id: uid(), title: ORGA_TITLE, notes: 'Temps passé dans l’app à organiser tes tâches (chrono automatique).', projectId: null, subprojectId: null, deadline: null, done: false, doneAt: null, starred: false, createdAt: now(), auto: 'orga' };
+  state.tasks.push(t);
+  return t;
+}
+
+// Une action dans l'app : le chrono part (un instant après, pour ne pas gêner le toucher en cours) et l'arrêt recule.
+function orgaActive() {
+  if (!orgaOn() || document.hidden) return;
+  orga.last = now();
+  clearTimeout(orga.idle);
+  orga.idle = setTimeout(() => orgaStop(orga.last + ORGA_GRACE), ORGA_IDLE);
+  if (orga.last - orga.saved > 30e3) { orga.saved = orga.last; state.ui.orgaLast = orga.last; writeLocal(); }
+  const t = orgaTask(false);
+  if ((t && timerOf(t.id)) || state.timers.length || orga.wait) return; // déjà en route, ou un autre chrono compte
+  orga.wait = setTimeout(orgaStart, 900);
+}
+
+function orgaStart() {
+  orga.wait = 0;
+  if (!orgaOn() || document.hidden || state.timers.length || now() - orga.last > ORGA_IDLE) return;
+  const t = orgaTask();
+  let start = now();
+  const last = state.sessions.filter((x) => x.taskId === t.id).sort((a, b) => b.end - a.end)[0];
+  if (last && start - last.end < ORGA_MERGE) { state.sessions = state.sessions.filter((x) => x !== last); start = last.start; }
+  state.timers.push({ taskId: t.id, start });
+  state.ui.orgaMine = start; // lancé par cet appareil (un autre appareil synchronisé ne l'arrêtera pas)
+  save(); renderBanner(); tick();
+}
+
+// Arrêt (inactivité, app quittée, autre chrono lancé) : compté jusqu'à « end » (la dernière action, un peu plus).
+function orgaStop(end = now()) {
+  clearTimeout(orga.idle);
+  clearTimeout(orga.wait);
+  orga.wait = 0;
+  const t = profile && orgaTask(false);
+  const a = t && timerOf(t.id);
+  if (!a || a.start !== state.ui.orgaMine) return; // pas de chrono automatique lancé ici
+  end = Math.min(now(), Math.max(a.start, end));
+  if (end - a.start < ORGA_MIN) state.timers = state.timers.filter((x) => x !== a);
+  else finishTimer(t.id, end);
+  save(); renderBanner();
+}
+
+// Retour dans l'app (ou ouverture) : un chrono automatique resté ouvert s'arrête à la dernière action connue.
+function orgaWake() {
+  const t = profile && orgaTask(false);
+  const a = t && timerOf(t.id);
+  if (!a || a.start !== state.ui.orgaMine) return;
+  const last = Math.max(orga.last, state.ui.orgaLast || 0);
+  if (now() - last > ORGA_IDLE) orgaStop(last > a.start ? last + ORGA_GRACE : a.start);
+}
+
+for (const ev of ['pointerdown', 'keydown', 'wheel']) document.addEventListener(ev, orgaActive, { capture: true, passive: true });
+window.addEventListener('scroll', () => { if (now() - orga.last > 5e3) orgaActive(); }, { passive: true });
+document.addEventListener('pointermove', (e) => { if (e.pointerType === 'mouse' && now() - orga.last > 10e3) orgaActive(); }, { passive: true });
+window.addEventListener('pagehide', () => orgaStop(Math.min(now(), orga.last + ORGA_GRACE)));
 
 // Arrêter un chrono qui tourne depuis très longtemps (oubli probable) : on demande d'abord jusqu'à quand compter.
 function askStop(taskId, back = '') {
@@ -503,6 +586,8 @@ function selectProfile(id) {
   Object.assign(temp, { openProject: null, keys: null });
   temp.statsOpen.clear();
   state.ui.tab = 'today'; // la journée est la page d'accueil
+  orga.off = false;
+  orgaWake();
   writeLocal();
   render();
   window.scrollTo(0, 0);
@@ -518,6 +603,7 @@ async function leaveProfile() {
     const f = taskFormOpen();
     if (f?.dataset.id) commitTaskForm(f);
     closeSheet();
+    orgaStop(Math.min(now(), orga.last + ORGA_GRACE));
     if (syncConf.code && state.ui.syncDirty) await syncNow();
     if (syncing) await syncing.catch(() => {});
     clearTimeout(syncTimer);
@@ -665,7 +751,18 @@ function tick() {
 // Bandeau des chronos en cours : une ligne par chrono, chacune avec son bouton « Arrêter ».
 function renderBanner() {
   const el = $('#banner');
-  const list = runningTimers();
+  // Chrono automatique : une pastille discrète en haut (la page ne bouge pas quand il démarre).
+  const auto = state.timers.find((a) => isOrga(getTask(a.taskId)));
+  let pill = $('#orga');
+  if (!pill) { pill = Object.assign(document.createElement('button'), { id: 'orga', type: 'button', className: 'orga-pill' }); $('.topbar').insertBefore(pill, $('#sync')); }
+  pill.hidden = !auto;
+  if (auto) {
+    pill.dataset.action = 'open-timer';
+    pill.dataset.id = auto.taskId;
+    pill.title = `Chrono automatique : ${ORGA_TITLE} (temps passé dans l’app)`;
+    pill.innerHTML = `<span class="pulse"></span><span${tickAttr('clock', 0, [auto.start])}>${fmtClock(now() - auto.start)}</span>`;
+  }
+  const list = runningTimers().filter((a) => a !== auto);
   if (!list.length) { el.hidden = true; el.innerHTML = ''; return; }
   el.hidden = false;
   el.classList.toggle('multi', list.length > 1);
@@ -772,7 +869,7 @@ const cmpDeadline = (a, b) => {
 // Tâches du filtre choisi (projet, sous-projet) et de la recherche : à faire et terminées.
 function tasksModel() {
   const ui = state.ui;
-  const open = state.tasks.filter((t) => !t.done);
+  const open = state.tasks.filter((t) => !t.done && !isOrga(t));
   const key = (t) => t.projectId || 'none';
   const subKey = (t) => t.subprojectId || 'none';
   const counts = new Map();
@@ -790,7 +887,7 @@ function tasksModel() {
   const hit = (t) => !words.length || words.every((w) => plain(`${t.title} ${t.notes || ''} ${taskSteps(t).map((s) => s.text).join(' ')} ${pathLabel(t.projectId, t.subprojectId)}`).includes(w));
   const match = (t) => (filter === 'all' || key(t) === filter) && (subfilter === 'all' || subKey(t) === subfilter) && hit(t);
   const list = open.filter(match).sort((a, b) => !!b.starred - !!a.starred || !!timerOf(b.id) - !!timerOf(a.id) || cmpDeadline(a, b) || b.createdAt - a.createdAt);
-  const done = state.tasks.filter((t) => t.done && match(t)).sort((a, b) => (b.doneAt || 0) - (a.doneAt || 0));
+  const done = state.tasks.filter((t) => t.done && !isOrga(t) && match(t)).sort((a, b) => (b.doneAt || 0) - (a.doneAt || 0));
   return { open, counts, showChips, filter, subCounts, showSubChips, subfilter, words, list, done };
 }
 
@@ -863,7 +960,7 @@ function viewProjects() {
   const totals = new Map();
   for (const s of state.sessions) if (s.projectId) totals.set(s.projectId, (totals.get(s.projectId) || 0) + (s.end - s.start));
   const openCount = new Map();
-  for (const t of state.tasks) if (!t.done && t.projectId) openCount.set(t.projectId, (openCount.get(t.projectId) || 0) + 1);
+  for (const t of state.tasks) if (!t.done && t.projectId && !isOrga(t)) openCount.set(t.projectId, (openCount.get(t.projectId) || 0) + 1);
 
   const row = (p) => {
     const subs = subsOf(p.id).map((s) => s.name).join(' · ');
@@ -892,7 +989,7 @@ function viewProjects() {
 // Page d'un projet : ses tâches rangées par sous-projet, avec un bouton « Ajouter » dans chaque groupe.
 function viewProject(p) {
   const totals = taskTotals();
-  const mine = state.tasks.filter((t) => t.projectId === p.id);
+  const mine = state.tasks.filter((t) => t.projectId === p.id && !isOrga(t));
   const open = mine.filter((t) => !t.done).sort((a, b) => !!b.starred - !!a.starred || !!timerOf(b.id) - !!timerOf(a.id) || cmpDeadline(a, b) || b.createdAt - a.createdAt);
   const done = mine.filter((t) => t.done).sort((a, b) => (b.doneAt || 0) - (a.doneAt || 0));
   const subs = subsOf(p.id);
@@ -2024,6 +2121,7 @@ function stopTimerAt(form) {
   if (!a) { closeSheet(); return; }
   const end = timerStopAt(form, a);
   if (!end) return;
+  if (isOrga(getTask(a.taskId))) orga.off = true;
   const plans = state.plans.map((p) => ({ ...p }));
   const s = finishTimer(a.taskId, end);
   save(); buzz();
@@ -2042,6 +2140,13 @@ function stopTimerAt(form) {
     },
   });
 }
+
+sheet.addEventListener('change', (e) => {
+  if (e.target.name !== 'auto_orga') return;
+  state.ui.autoOrga = e.target.checked;
+  writeLocal();
+  if (e.target.checked) { orga.off = false; orgaActive(); } else orgaStop(Math.min(now(), orga.last + ORGA_GRACE));
+});
 
 sheet.addEventListener('change', (e) => {
   const form = e.target.closest('form[data-form="timer"]');
@@ -2112,6 +2217,10 @@ function openSettings() {
     </section>
     <section class="set-group"><h3>Application</h3>
       ${isStandalone() ? '<p class="hint">✓ L’app est installée sur cet appareil.</p>' : installHelp()}
+    </section>
+    <section class="set-group"><h3>Chrono automatique</h3>
+      <label class="set-toggle"><input type="checkbox" name="auto_orga"${state.ui.autoOrga === false ? '' : ' checked'}><span><b>Compter le temps passé dans l’app</b>
+        <small>Quand tu utilises l’app sans autre chrono en cours, un chrono tourne sur « ${ORGA_TITLE} » (pastille ⏱ en haut). Il s’arrête 2 min après ta dernière action, quand tu quittes l’app ou quand tu lances une tâche. Le temps est dans le Bilan ; pour le ranger dans un projet, touche la pastille puis la tâche.</small></span></label>
     </section>
     <section class="set-group"><h3>Synchronisation</h3><div id="sync-box">${syncSection()}</div></section>
     <section class="set-group"><h3>Sauvegarde</h3>
@@ -2896,7 +3005,7 @@ function trayTasks(weekStart, weekEnd) {
   // Déjà planifiée une autre semaine à venir (cours réguliers, rendez-vous…) : rien à placer, elle n'encombre pas la liste.
   const elsewhere = new Set(state.plans.filter((p) => !p.done && p.end > now() && !(p.end > weekStart && p.start < weekEnd)).map((p) => p.taskId));
   return state.tasks
-    .filter((t) => !t.done && !elsewhere.has(t.id))
+    .filter((t) => !t.done && !isOrga(t) && !elsewhere.has(t.id))
     .map((t) => ({ t, planned: planned.has(t.id) }))
     .sort((a, b) => !!b.t.starred - !!a.t.starred || a.planned - b.planned || cmpDeadline(a.t, b.t) || b.t.createdAt - a.t.createdAt);
 }
@@ -4419,7 +4528,7 @@ function openMissionsSheet(week) {
 
 // Choisir des tâches à accomplir cette semaine.
 function openMissionPick(week) {
-  const list = state.tasks.filter((t) => !t.done && t.week !== week)
+  const list = state.tasks.filter((t) => !t.done && !isOrga(t) && t.week !== week)
     .sort((a, b) => !!b.starred - !!a.starred || cmpDeadline(a, b) || b.createdAt - a.createdAt);
   openSheet(`<div class="sheet-body ms-pick">
     ${head('Ajouter à la semaine')}
@@ -7038,10 +7147,14 @@ const actions = {
     if (el.closest('form[data-form="plan"]')) closeSheet(); // depuis un créneau du planning : on referme
     const f = taskFormOpen();
     if (f?.dataset.id) commitTaskForm(f);
+    if (timerOf(id) && isOrga(getTask(id))) orga.off = true;
     if (timerOf(id)) { if (!askStop(id, inSheet ? id : '')) afterTimer(stopTimer(id), inSheet ? id : null); }
     else { startTimer(id); if (inSheet) openTaskSheet(id); }
   },
-  stop(el) { if (!askStop(el.dataset.id)) afterTimer(stopTimer(el.dataset.id), null); },
+  stop(el) {
+    if (isOrga(getTask(el.dataset.id))) orga.off = true; // chrono automatique arrêté à la main : il attend la prochaine ouverture
+    if (!askStop(el.dataset.id)) afterTimer(stopTimer(el.dataset.id), null);
+  },
   'open-timer'(el) {
     const f = taskFormOpen();
     if (f?.dataset.id) commitTaskForm(f);
@@ -7071,6 +7184,7 @@ const actions = {
   'timer-discard'(el) {
     const a = timerOf(el.closest('form').dataset.task);
     if (!a) return;
+    if (isOrga(getTask(a.taskId))) orga.off = true;
     state.timers = state.timers.filter((x) => x !== a);
     if (state.ui.pomo?.taskId === a.taskId) delete state.ui.pomo;
     const auto = state.plans.filter((p) => p.live && p.taskId === a.taskId);
@@ -7589,8 +7703,9 @@ history.replaceState(null, '');
 render();
 setInterval(() => { if (state.timers.length && !document.hidden) tick(); }, 1000);
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) { render(); syncNow(); }
-  else if (state.ui.syncDirty) syncNow({ keepalive: true }); // envoie les dernières modifications avant que l'app passe en arrière-plan
+  if (!document.hidden) { orga.off = false; orgaWake(); render(); syncNow(); return; }
+  orgaStop(Math.min(now(), orga.last + ORGA_GRACE)); // app quittée : le chrono automatique s'arrête
+  if (state.ui.syncDirty) syncNow({ keepalive: true }); // envoie les dernières modifications avant que l'app passe en arrière-plan
 });
 
 // Synchro entre appareils : au démarrage, au retour du réseau et régulièrement quand l'app est ouverte.

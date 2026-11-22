@@ -1922,3 +1922,32 @@ body.placing #toast { bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom)
 .agenda .ag.sorting .day-card { box-shadow: 0 16px 36px rgba(15, 15, 30, .26); transform: scale(1.015); }
 .agenda .ag.sorting > time { color: var(--accent); }
 body.is-sorting .agenda .ag:not(.sorting) .day-card { opacity: .92; }
+
+/* Chrono automatique (temps passé dans l'app) : pastille discrète dans la barre du haut */
+.orga-pill {
+  flex: none; display: inline-flex; align-items: center; gap: 6px; height: 32px; margin-right: 4px; padding: 0 10px; border-radius: 999px;
+  background: var(--run-soft); color: var(--run); font-size: 13px; font-weight: 800; font-variant-numeric: tabular-nums;
+  border: 1px solid color-mix(in srgb, var(--run) 30%, transparent); animation: orga-in .3s ease-out;
+}
+.orga-pill[hidden] { display: none; }
+.orga-pill .pulse { width: 7px; height: 7px; }
+@keyframes orga-in { from { opacity: 0; transform: scale(.8); } }
+@media (max-width: 380px) { .orga-pill { padding: 0 8px; font-size: 12px; } }
+
+/* Réglage : interrupteur */
+.set-toggle { display: flex; align-items: flex-start; gap: 12px; padding: 12px 14px; border-radius: 14px; background: var(--card-2); cursor: pointer; }
+.set-toggle input {
+  flex: none; appearance: none; -webkit-appearance: none; position: relative; width: 46px; height: 28px; margin: 2px 0 0; border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 35%, transparent); cursor: pointer; transition: background .2s;
+}
+.set-toggle input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .25); transition: transform .2s; }
+.set-toggle input:checked { background: var(--run); }
+.set-toggle input:checked::after { transform: translateX(18px); }
+.set-toggle b { display: block; font-size: 15px; }
+.set-toggle small { display: block; margin-top: 3px; font-size: 12.5px; line-height: 1.4; color: var(--muted); }
+/* Petit écran : quand la pastille du chrono automatique est là, le profil se réduit à son point de couleur (le titre garde sa place) */
+@media (max-width: 430px) {
+  body:has(.orga-pill:not([hidden])) .who-pill { width: 34px; height: 34px; padding: 0; gap: 0; justify-content: center; font-size: 0; }
+  body:has(.orga-pill:not([hidden])) .who-pill i { width: 11px; height: 11px; }
+  body:has(.orga-pill:not([hidden])) .sync-dot { width: 34px; margin-right: 2px; }
+}
