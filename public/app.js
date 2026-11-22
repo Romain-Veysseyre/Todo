@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.25.0';
+const VERSION = '2.26.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -5527,6 +5527,7 @@ const SORTABLES = [
     stepsSet(form, ids.map((id) => list.find((x) => x.id === id)).filter(Boolean));
   } },
   { grip: '.sub-grip', item: '.sub-row', done: () => {} }, // sous-projets : l'ordre des lignes est enregistré avec la fiche
+  { grip: '.ag-grip', item: '.ag-plan.movable', shift: (el) => el.getBoundingClientRect().height + 9, done: (ids, item) => reorderDay(ids, item.dataset.id) },
 ];
 
 const sortDrag = { active: null };
@@ -5545,7 +5546,7 @@ document.addEventListener('pointerdown', (e) => {
   sortDrag.active = {
     cfg, item, items, box, sy, from: items.indexOf(item), y0: e.clientY + sy(),
     centers: items.map((el, j) => tops[j] + el.getBoundingClientRect().height / 2),
-    step: tops[1] - tops[0] || item.getBoundingClientRect().height, // hauteur d'une ligne, marge comprise
+    step: cfg.shift ? cfg.shift(item) : tops[1] - tops[0] || item.getBoundingClientRect().height, // hauteur d'une ligne, marge comprise
   };
   sortDrag.active.to = sortDrag.active.from;
   item.classList.add('sorting');
@@ -5588,6 +5589,82 @@ function endSort() {
 }
 window.addEventListener('pointerup', endSort);
 window.addEventListener('pointercancel', endSort);
+
+// Programme du jour remis dans un autre ordre (carte saisie par son heure) : les créneaux se recalent dans le planning.
+// - Entre les cartes déplacées, les créneaux échangent leurs places : chacun reprend l'heure de la place qu'il occupe,
+//   avec les mêmes écarts qu'avant (des créneaux qui se suivaient restent collés), et garde sa durée.
+// - Un créneau régulier (cours…) ne bouge pas s'il n'est pas celui qu'on déplace : les autres se casent autour.
+// - Rien ne passe avant maintenant ; un créneau oublié (déjà passé) qu'on descend se pose après celui qui le précède.
+// - Ce qui suit est poussé s'il chevauche. « Annuler » remet tout comme avant.
+function reorderDay(ids, dId) {
+  const now5 = Math.ceil(now() / 3e5) * 3e5;
+  const old = ids.map((id) => state.plans.find((x) => x.id === id)).filter(Boolean).sort((a, b) => a.start - b.start);
+  const neu = ids.map((id) => old.find((x) => x.id === id)).filter(Boolean);
+  const D = old.find((x) => x.id === dId);
+  const f = old.indexOf(D);
+  const t = neu.indexOf(D);
+  if (!D || f === t) { render(); return; }
+  const before = state.plans.map((x) => ({ ...x }));
+  const day = ymd(new Date());
+  const fixed = (x) => x !== D && !!x.series;
+  // Ce qui ne bouge pas : créneaux réguliers du jour (sauf celui qu'on déplace) et créneaux dont le chrono tourne.
+  const blocks = plansOn(day).filter((x) => !x.allDay && !planDone(x) && (fixed(x) || timerOf(x.taskId)));
+  const clear = (st, dur) => { // première heure libre à partir de st, sans chevaucher ce qui ne bouge pas
+    for (let guard = 0; guard < 50; guard++) {
+      const b = blocks.find((x) => x.start < st + dur && x.end > st);
+      if (!b) return st;
+      st = b.end;
+    }
+    return st;
+  };
+  const times = new Map();
+  const end = (x) => (times.get(x) || [x.start, x.end])[1];
+  const a = Math.min(f, t);
+  const b = Math.max(f, t);
+  let cursor;
+  if (old.slice(a, b + 1).some((x) => x.start < now5)) {
+    // Un créneau déjà passé dans le lot : seul celui qu'on déplace bouge, après celui qui le précède (ou maintenant).
+    const prev = neu[t - 1];
+    const dur = D.end - D.start;
+    const st = clear(Math.max(now5, prev && prev.end > now5 ? prev.end : now5), dur);
+    times.set(D, [st, st + dur]);
+    cursor = st + dur;
+  } else {
+    const range = neu.slice(a, b + 1);
+    const slots = old.slice(a, b + 1);
+    const gaps = slots.map((x, i) => (i ? Math.max(0, x.start - slots[i - 1].end) : 0));
+    const prevEnd = a > 0 ? neu[a - 1].end : -Infinity;
+    cursor = Math.max(slots[0].start, now5);
+    range.forEach((x, i) => {
+      if (fixed(x)) { cursor = Math.max(cursor, x.end); return; }
+      const dur = x.end - x.start;
+      let st = Math.max(i ? cursor + gaps[i] : cursor, now5);
+      // Placé avant un créneau fixe : il se termine juste avant lui s'il y a la place.
+      const next = range.slice(i + 1).find(fixed);
+      if (next && st + dur > next.start && next.start - dur >= Math.max(now5, i ? cursor : prevEnd)) st = next.start - dur;
+      st = clear(st, dur);
+      times.set(x, [st, st + dur]);
+      cursor = st + dur;
+    });
+  }
+  // La suite : poussée seulement si elle chevauche.
+  for (const x of neu.slice(b + 1)) {
+    if (fixed(x)) { if (cursor <= x.start) break; cursor = Math.max(cursor, x.end); continue; }
+    if (x.start >= cursor) break;
+    const dur = x.end - x.start;
+    const st = clear(cursor, dur);
+    times.set(x, [st, st + dur]);
+    cursor = st + dur;
+  }
+  let moved = 0;
+  for (const [x, [st, en]] of times) if (x.start !== st || x.end !== en) { Object.assign(x, { start: st, end: en }); moved++; }
+  save(); render(); buzz();
+  if (!moved) return;
+  const tt = getTask(D.taskId);
+  toast(`« ${tt?.title || 'Tâche'} » à ${clockLabel(D.start)}${moved > 1 ? ` · ${moved - 1} autre${moved > 2 ? 's' : ''} recalé${moved > 2 ? 's' : ''}` : ''}`, {
+    label: 'Annuler', fn: () => { state.plans = before; save(); render(); },
+  });
+}
 
 /* ---------- Onglet « Aujourd'hui » : la journée en blocs à valider (page d'accueil) ---------- */
 
@@ -5779,7 +5856,9 @@ function viewToday() {
         <div class="ev-card" role="button" tabindex="0" data-action="open-event" data-id="${i.ev.id}"><b>${esc(i.ev.title)}</b><span>${shortLabel(i.ev.start)}–${shortLabel(i.ev.end)}</span></div></li>`;
     }
     const done = planDone(i.p);
-    return `${html}<li class="ag ag-plan${past ? ' past' : ''}${isCur && !done ? ' current' : ''}" style="--c:${colorOf(i.t.projectId)}"><time>${minLabel(i.s)}</time>
+    // Créneau à faire, sans chrono en cours : on le saisit par son heure pour changer l'ordre de la journée.
+    const movable = !done && !i.p.allDay && !timerOf(i.t.id);
+    return `${html}<li class="ag ag-plan${past ? ' past' : ''}${isCur && !done ? ' current' : ''}${movable ? ' movable' : ''}" data-id="${i.p.id}" style="--c:${colorOf(i.t.projectId)}"><time${movable ? ' class="ag-grip" title="Glisser pour changer l’ordre de la journée"' : ''}>${minLabel(i.s)}${movable ? `<i aria-hidden="true">${ICON.grip}</i>` : ''}</time>
       ${todayCard({ t: i.t, p: i.p, dur: (i.e0 ?? i.e) - (i.s0 ?? i.s), done, totals, live: liveNote(i) })}</li>`;
   }).join('') + (placed || !rows.length ? '' : nowRule);
 
@@ -5843,7 +5922,7 @@ function viewToday() {
       ${ICON.right}</button>`;
 
   const hint = !state.ui.hideSwipeHint && (m.due.length || m.blocks.some((i) => !planDone(i.p)))
-    ? `<div class="swipe-hint"><span>👆 Balaie une tâche <b>vers la droite</b> pour la valider, <b>vers la gauche</b> pour la reporter à demain.</span><button type="button" class="icon-btn" data-action="hide-swipe-hint" aria-label="Masquer l’astuce">${ICON.close}</button></div>`
+    ? `<div class="swipe-hint"><span>👆 Balaie une tâche <b>vers la droite</b> pour la valider, <b>vers la gauche</b> pour la reporter à demain. Saisis-la par son heure (⋮⋮) pour changer l’ordre de la journée.</span><button type="button" class="icon-btn" data-action="hide-swipe-hint" aria-label="Masquer l’astuce">${ICON.close}</button></div>`
     : '';
 
   const meta = navTip() || installHint() || backupHint(); // une seule carte d'aide à la fois, au-dessus de la journée
@@ -6276,7 +6355,7 @@ document.addEventListener('touchcancel', () => { resetCardSwipe(cs.card); cs.car
 
 // L'écran se met à jour chaque minute (ligne « maintenant », temps restant, créneau en cours).
 setInterval(() => {
-  if (state.ui.tab === 'today' && profile && !document.hidden && !sheet.open && !$('#ask').open && !cs.card) render();
+  if (state.ui.tab === 'today' && profile && !document.hidden && !sheet.open && !$('#ask').open && !cs.card && !sortDrag.active) render();
 }, 60e3);
 
 const dayWord = (day) => {

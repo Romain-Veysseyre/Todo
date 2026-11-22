@@ -1910,3 +1910,15 @@ body.placing #toast { bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom)
 .log-pace.shake { animation: shake .35s; }
 .log-after { margin: 0 2px 14px; padding: 10px 12px; border-radius: 12px; background: var(--card-2); font-size: 14px; font-weight: 650; }
 .log-after:empty { display: none; }
+
+/* Programme d'aujourd'hui : saisir une carte par son heure (⋮⋮) pour changer l'ordre de la journée */
+.ag-grip { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; }
+.ag-grip i { display: grid; place-items: center; width: 26px; height: 26px; margin-right: -4px; border-radius: 8px; color: color-mix(in srgb, var(--muted) 60%, transparent); transition: background .15s, color .15s; }
+.ag-grip i svg { width: 15px; height: 15px; }
+.ag-grip:hover i { background: var(--card-2); color: var(--text); }
+@media (pointer: fine) { .ag-grip i { opacity: 0; } .ag.movable:hover .ag-grip i { opacity: 1; } }
+.agenda .ag.movable { transition: transform .18s ease; }
+.agenda .ag.sorting { z-index: 6; transition: none; }
+.agenda .ag.sorting .day-card { box-shadow: 0 16px 36px rgba(15, 15, 30, .26); transform: scale(1.015); }
+.agenda .ag.sorting > time { color: var(--accent); }
+body.is-sorting .agenda .ag:not(.sorting) .day-card { opacity: .92; }
