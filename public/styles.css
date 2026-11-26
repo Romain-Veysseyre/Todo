@@ -2091,3 +2091,22 @@ body.dd-edge-prev .dd-edge.prev span, body.dd-edge-next .dd-edge.next span { opa
   .dl-card { padding: 7px 6px 7px 9px; gap: 8px; }
   .dp-date b { font-size: 18px; }
 }
+
+/* Bilan › Temps : par tâche (total), le détail des séances en dessous */
+.tk-list { padding: 0; overflow: hidden; }
+.tk-group + .tk-group { border-top: 1px solid var(--line); }
+.tk-list .sess { border-bottom: 0; }
+.sess.tk b { font-size: 15px; font-weight: 800; }
+.sess.tk .sess-time { font-size: 12.5px; }
+.tk-done { display: inline-grid; place-items: center; width: 16px; height: 16px; margin-right: 6px; border-radius: 50%; background: var(--run); color: #fff; font-size: 10px; font-style: normal; font-weight: 900; vertical-align: 1px; }
+.tk-group.open > .sess.tk { background: var(--card-2); }
+.tk-detail { padding: 2px 0 4px 18px; background: var(--card-2); }
+.tk-detail .sess { padding: 7px 14px 7px 12px; border-left-width: 2px; border-bottom: 1px solid var(--line); background: var(--card); }
+.tk-detail .sess:last-child { border-bottom: 0; }
+.tk-detail .sess-title { font-size: 14px; font-weight: 550; }
+.tk-detail .sess-title small { display: none; }
+.tk-detail .sess b { font-size: 13.5px; font-weight: 700; }
+.section-title small { margin-left: auto; font-size: 12px; font-weight: 600; text-transform: none; letter-spacing: 0; color: var(--muted); }
+/* Bilan › Réalisées : le temps total à droite */
+.jr-total { flex: none; font-size: 14px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.jr-total.none { color: var(--muted); font-weight: 600; }

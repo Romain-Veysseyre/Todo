@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.28.0';
+const VERSION = '2.29.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -1223,16 +1223,37 @@ function viewStats() {
     return html;
   }).join('');
 
-  // Journal des sessions, groupé par jour
-  const byDay = new Map();
-  for (const { s } of inRange.sort((x, y) => y.s.start - x.s.start).slice(0, 300)) {
-    const k = ymd(new Date(s.start));
-    if (!byDay.has(k)) byDay.set(k, []);
-    byDay.get(k).push(s);
+  // Par tâche : le temps total de chaque tâche sur la période, la plus récente en premier ; la toucher montre ses séances.
+  const byTask = new Map();
+  for (const { s, ms } of inRange) {
+    const k = s.taskId || `titre:${s.title || ''}`;
+    if (!byTask.has(k)) byTask.set(k, { k, t: getTask(s.taskId), title: getTask(s.taskId)?.title || s.title || 'Tâche', projectId: s.projectId, subprojectId: s.subprojectId, ms: 0, list: [], first: Infinity, last: 0, since: [] });
+    const g = byTask.get(k);
+    g.ms += ms;
+    g.list.push(s);
+    g.first = Math.min(g.first, Math.max(s.start, r.a));
+    g.last = Math.max(g.last, Math.min(s.end, r.b));
+    if (s.live) { const st = Math.max(s.start, r.a); g.ms -= now() - st; g.since.push(st); } // en cours : le compteur avance
   }
-  const journal = [...byDay.entries()].map(([k, list]) => `
-    <div class="day-head"><span>${fmt(parseYmd(k), { weekday: 'long', day: 'numeric', month: 'long' })}</span><span>${fmtDur(list.reduce((n, s) => n + (s.end - s.start), 0))}</span></div>
-    <div class="card">${list.map(sessRow).join('')}</div>`).join('');
+  const oneDay = r.b - r.a <= 26 * 3600e3;
+  const dayShort = (ts) => fmt(new Date(ts), { weekday: 'short', day: 'numeric' });
+  const when = (g) => (oneDay ? `${hm(new Date(g.first))}–${g.since.length ? '…' : hm(new Date(g.last))}`
+    : ymd(new Date(g.first)) === ymd(new Date(g.last)) ? dayShort(g.first) : `${dayShort(g.first)} → ${dayShort(g.last)}`);
+  const journal = [...byTask.values()].sort((a, b) => b.last - a.last).slice(0, 200).map((g) => {
+    const open = temp.tkOpen?.has(g.k);
+    const n = g.list.length;
+    return `<div class="tk-group${open ? ' open' : ''}">
+      <button type="button" class="sess tk${g.since.length ? ' live' : ''}" data-action="tk-toggle" data-key="${esc(g.k)}" aria-expanded="${!!open}" style="--c:${colorOf(g.projectId)}">
+        <span class="sess-time">${esc(when(g))}</span>
+        <span class="sess-title">${g.t?.done ? '<i class="tk-done" title="Tâche terminée">✓</i>' : ''}${esc(g.title)}<small>${esc(pathLabel(g.projectId, g.subprojectId))} · ${n} séance${n > 1 ? 's' : ''}</small></span>
+        ${liveDur(g.ms, g.since)}
+      </button>
+      ${open ? `<div class="tk-detail">${g.list.sort((a, b) => b.start - a.start).map((x, i) => `<button type="button" class="sess${x.live ? ' live' : ''}" ${x.live ? `data-action="open-task" data-id="${x.taskId}"` : `data-action="open-session" data-id="${x.id}"`} style="--c:${colorOf(g.projectId)}">
+          <span class="sess-time">${hm(new Date(x.start))}–${x.live ? '…' : hm(new Date(x.end))}</span>
+          <span class="sess-title">${oneDay ? `Séance ${n - i}` : esc(cap(fmt(new Date(x.start), { weekday: 'long', day: 'numeric', month: 'short' })))}</span>
+          <b>${x.live ? 'en cours' : fmtDur(x.end - x.start)}</b></button>`).join('')}</div>` : ''}
+    </div>`;
+  }).join('');
 
   return `
     <div class="seg">${PERIODS.map(([k, l]) => `<button type="button" class="chip${ui.period === k ? ' on' : ''}" data-action="period" data-value="${k}">${l}</button>`).join('')}</div>
@@ -1245,7 +1266,7 @@ function viewStats() {
       ${compare || avg ? `<div class="tc-more">${compare}${avg}</div>` : ''}</div>
     ${chart}
     ${sorted.length ? `<div class="card bars">${bars}</div><p class="hint center">Touche un projet pour voir le détail.</p>` : ''}
-    ${journal ? `<div class="section-title">Sessions</div>${journal}` : ''}`;
+    ${journal ? `<div class="section-title"><span>Par tâche</span><small>touche une tâche pour voir ses séances</small></div><div class="card tk-list">${journal}</div>` : ''}`;
 }
 
 /* ---------- Feuilles (dialogues) ---------- */
@@ -6403,9 +6424,9 @@ function journalResults(all = journalEntries()) {
       <span class="jr-tick">${ICON.check}</span>
       <button type="button" class="jr-main" data-action="${e.kind === 'plan' ? 'open-plan' : 'open-task'}" data-id="${e.id}">
         <b>${t.starred ? '★ ' : ''}${esc(t.title)}</b>
-        <small>${t.projectId ? `<span class="tag"><i></i>${esc(pathLabel(t.projectId, t.subprojectId))}</span>` : ''}${ms ? `<span>⏱ ${fmtDur(ms)}</span>` : ''}${slot ? `<span>${e.p.series ? '↻' : '📅'} ${slot}</span>` : ''}${e.p?.note ? `<span>${esc(e.p.note)}</span>` : ''}</small>
+        <small>${t.projectId ? `<span class="tag"><i></i>${esc(pathLabel(t.projectId, t.subprojectId))}</span>` : ''}${slot ? `<span>${e.p.series ? '↻' : '📅'} ${slot}</span>` : ''}${e.p?.note ? `<span>${esc(e.p.note)}</span>` : ''}</small>
       </button>
-      <time>${clockLabel(e.at)}</time>
+      <b class="jr-total${ms ? '' : ' none'}" title="${ms ? `Temps total${e.kind === 'plan' ? ' ce jour-là' : ''} · terminée à ${clockLabel(e.at)}` : `Aucun temps chronométré · terminée à ${clockLabel(e.at)}`}">${ms ? fmtDur(ms) : '—'}</b>
       <button type="button" class="jr-undo" data-action="journal-undo" data-kind="${e.kind}" data-id="${e.id}" title="Remettre à faire" aria-label="Remettre à faire">↺</button>
     </div>`;
   };
@@ -7900,6 +7921,12 @@ const actions = {
     save(); closeSheet(); render();
   },
 
+  'tk-toggle'(el) { // Bilan › Temps : les séances d'une tâche
+    temp.tkOpen ||= new Set();
+    const k = el.dataset.key;
+    if (temp.tkOpen.has(k)) temp.tkOpen.delete(k); else temp.tkOpen.add(k);
+    render();
+  },
   'open-session'(el) {
     const f = taskFormOpen();
     if (f?.dataset.id) commitTaskForm(f);
