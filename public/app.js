@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.29.0';
+const VERSION = '2.30.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -2199,6 +2199,7 @@ sheet.addEventListener('submit', (e) => {
   else if (form.dataset.form === 'timer') stopTimerAt(form);
   else if (form.dataset.form === 'goal') saveGoal(form);
   else if (form.dataset.form === 'log') saveLog(form);
+  else if (form.dataset.form === 'corr') saveCorr(form);
   else if (form.dataset.form === 'session') saveSession(form);
   else if (form.dataset.form === 'clean') {
     const ids = new Set(new FormData(form).getAll('drop'));
@@ -3106,8 +3107,8 @@ function viewPlan() {
         const when = !it.live ? `${shortLabel(it.s0)}–${shortLabel(it.e)}`
           : it.live.moved ? `${shortLabel(it.s0)} · en cours` : `${shortLabel(it.s0)}–${shortLabel(it.e0)} <em class="pb-over">+${fmtDur((nowMin - it.e0) * 60e3)}</em>`;
         const moving = drag.active?.kind === 'move' && !drag.active.copy && drag.active.plan?.id === it.p.id;
-        return `<div class="plan-block${done ? ' done' : ''}${running ? ' running' : ''}${moving ? ' dragging' : ''}${it.p.live ? ' is-live' : ''}${grow}" data-action="open-plan" data-id="${it.p.id}" style="${boxStyle(it)};--c:${colorOf(t.projectId)}${split}">
-          ${done ? `<i class="pb-done" aria-hidden="true">${ICON.check}</i>` : ''}<b>${t.starred ? '★ ' : ''}${esc(t.title)}</b>${it.p.note ? `<small class="pb-note">${esc(it.p.note)}</small>` : ''}<span>${done ? 'Fait · ' : it.p.series ? '↻ ' : ''}${when}${spent ? `<em class="pb-spent"> · ⏱ ${fmtDur(spent)}</em>` : ''}</span>
+        return `<div class="plan-block${done ? ' done' : ''}${running ? ' running' : ''}${moving ? ' dragging' : ''}${it.p.live ? ' is-live' : ''}${it.p.prep ? ' prep' : ''}${grow}" data-action="open-plan" data-id="${it.p.id}" style="${boxStyle(it)};--c:${colorOf(t.projectId)}${split}"${it.p.prep || it.p.eval ? ` title="${[it.p.prep ? 'Préparé' : '', it.p.eval ? 'Éval' : ''].filter(Boolean).join(' · ')}"` : ''}>
+          ${it.p.prep ? '<i class="pb-prep" aria-hidden="true"></i>' : ''}${done ? `<i class="pb-done" aria-hidden="true">${ICON.check}</i>` : ''}<b>${it.p.eval ? '<span class="pb-eval" aria-label="Éval">📝</span>' : ''}${t.starred ? '★ ' : ''}${esc(t.title)}</b>${it.p.note ? `<small class="pb-note">${esc(it.p.note)}</small>` : ''}<span>${done ? 'Fait · ' : it.p.series ? '↻ ' : ''}${when}${spent ? `<em class="pb-spent"> · ⏱ ${fmtDur(spent)}</em>` : ''}</span>
           <i class="plan-resize" aria-hidden="true"></i></div>`;
       }).join('')}
       ${key === today && nowMin >= VIEW_START ? `<div class="now-line" style="top:${posPct(nowMin)}%"></div>` : ''}
@@ -4071,11 +4072,22 @@ function openPlanSheet(id) {
       <span>↻ ${esc(cap(daysWord(weekdays)))} · ${series.length} créneaux, jusqu’au ${esc(dShort(ymd(new Date(series[series.length - 1].start))))}</span>
       ${after.length ? `<button type="button" class="btn small" data-action="series-apply" data-id="${id}">Mettre cet horaire aux ${after.length} suivants</button>` : ''}
     </div>` : '';
+  // Un cours (projet ou sous-projet « Cours ») : préparé ? une éval ? (et la plage de correction qui va avec)
+  const flags = !p.allDay && (isCourse(t) || p.prep || p.eval);
+  const corrT = getTask(p.corr);
+  const corrP = corrT && (nextPlanOf(corrT.id) || state.plans.filter((x) => x.taskId === corrT.id).sort((a, b) => b.start - a.start)[0]);
+  const corrLine = !p.eval ? '' : `<div class="corr-line">${corrT
+    ? `<span>Correction :</span><button type="button" class="corr-task" data-action="open-task" data-id="${corrT.id}">${esc(corrT.title)}</button><small>${corrP ? `${corrT.done ? '✓ faite · ' : ''}${esc(planLabel(corrP))}` : 'pas encore placée'}</small>${corrP || corrT.done ? '' : `<button type="button" class="btn small" data-action="corr-place" data-id="${id}">${ICON.cal} Placer</button>`}`
+    : `<span>Pas encore de plage de correction.</span><button type="button" class="btn small" data-action="corr-new" data-id="${id}">${ICON.plus} La créer</button>`}</div>`;
   openSheet(`<form class="sheet-body" data-form="plan" data-id="${id}">
     ${head(p.allDay ? 'Sur plusieurs jours' : series.length > 1 ? 'Créneau régulier' : 'Créneau planifié')}
     <button type="button" class="plan-task" data-action="open-task" data-id="${t.id}" style="--c:${colorOf(t.projectId)}">
       <span class="dot"></span><span class="plan-task-name">${t.starred ? '★ ' : ''}${esc(t.title)}<small>${esc(pathLabel(t.projectId, t.subprojectId))}</small></span>${ICON.right}
     </button>
+    ${flags ? `<div class="plan-flags">
+      <label class="pf-flag prep"><input type="checkbox" name="prep"${p.prep ? ' checked' : ''}><span>${ICON.check} Préparé</span></label>
+      <label class="pf-flag evl"><input type="checkbox" name="evl"${p.eval ? ' checked' : ''}><span>📝 Éval</span></label>
+    </div>${corrLine}` : ''}
     ${fields}
     ${p.allDay ? '' : repEdit(p, series)}
     <label class="field"><span>Note</span><input name="pnote" value="${esc(p.note || '')}" placeholder="${p.allDay ? 'Ex. lieu, précisions…' : 'Ex. contenu de la séance, éval…'}" maxlength="160" enterkeyhint="done"></label>
@@ -4093,6 +4105,58 @@ function openPlanSheet(id) {
 
 // Numéro de semaine (du lundi au dimanche), pour comparer les semaines entre elles. 1er janvier 2024 : un lundi.
 const weekNo = (day) => Math.floor(Math.round((parseYmd(day) - parseYmd('2024-01-01')) / 864e5) / 7);
+
+// Une tâche de cours : son projet ou son sous-projet s'appelle « Cours » (ou le contient).
+const isCourse = (t) => / cours /.test(` ${plain(`${getProject(t?.projectId)?.name || ''} ${getSub(t?.subprojectId)?.name || ''}`)} `);
+
+// Éval d'un cours : créer la tâche de correction (dans le sous-projet « Correction… » du projet, s'il existe)
+// et la placer aussitôt dans le planning, à partir du jour de l'éval.
+function openCorrSheet(planId) {
+  const p = state.plans.find((x) => x.id === planId);
+  const t = getTask(p?.taskId);
+  if (!p || !t) return;
+  const day = ymd(new Date(p.start));
+  const subs = t.projectId ? subsOf(t.projectId) : [];
+  const corrSub = [...subs].reverse().find((x) => plain(x.name).startsWith('correction'));
+  const what = p.note && /(é|e)val|qcm|\bds\b|contr(ô|o)le|dissert/i.test(p.note) ? p.note : 'éval';
+  const title = `Correction ${what} · ${t.title} (${fmt(parseYmd(day), { day: '2-digit', month: '2-digit' })})`;
+  openSheet(`<form class="sheet-body corr-sheet" data-form="corr" data-plan="${p.id}" autocomplete="off">
+    ${head('📝 Plage de correction')}
+    <p class="hint" style="margin-top:0">Éval de <b>${esc(t.title)}</b> · ${esc(dShort(day))}${p.note ? ` · ${esc(p.note)}` : ''}. La tâche de correction est créée, puis tu touches un créneau du planning pour la placer.</p>
+    <label class="field"><span>Tâche</span><input name="title" value="${esc(title)}" maxlength="120" required></label>
+    ${subs.length ? `<label class="field"><span>Rangée dans</span><select name="sub">
+      <option value="">${esc(getProject(t.projectId)?.name || '')} (sans sous-projet)</option>
+      ${subs.map((x) => `<option value="${x.id}"${x === corrSub ? ' selected' : ''}>${esc(getProject(t.projectId)?.name || '')} › ${esc(x.name)}</option>`).join('')}</select></label>` : ''}
+    <div class="field"><span>Durée</span><div class="dle-durs corr-durs" role="group">${[30, 60, 90, 120, 180].map((d) => `<button type="button" class="${d === 90 ? 'on' : ''}" data-action="corr-dur" data-value="${d}">${durLabel(d)}</button>`).join('')}</div>
+      <input type="hidden" name="dur" value="90"></div>
+    <button class="btn primary wide">${ICON.cal} Placer dans le planning</button>
+    <button type="button" class="btn ghost wide" data-action="open-plan" data-id="${p.id}">Pas maintenant</button>
+  </form>`);
+}
+
+// La correction : la tâche (liée au créneau de l'éval), puis « en main » dans le planning, la semaine de l'éval.
+function saveCorr(form) {
+  const p = state.plans.find((x) => x.id === form.dataset.plan);
+  const t = getTask(p?.taskId);
+  if (!p || !t) { closeSheet(); return; }
+  const dur = Number(form.elements.dur.value) || 90;
+  const c = { id: uid(), title: form.elements.title.value.trim() || `Correction · ${t.title}`, notes: '', projectId: t.projectId || null, subprojectId: form.elements.sub?.value || null, deadline: null, dur, done: false, doneAt: null, starred: false, createdAt: now() };
+  state.tasks.push(c);
+  p.corr = c.id;
+  save();
+  closeSheet();
+  corrPlace(c.id, ymd(new Date(p.start)));
+}
+function corrPlace(taskId, day) {
+  const c = getTask(taskId);
+  if (!c) return;
+  Object.assign(state.ui, { tab: 'plan', planDate: day });
+  Object.assign(temp, { placing: c.id, placeDur: c.dur || 90, openProject: null });
+  closeSideOnPhone();
+  writeLocal(); render();
+  window.scrollTo(0, 0);
+  scrollPlanToHour();
+}
 
 // Ce créneau et les suivants de sa série (ceux que la périodicité remplace).
 const planTail = (p) => (p.series ? state.plans.filter((x) => x.series === p.series && x.start >= p.start && (!x.done || x === p)) : [p]);
@@ -4266,6 +4330,11 @@ function commitPlanForm(form) {
   const note = form.elements.pnote?.value.trim() || '';
   if (note) p.note = note;
   else delete p.note;
+  // Cours : préparé, éval (une éval cochée propose aussitôt sa plage de correction)
+  const was = !!p.eval;
+  if (form.elements.prep) { if (form.elements.prep.checked) p.prep = true; else delete p.prep; }
+  if (form.elements.evl) { if (form.elements.evl.checked) p.eval = true; else delete p.eval; }
+  if (!was && p.eval && !getTask(p.corr)) setTimeout(() => openCorrSheet(p.id), 0);
   if (p.allDay) { // du … au … (inclus)
     let to = form.elements.to.value;
     if (!to || to < day) { to = day; form.elements.to.value = day; }
@@ -5967,6 +6036,8 @@ function viewToday() {
     const spent = dayTracked(t.id, day);
     const editing = temp.dlEdit === p.id && !done;
     const meta = [
+      p.eval ? '<span class="dl-eval">📝 Éval</span>' : '',
+      p.prep && !done ? '<span class="dl-prep">✓ Préparé</span>' : '',
       p.note ? `<b class="dl-note">${esc(p.note)}</b>` : '',
       i.live ? `<em class="dl-live">${i.moved ? 'en cours' : `+${fmtDur(Math.max(0, i.over) * 60e3)}`}</em>` : `<span>${p.series ? '↻ ' : ''}${fmtDur(dur * 60e3)}</span>`,
       t.projectId ? `<span class="dl-proj"><i></i>${esc(getSub(t.subprojectId)?.name || getProject(t.projectId)?.name || '')}</span>` : '',
@@ -7921,6 +7992,18 @@ const actions = {
     save(); closeSheet(); render();
   },
 
+  'corr-new'(el) { openCorrSheet(el.dataset.id); },
+  'corr-place'(el) {
+    const p = state.plans.find((x) => x.id === el.dataset.id);
+    if (!p) return;
+    closeSheet();
+    corrPlace(p.corr, ymd(new Date(p.start)));
+  },
+  'corr-dur'(el) {
+    const form = el.closest('form');
+    form.elements.dur.value = el.dataset.value;
+    for (const b of form.querySelectorAll('.corr-durs button')) b.classList.toggle('on', b === el);
+  },
   'tk-toggle'(el) { // Bilan › Temps : les séances d'une tâche
     temp.tkOpen ||= new Set();
     const k = el.dataset.key;
