@@ -6,7 +6,7 @@
    entre appareils : données chiffrées dans l'app avant l'envoi (worker.js).
    ========================================================= */
 
-const VERSION = '2.30.0';
+const VERSION = '2.31.0';
 const STORE_KEY = 'chronotodo:v1';
 const SYNC_KEY = 'chronotodo:sync';
 // Chaque personne a ses propres tâches, projets, chronos et stats.
@@ -3107,8 +3107,8 @@ function viewPlan() {
         const when = !it.live ? `${shortLabel(it.s0)}–${shortLabel(it.e)}`
           : it.live.moved ? `${shortLabel(it.s0)} · en cours` : `${shortLabel(it.s0)}–${shortLabel(it.e0)} <em class="pb-over">+${fmtDur((nowMin - it.e0) * 60e3)}</em>`;
         const moving = drag.active?.kind === 'move' && !drag.active.copy && drag.active.plan?.id === it.p.id;
-        return `<div class="plan-block${done ? ' done' : ''}${running ? ' running' : ''}${moving ? ' dragging' : ''}${it.p.live ? ' is-live' : ''}${it.p.prep ? ' prep' : ''}${grow}" data-action="open-plan" data-id="${it.p.id}" style="${boxStyle(it)};--c:${colorOf(t.projectId)}${split}"${it.p.prep || it.p.eval ? ` title="${[it.p.prep ? 'Préparé' : '', it.p.eval ? 'Éval' : ''].filter(Boolean).join(' · ')}"` : ''}>
-          ${it.p.prep ? '<i class="pb-prep" aria-hidden="true"></i>' : ''}${done ? `<i class="pb-done" aria-hidden="true">${ICON.check}</i>` : ''}<b>${it.p.eval ? '<span class="pb-eval" aria-label="Éval">📝</span>' : ''}${t.starred ? '★ ' : ''}${esc(t.title)}</b>${it.p.note ? `<small class="pb-note">${esc(it.p.note)}</small>` : ''}<span>${done ? 'Fait · ' : it.p.series ? '↻ ' : ''}${when}${spent ? `<em class="pb-spent"> · ⏱ ${fmtDur(spent)}</em>` : ''}</span>
+        return `<div class="plan-block${done ? ' done' : ''}${running ? ' running' : ''}${moving ? ' dragging' : ''}${it.p.live ? ' is-live' : ''}${it.p.prep ? ' prep' : ''}${it.p.eval ? ' eval' : ''}${grow}" data-action="open-plan" data-id="${it.p.id}" style="${boxStyle(it)};--c:${colorOf(t.projectId)}${split}"${it.p.prep || it.p.eval ? ` title="${[it.p.prep ? 'Préparé' : '', it.p.eval ? 'Éval' : ''].filter(Boolean).join(' · ')}"` : ''}>
+          ${done ? `<i class="pb-done" aria-hidden="true">${ICON.check}</i>` : ''}<b>${it.p.eval ? '<span class="pb-eval">ÉVAL</span>' : ''}${t.starred ? '★ ' : ''}${esc(t.title)}</b>${it.p.note ? `<small class="pb-note">${esc(it.p.note)}</small>` : ''}<span>${done ? 'Fait · ' : it.p.series ? '↻ ' : ''}${when}${spent ? `<em class="pb-spent"> · ⏱ ${fmtDur(spent)}</em>` : ''}</span>
           <i class="plan-resize" aria-hidden="true"></i></div>`;
       }).join('')}
       ${key === today && nowMin >= VIEW_START ? `<div class="now-line" style="top:${posPct(nowMin)}%"></div>` : ''}
@@ -4086,7 +4086,7 @@ function openPlanSheet(id) {
     </button>
     ${flags ? `<div class="plan-flags">
       <label class="pf-flag prep"><input type="checkbox" name="prep"${p.prep ? ' checked' : ''}><span>${ICON.check} Préparé</span></label>
-      <label class="pf-flag evl"><input type="checkbox" name="evl"${p.eval ? ' checked' : ''}><span>📝 Éval</span></label>
+      <label class="pf-flag evl"><input type="checkbox" name="evl"${p.eval ? ' checked' : ''}><span><b class="eval-tag">ÉVAL</b> Éval</span></label>
     </div>${corrLine}` : ''}
     ${fields}
     ${p.allDay ? '' : repEdit(p, series)}
@@ -4121,7 +4121,7 @@ function openCorrSheet(planId) {
   const what = p.note && /(é|e)val|qcm|\bds\b|contr(ô|o)le|dissert/i.test(p.note) ? p.note : 'éval';
   const title = `Correction ${what} · ${t.title} (${fmt(parseYmd(day), { day: '2-digit', month: '2-digit' })})`;
   openSheet(`<form class="sheet-body corr-sheet" data-form="corr" data-plan="${p.id}" autocomplete="off">
-    ${head('📝 Plage de correction')}
+    ${head('Plage de correction')}
     <p class="hint" style="margin-top:0">Éval de <b>${esc(t.title)}</b> · ${esc(dShort(day))}${p.note ? ` · ${esc(p.note)}` : ''}. La tâche de correction est créée, puis tu touches un créneau du planning pour la placer.</p>
     <label class="field"><span>Tâche</span><input name="title" value="${esc(title)}" maxlength="120" required></label>
     ${subs.length ? `<label class="field"><span>Rangée dans</span><select name="sub">
@@ -6036,8 +6036,6 @@ function viewToday() {
     const spent = dayTracked(t.id, day);
     const editing = temp.dlEdit === p.id && !done;
     const meta = [
-      p.eval ? '<span class="dl-eval">📝 Éval</span>' : '',
-      p.prep && !done ? '<span class="dl-prep">✓ Préparé</span>' : '',
       p.note ? `<b class="dl-note">${esc(p.note)}</b>` : '',
       i.live ? `<em class="dl-live">${i.moved ? 'en cours' : `+${fmtDur(Math.max(0, i.over) * 60e3)}`}</em>` : `<span>${p.series ? '↻ ' : ''}${fmtDur(dur * 60e3)}</span>`,
       t.projectId ? `<span class="dl-proj"><i></i>${esc(getSub(t.subprojectId)?.name || getProject(t.projectId)?.name || '')}</span>` : '',
@@ -6045,12 +6043,12 @@ function viewToday() {
       spent || running ? `<span class="dl-spent">${ICON.clock}${liveDur(spent, isToday ? sinceOf(t.id) : [])}</span>` : '',
     ].filter(Boolean).join('');
     const prog = cur && !i.live ? `<i class="dl-prog" style="width:${Math.round(((nm - i.s) / Math.max(1, i.e - i.s)) * 100)}%"></i>` : '';
-    return `${pre}<li class="dl-row is-slot${done ? ' done' : ''}${cur ? ' current' : ''}${late ? ' late' : ''}${editing ? ' editing' : ''}" data-id="${p.id}" data-kind="plan"${done || running ? '' : ' data-drag="1"'} style="--c:${colorOf(t.projectId)}">
+    return `${pre}<li class="dl-row is-slot${done ? ' done' : ''}${cur ? ' current' : ''}${late ? ' late' : ''}${editing ? ' editing' : ''}${p.prep ? ' prep' : ''}${p.eval ? ' eval' : ''}" data-id="${p.id}" data-kind="plan"${done || running ? '' : ' data-drag="1"'} style="--c:${colorOf(t.projectId)}">
       <button type="button" class="dl-time" data-action="dl-edit" data-id="${p.id}"${done ? ' disabled' : ''} aria-label="Changer l’horaire"><b>${minLabel(i.s)}</b><small>${minLabel(i.live ? Math.min(i.e, DAY_MIN) : i.e)}</small></button>
       <div class="day-card dl-card${running ? ' running' : ''}">
         <button type="button" class="check" data-action="today-done" data-kind="plan" data-id="${p.id}" aria-label="${done ? 'Annuler la validation' : 'Valider'}">${ICON.check}</button>
         <div class="dl-main" role="button" tabindex="0" data-action="open-plan" data-id="${p.id}">
-          <div class="day-title">${t.starred ? '★ ' : ''}${esc(t.title)}</div>
+          <div class="day-title">${p.eval ? '<span class="eval-tag">ÉVAL</span>' : ''}<span class="dl-name">${t.starred ? '★ ' : ''}${esc(t.title)}</span></div>
           <div class="dl-meta">${meta}</div>
         </div>
         ${done ? '' : `<button type="button" class="dl-play${running ? ' on' : ''}" data-action="toggle-timer" data-id="${t.id}" aria-label="${running ? 'Arrêter' : 'Lancer le chrono'}">${running ? ICON.stop : ICON.play}</button>`}

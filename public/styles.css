@@ -2112,22 +2112,36 @@ body.dd-edge-prev .dd-edge.prev span, body.dd-edge-next .dd-edge.next span { opa
 .jr-total.none { color: var(--muted); font-weight: 600; }
 
 /* Cours : préparé (bandeau vert en haut du bloc) et éval (📝) */
-.pb-prep { position: absolute; left: 0; right: 0; top: 0; height: 4px; background: #22c55e; box-shadow: 0 1px 0 rgba(255, 255, 255, .6); pointer-events: none; }
-.plan-block.prep { padding-top: 5px; }
-.cal.is-day .plan-block.prep { padding-top: 8px; }
-.plan-block .pb-eval { display: inline; margin-right: 3px; font-size: inherit; opacity: 1; white-space: normal; }
-.dl-prep { color: var(--run); font-weight: 750; }
-.dl-eval { font-weight: 750; color: color-mix(in srgb, var(--late) 85%, var(--text)); }
+/* Préparé : le nom du cours sur un bandeau vert, d'un bord à l'autre du bloc */
+.plan-block.prep > b { margin: -3px -5px 2px; padding: 3px 5px; background: #16a34a; color: #fff; box-shadow: 0 1px 0 rgba(0, 0, 0, .12); }
+.cal:not(.is-day) .plan-block.prep > b { margin: -2px -2px 2px -3px; padding: 3px 3px 3px 4px; }
+.cal.is-day .plan-block.prep > b { margin: -5px -8px 3px; padding: 5px 8px; }
+.plan-block.prep > b::before { content: "✓ "; font-weight: 900; }
+/* Éval : étiquette jaune ÉVAL devant le nom et liseré jaune autour du bloc */
+.plan-block .pb-eval, .eval-tag {
+  display: inline-block; margin: 0 4px 1px 0; padding: 0 4px; border-radius: 4px; background: #facc15; color: #1f2937;
+  font-size: 9px; font-weight: 900; letter-spacing: .05em; line-height: 14px; vertical-align: 1px; opacity: 1; white-space: nowrap; text-decoration: none;
+}
+.cal.is-day .plan-block .pb-eval { font-size: 10.5px; line-height: 17px; padding: 0 6px; }
+.plan-block.eval { box-shadow: inset 0 0 0 2px #facc15, 0 1px 4px rgba(15, 15, 30, .22); }
+.plan-block.eval.running { box-shadow: inset 0 0 0 2px #facc15, 0 0 0 2px var(--run); }
+/* Déroulé du jour : les mêmes repères */
+.dl-row.prep:not(.done) .dl-name { display: inline; padding: 1px 7px; border-radius: 6px; background: #16a34a; color: #fff; -webkit-box-decoration-break: clone; box-decoration-break: clone; }
+.dl-row.prep:not(.done) .dl-name::before { content: "✓ "; font-weight: 900; }
+.dl-row .eval-tag { font-size: 10.5px; line-height: 18px; padding: 0 6px; vertical-align: 1px; }
+.dl-row.eval:not(.done) .dl-card { border-color: #eab308; box-shadow: inset 3px 0 0 var(--c), 0 0 0 1px #eab308; }
 .plan-flags { display: flex; gap: 8px; margin: -2px 0 12px; }
 .pf-flag { position: relative; flex: 1; }
 .pf-flag input { position: absolute; left: 0; top: 0; width: 1px; height: 1px; margin: 0; opacity: 0; pointer-events: none; }
 .pf-flag span { display: flex; align-items: center; justify-content: center; gap: 6px; height: 42px; border-radius: 12px; border: 1.5px solid var(--line); background: var(--card-2); font-size: 14.5px; font-weight: 750; color: var(--muted); cursor: pointer; transition: background .15s, border-color .15s, color .15s; }
 .pf-flag span svg { width: 16px; height: 16px; }
 .pf-flag.prep input:checked + span { background: var(--run-soft); border-color: var(--run); color: var(--run); }
-.pf-flag.evl input:checked + span { background: var(--late-soft); border-color: var(--late); color: var(--late); }
+.pf-flag.evl input:checked + span { background: color-mix(in srgb, #facc15 24%, var(--card)); border-color: #eab308; color: var(--text); }
+.pf-flag .eval-tag { margin: 0; font-size: 10.5px; line-height: 18px; padding: 0 6px; }
+.pf-flag.prep input:checked + span { background: #16a34a; border-color: #16a34a; color: #fff; }
 .pf-flag input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
-.corr-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: -4px 0 14px; padding: 9px 10px 9px 12px; border-radius: 12px; background: var(--late-soft); font-size: 13.5px; font-weight: 600; }
-.corr-line > span { color: color-mix(in srgb, var(--late) 80%, var(--text)); }
+.corr-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: -4px 0 14px; padding: 9px 10px 9px 12px; border-radius: 12px; background: color-mix(in srgb, #facc15 16%, var(--card)); border: 1px solid color-mix(in srgb, #eab308 45%, transparent); font-size: 13.5px; font-weight: 600; }
+.corr-line > span { color: var(--text); }
 .corr-task { font-weight: 750; text-align: left; text-decoration: underline; text-underline-offset: 2px; }
 .corr-line small { color: var(--muted); font-weight: 600; }
 .corr-line .btn { margin-left: auto; }
